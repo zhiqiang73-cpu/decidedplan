@@ -1,0 +1,81 @@
+# 币安交易所配置文件 -- ETHUSDT 永续合约
+# 用于历史数据下载器 (python run_downloader.py --symbol ETHUSDT)
+
+exchanges:
+  binance:
+    # API基础URL
+    base_url: "https://fapi.binance.com"
+
+    # API端点配置 (与 BTC 完全相同，symbol 由 download 节控制)
+    endpoints:
+      klines:
+        path: "/fapi/v1/klines"
+        weight: 1
+        limit: 1500
+        params:
+          interval: "1m"
+        description: "1分钟K线数据"
+
+      agg_trades:
+        path: "/fapi/v1/aggTrades"
+        weight: 1
+        limit: 1000
+        description: "聚合交易数据（逐笔成交）"
+
+      funding_rate:
+        path: "/fapi/v1/fundingRate"
+        weight: 1
+        limit: 1000
+        description: "资金费率历史（每8小时结算）"
+
+      open_interest:
+        path: "/futures/data/openInterestHist"
+        weight: 1
+        limit: 500
+        params:
+          period: "5m"
+        description: "持仓量历史（5分钟）"
+
+      long_short_ratio:
+        path: "/futures/data/globalLongShortAccountRatio"
+        weight: 1
+        limit: 500
+        params:
+          period: "5m"
+        description: "多空持仓比（5分钟）"
+
+      taker_ratio:
+        path: "/futures/data/takerlongshortRatio"
+        weight: 1
+        limit: 500
+        params:
+          period: "5m"
+        description: "主动买卖比（5分钟）"
+
+    # 限流配置
+    rate_limits:
+      requests_per_minute: 1200
+      safety_margin: 0.95
+
+    # 下载配置
+    download:
+      symbol: "ETHUSDT"
+      start_date: "2024-09-17T00:00:00Z"
+      end_date: "2026-03-28T00:00:00Z"
+      max_concurrent: 10
+      timeout_seconds: 30
+      max_retries: 5
+
+    # 存储配置 -- ETH 数据放在独立子目录，不与 BTC 数据混用
+    storage:
+      base_path: "data/storage/ETHUSDT"
+      cache_path: "data/cache/ETHUSDT"
+      checkpoint_file: "checkpoints_eth.json"
+      partition_by_date: true
+      compression: "snappy"
+      row_group_size: 100000
+
+    # 日志配置
+    logging:
+      level: "INFO"
+      file: "logs/downloader_eth.log"

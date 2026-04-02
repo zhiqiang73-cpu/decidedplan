@@ -1,0 +1,124 @@
+[
+  {
+    "id": 1,
+    "category": "管道回测",
+    "title": "建立 run_pipeline_backtest.py + 首次完整回测",
+    "description": "逐 bar 重放 SignalRunner，含 MFE/MAE，验证系统信号管道的真实盈亏",
+    "status": "completed",
+    "priority": "critical",
+    "layer": "backtest",
+    "sortOrder": 1,
+    "completedAt": "2026-03-22T00:00:00Z"
+  },
+  {
+    "id": 2,
+    "category": "管道回测",
+    "title": "管道回测结论：Maker费有正期望，确认走限价单路线（分岔A）",
+    "description": "Taker 费负期望，Maker 费 P2 + QUIET_TREND 有正期望 +0.036%~+0.065%。系统只能用限价单执行。",
+    "status": "completed",
+    "priority": "critical",
+    "layer": "backtest",
+    "sortOrder": 2,
+    "completedAt": "2026-03-22T12:00:00Z"
+  },
+  {
+    "id": 3,
+    "category": "管道回测",
+    "title": "重跑含 P1-6 的 backtest（完整 P1-6 信号集）",
+    "description": "在原 backtest 中加入 bottom_volume_drought (P1-6) 信号，重新跑结论",
+    "status": "in_progress",
+    "priority": "high",
+    "layer": "backtest",
+    "sortOrder": 3
+  },
+  {
+    "id": 4,
+    "category": "执行层",
+    "title": "限价单执行引擎开发（模拟盘）",
+    "description": "被动限价单 → 12s超时 → IOC补单，两次尝试后放弃。接入 Binance 测试网。",
+    "status": "in_progress",
+    "priority": "critical",
+    "layer": "execution",
+    "sortOrder": 4
+  },
+  {
+    "id": 5,
+    "category": "执行层",
+    "title": "成交率验证：目标 ≥ 70%（当前 62%）",
+    "description": "统计 not_filled vs filled 比例，调整 ENTRY_OFFSET 参数以提升成交率",
+    "status": "in_progress",
+    "priority": "high",
+    "layer": "execution",
+    "sortOrder": 5
+  },
+  {
+    "id": 6,
+    "category": "执行层",
+    "title": "Smart Exit 接入实盘（outcome_tracker 集成）",
+    "description": "MFE/MAE 实时追踪，shadow hard-stop 0.3%，profit_protect 动态出场",
+    "status": "pending",
+    "priority": "high",
+    "layer": "execution",
+    "sortOrder": 6
+  },
+  {
+    "id": 7,
+    "category": "α引擎",
+    "title": "run_shadow_exit_audit.py：fixed-hold vs smart-exit 对比",
+    "description": "对比固定 hold bars 与智能出场的收益差异，验证 smart exit 是否值得部署",
+    "status": "pending",
+    "priority": "medium",
+    "layer": "alpha",
+    "sortOrder": 7
+  },
+  {
+    "id": 8,
+    "category": "α引擎",
+    "title": "Alpha 候选审批：vwap_deviation + volume_acceleration (OOS=80%)",
+    "description": "pending_rules 中发现 OOS胜率 80% 的候选规则，等待审批后接入执行",
+    "status": "pending",
+    "priority": "high",
+    "layer": "alpha",
+    "sortOrder": 8
+  },
+  {
+    "id": 9,
+    "category": "UI对接",
+    "title": "前后端全对接：Python系统数据接入 Node.js Dashboard",
+    "description": "移除所有假数据，接入 system_state.json / trades.csv / alerts.log / *.json",
+    "status": "in_progress",
+    "priority": "high",
+    "layer": "ui",
+    "sortOrder": 9
+  },
+  {
+    "id": 10,
+    "category": "UI对接",
+    "title": "Binance 测试网交易记录与 UI 交易历史页面核对",
+    "description": "本地 trades.csv + Binance /fapi/v1/allOrders 双向核对，确保无遗漏",
+    "status": "pending",
+    "priority": "medium",
+    "layer": "ui",
+    "sortOrder": 10
+  },
+  {
+    "id": 11,
+    "category": "结论报告",
+    "title": "Day 3：输出最终结论报告",
+    "description": "汇总：管道回测结论 + 执行层验证结果 + α候选评估 + 下一步建议",
+    "status": "pending",
+    "priority": "high",
+    "layer": "report",
+    "sortOrder": 11
+  },
+  {
+    "id": 12,
+    "category": "数据质量",
+    "title": "OI / LSR 历史数据补充（当前仅26天）",
+    "description": "open_interest 和 long_short_ratio 历史覆盖不足，POSITIONING 特征在 95% 历史上未验证",
+    "status": "blocked",
+    "priority": "medium",
+    "layer": "data",
+    "sortOrder": 12
+  }
+]

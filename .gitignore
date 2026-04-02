@@ -1,0 +1,38 @@
+# Secrets
+.env
+*.env.local
+
+# Python cache / tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# JS dependencies
+tools/reporting/node_modules/
+node_modules/
+
+# Runtime outputs
+logs/
+monitor/output/
+execution/logs/
+alpha/output/
+tests/_tmp/
+scratch/
+*.log
+
+# Local data / cache
+data/cache/
+data/storage/
+
+# Local runtime experiments
+.deps/
+.deps314/
+tmp_py313_runtime/
+tmp_py313_runtime_nodll2/
+compat_py313_stdlib/
+
+# Claude local settings
+.claude/
+.claude/worktrees/

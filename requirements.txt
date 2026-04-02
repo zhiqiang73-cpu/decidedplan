@@ -1,0 +1,24 @@
+# 币安历史数据下载器 - 依赖库
+
+# 异步HTTP客户端
+aiohttp>=3.9.0
+
+# Parquet引擎
+pyarrow>=14.0.0
+
+# 数据处理
+pandas>=2.1.0
+numpy>=1.24.0
+
+# 配置解析
+pyyaml>=6.0
+
+# 进度条
+tqdm>=4.66.0
+
+# 日期时间处理
+python-dateutil>=2.8.0
+
+# WebSocket (ws_collector.py 使用 aiohttp 内置 WS 支持，无需额外依赖)
+# aiohttp WebSocket client 已包含在 aiohttp>=3.9.0 中
+websockets>=12.0

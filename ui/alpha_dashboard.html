@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Alpha 引擎 · 力库驾驶舱</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
+    --border: #30363d; --text: #c9d1d9; --muted: #8b949e;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922;
+    --blue: #58a6ff; --purple: #bc8cff; --orange: #ffa657;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, monospace; font-size: 13px; }
+  a { color: var(--blue); text-decoration: none; }
+
+  /* Layout */
+  .layout { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  .sidebar { background: var(--bg2); border-right: 1px solid var(--border); padding: 16px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+  .main { padding: 20px; overflow-y: auto; }
+
+  /* Sidebar */
+  .brand { font-size: 15px; font-weight: 700; color: var(--blue); margin-bottom: 20px; }
+  .brand small { display: block; color: var(--muted); font-size: 11px; font-weight: 400; }
+  .nav-item { padding: 8px 10px; border-radius: var(--radius); cursor: pointer; color: var(--muted); margin-bottom: 2px; transition: all .15s; }
+  .nav-item:hover, .nav-item.active { background: var(--bg3); color: var(--text); }
+  .nav-item .badge { float: right; background: var(--bg3); border-radius: 10px; padding: 0 6px; font-size: 11px; }
+  .nav-item.active .badge { background: var(--blue); color: #000; }
+  .divider { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
+  /* Engine status card */
+  .status-card { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 12px; }
+  .status-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .dot-idle { background: var(--muted); }
+  .dot-running { background: var(--green); animation: pulse 1s infinite; }
+  .dot-error { background: var(--red); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  .metric { text-align: center; }
+  .metric-value { font-size: 22px; font-weight: 700; }
+  .metric-label { color: var(--muted); font-size: 11px; }
+  .metrics-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; margin-top: 8px; }
+
+  /* Main content */
+  .page { display: none; }
+  .page.active { display: block; }
+  h2 { font-size: 16px; margin-bottom: 16px; color: var(--text); }
+  h3 { font-size: 13px; margin-bottom: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+
+  /* Cards */
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 10px; }
+  .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+  .card-title { font-family: monospace; font-size: 12px; color: var(--text); flex: 1; }
+  .tag { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-left: 6px; }
+  .tag-long { background: #1c3a20; color: var(--green); }
+  .tag-short { background: #3a1c1c; color: var(--red); }
+  .tag-approved { background: #1c3a20; color: var(--green); }
+  .tag-pending { background: #3a3010; color: var(--yellow); }
+  .tag-review { background: #1c2c3a; color: var(--blue); }
+  .tag-rejected { background: #3a1c1c; color: var(--red); }
+  .card-meta { display: flex; gap: 14px; color: var(--muted); font-size: 11px; margin-bottom: 8px; }
+  .card-meta span { white-space: nowrap; }
+  .card-meta .highlight { color: var(--text); font-weight: 600; }
+
+  /* LLM reasoning block */
+  .llm-block { background: var(--bg3); border-radius: 6px; padding: 10px; margin-top: 8px; }
+  .llm-block-title { color: var(--purple); font-size: 11px; font-weight: 700; margin-bottom: 6px; }
+  .llm-field { margin-bottom: 5px; }
+  .llm-field-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; }
+  .llm-field-value { color: var(--text); font-size: 12px; line-height: 1.5; }
+  .conf-bar { height: 4px; background: var(--bg); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+  .conf-fill { height: 100%; border-radius: 2px; transition: width .3s; }
+
+  /* Buttons */
+  .btn { display: inline-block; padding: 5px 12px; border-radius: 6px; border: none; cursor: pointer; font-size: 12px; font-weight: 600; transition: opacity .15s; }
+  .btn:hover { opacity: .85; }
+  .btn-approve { background: var(--green); color: #000; }
+  .btn-reject { background: var(--red); color: #fff; }
+  .btn-primary { background: var(--blue); color: #000; }
+  .btn-sm { padding: 3px 8px; font-size: 11px; }
+  .btn-actions { display: flex; gap: 6px; margin-top: 10px; }
+
+  /* Force library */
+  .force-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+  .force-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+  .force-cat { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+  .force-name { font-size: 13px; font-weight: 700; color: var(--orange); margin-bottom: 6px; }
+  .force-essence { color: var(--text); font-size: 12px; line-height: 1.5; margin-bottom: 6px; }
+  .force-validated { font-size: 11px; color: var(--muted); }
+  .force-validated span { color: var(--green); font-weight: 600; }
+
+  /* Config */
+  .config-form { max-width: 560px; }
+  .form-group { margin-bottom: 14px; }
+  .form-label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; text-transform: uppercase; letter-spacing: .5px; }
+  .form-input { width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px 10px; font-size: 13px; outline: none; }
+  .form-input:focus { border-color: var(--blue); }
+  .form-hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+  /* Recent decisions */
+  .decision-list { font-size: 12px; }
+  .decision-item { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); align-items: center; }
+  .decision-item:last-child { border-bottom: none; }
+  .decision-badge { min-width: 110px; text-align: center; }
+  .decision-rule { color: var(--muted); flex: 1; font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .decision-conf { min-width: 50px; text-align: right; color: var(--muted); }
+  .decision-time { min-width: 60px; text-align: right; color: var(--bg3); font-size: 10px; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 2px; margin-bottom: 14px; background: var(--bg2); border-radius: var(--radius); padding: 3px; width: fit-content; }
+  .tab { padding: 5px 14px; border-radius: 6px; cursor: pointer; color: var(--muted); transition: all .15s; }
+  .tab.active { background: var(--bg3); color: var(--text); }
+
+  /* Empty */
+  .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+
+  /* Refresh btn */
+  .refresh-btn { float: right; background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 11px; }
+  .refresh-btn:hover { border-color: var(--blue); color: var(--blue); }
+
+  /* Toast */
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 16px; color: var(--text); font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 999; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div class="layout">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="brand">
+      Alpha 引擎
+      <small>力库驾驶舱 · BTC USDT Perp</small>
+    </div>
+
+    <div class="status-card" id="engine-status-card">
+      <div class="status-row">
+        <span><span class="status-dot dot-idle" id="status-dot"></span><span id="status-text">加载中...</span></span>
+        <button class="btn btn-sm btn-primary" onclick="triggerRunNow()">立即运行</button>
+      </div>
+      <div style="color:var(--muted);font-size:11px;margin-top:4px;">
+        <div>上次运行: <span id="last-run-text">—</span></div>
+        <div>下次运行: <span id="next-run-text">—</span></div>
+      </div>
+      <div class="metrics-row">
+        <div class="metric">
+          <div class="metric-value" id="metric-pending" style="color:var(--yellow)">—</div>
+          <div class="metric-label">待审</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value" id="metric-review" style="color:var(--blue)">—</div>
+          <div class="metric-label">审查</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value" id="metric-approved" style="color:var(--green)">—</div>
+          <div class="metric-label">已批准</div>
+        </div>
+      </div>
+    </div>
+
+    <hr class="divider">
+
+    <div class="nav-item active" onclick="showPage('pending', this)">
+      待验证候选 <span class="badge" id="nav-badge-pending">0</span>
+    </div>
+    <div class="nav-item" onclick="showPage('review', this)">
+      人工审查队列 <span class="badge" id="nav-badge-review">0</span>
+    </div>
+    <div class="nav-item" onclick="showPage('approved', this)">
+      已批准策略 <span class="badge" id="nav-badge-approved">0</span>
+    </div>
+    <div class="nav-item" onclick="showPage('force-library', this)">
+      力库
+    </div>
+    <div class="nav-item" onclick="showPage('decisions', this)">
+      决策历史
+    </div>
+
+    <hr class="divider">
+
+    <div class="nav-item" onclick="showPage('config', this)">
+      LLM 配置
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+
+    <!-- Pending page -->
+    <div class="page active" id="page-pending">
+      <h2>待 LLM 验证候选 <button class="refresh-btn" onclick="loadAll()">刷新</button></h2>
+      <div id="pending-list"><div class="empty">加载中...</div></div>
+    </div>
+
+    <!-- Review page -->
+    <div class="page" id="page-review">
+      <h2>人工审查队列 <button class="refresh-btn" onclick="loadAll()">刷新</button></h2>
+      <p style="color:var(--muted);margin-bottom:14px;font-size:12px;">LLM 置信度在 70%~92% 之间，建议人工判断后再批准或拒绝。</p>
+      <div id="review-list"><div class="empty">加载中...</div></div>
+    </div>
+
+    <!-- Approved page -->
+    <div class="page" id="page-approved">
+      <h2>已批准策略 <button class="refresh-btn" onclick="loadAll()">刷新</button></h2>
+      <div id="approved-list"><div class="empty">加载中...</div></div>
+    </div>
+
+    <!-- Force Library page -->
+    <div class="page" id="page-force-library">
+      <h2>力库 · MECHANISM_CATALOG</h2>
+      <p style="color:var(--muted);margin-bottom:14px;font-size:12px;">已验证的物理机制，是 LLM 进行因果验证的背景知识库。</p>
+      <div id="force-grid" class="force-grid"><div class="empty">加载中...</div></div>
+    </div>
+
+    <!-- Decisions page -->
+    <div class="page" id="page-decisions">
+      <h2>最近决策历史 <button class="refresh-btn" onclick="loadAll()">刷新</button></h2>
+      <div id="decisions-list"><div class="empty">加载中...</div></div>
+    </div>
+
+    <!-- Config page -->
+    <div class="page" id="page-config">
+      <h2>LLM 引擎配置</h2>
+      <div class="config-form card">
+        <div class="form-group">
+          <label class="form-label">API Key</label>
+          <input class="form-input" id="cfg-api-key" type="password" placeholder="sk-...">
+          <div class="form-hint">当前: <span id="cfg-key-hint">—</span></div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Base URL</label>
+          <input class="form-input" id="cfg-base-url" placeholder="https://coding.dashscope.aliyuncs.com/v1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">模型</label>
+          <input class="form-input" id="cfg-model" placeholder="kimi-k2.5">
+        </div>
+        <div class="form-group">
+          <label class="form-label">自动批准阈值（置信度 ≥）</label>
+          <input class="form-input" id="cfg-auto-approve" type="number" min="0" max="1" step="0.01" placeholder="0.92">
+          <div class="form-hint">默认 0.92 — 超过此值自动写入 approved_rules.json</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">人工审查阈值（置信度 ≥）</label>
+          <input class="form-input" id="cfg-review-queue" type="number" min="0" max="1" step="0.01" placeholder="0.70">
+          <div class="form-hint">低于自动批准但高于此值 → 进入人工审查队列</div>
+        </div>
+        <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '';  // 同源
+
+// ── 工具函数 ─────────────────────────────────────────────────────────────────
+function showPage(name, el) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  if (el) el.classList.add('active');
+}
+
+function toast(msg, duration=2500) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), duration);
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+  } catch { return iso.slice(0,16); }
+}
+
+function confColor(c) {
+  if (c >= 0.92) return 'var(--green)';
+  if (c >= 0.70) return 'var(--yellow)';
+  return 'var(--red)';
+}
+
+function dirTag(dir) {
+  return `<span class="tag tag-${dir}">${dir.toUpperCase()}</span>`;
+}
+
+function decisionTag(d) {
+  const map = {
+    'AUTO_APPROVED': ['tag-approved','自动批准'],
+    'REVIEW_QUEUE':  ['tag-review','进入审查'],
+    'AUTO_REJECTED': ['tag-rejected','自动拒绝'],
+    'HUMAN_APPROVED':['tag-approved','人工批准'],
+    'HUMAN_REJECTED':['tag-rejected','人工拒绝'],
+  };
+  const [cls, label] = map[d] || ['tag-pending', d];
+  return `<span class="tag ${cls} decision-badge">${label}</span>`;
+}
+
+// ── API 调用 ──────────────────────────────────────────────────────────────────
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  return r.json();
+}
+
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body),
+  });
+  return r.json();
+}
+
+// ── 渲染候选卡片 ──────────────────────────────────────────────────────────────
+function renderCandidateCard(rule, showActions=false, isReview=false) {
+  const entry = rule.entry || {};
+  const stats = rule.stats || {};
+  const llm = rule.llm_result || null;
+  const combo = (rule.combo_conditions || [])[0] || null;
+
+  const wr = (stats.oos_win_rate || 0).toFixed(1);
+  const pf = (stats.oos_pf || 0).toFixed(2);
+  const ret = ((stats.oos_avg_ret || stats.oos_net_return || 0) * 100).toFixed(3);
+  const nOos = stats.n_oos || 0;
+  const dir = entry.direction || '?';
+
+  let llmBlock = '';
+  if (llm) {
+    const conf = (llm.confidence || 0);
+    const confPct = (conf * 100).toFixed(0);
+    const fillColor = confColor(conf);
+    llmBlock = `
+      <div class="llm-block">
+        <div class="llm-block-title">LLM 物理验证 · ${llm.mechanism_display_name || llm.mechanism_type || ''}</div>
+        <div class="conf-bar"><div class="conf-fill" style="width:${confPct}%;background:${fillColor}"></div></div>
+        <div style="text-align:right;font-size:11px;color:${fillColor};margin-bottom:6px">${confPct}% 置信度</div>
+        ${llm.physics && llm.physics.essence ? `
+        <div class="llm-field">
+          <div class="llm-field-label">力的本质</div>
+          <div class="llm-field-value">${llm.physics.essence}</div>
+        </div>` : ''}
+        ${llm.entry_narrative ? `
+        <div class="llm-field">
+          <div class="llm-field-label">入场叙事</div>
+          <div class="llm-field-value">${llm.entry_narrative}</div>
+        </div>` : ''}
+        ${llm.primary_decay && llm.primary_decay.narrative ? `
+        <div class="llm-field">
+          <div class="llm-field-label">力的衰竭</div>
+          <div class="llm-field-value">${llm.primary_decay.narrative}</div>
+        </div>` : ''}
+        ${llm.rejection_reason ? `
+        <div class="llm-field">
+          <div class="llm-field-label" style="color:var(--red)">拒绝原因</div>
+          <div class="llm-field-value" style="color:var(--red)">${llm.rejection_reason}</div>
+        </div>` : ''}
+      </div>`;
+  }
+
+  const comboStr = combo
+    ? `<span>确认: <span class="highlight">${combo.feature} ${combo.op} ${combo.threshold}</span></span>`
+    : '';
+
+  const actions = showActions ? `
+    <div class="btn-actions">
+      <button class="btn btn-approve btn-sm" onclick="approveRule('${rule.id}')">✓ 批准</button>
+      <button class="btn btn-reject btn-sm" onclick="rejectRule('${rule.id}')">✗ 拒绝</button>
+    </div>` : '';
+
+  return `
+    <div class="card" id="card-${rule.id}">
+      <div class="card-header">
+        <div class="card-title">${rule.rule_str || rule.id}</div>
+        ${dirTag(dir)}
+      </div>
+      <div class="card-meta">
+        <span>OOS胜率: <span class="highlight">${wr}%</span></span>
+        <span>PF: <span class="highlight">${pf}</span></span>
+        <span>n: <span class="highlight">${nOos}</span></span>
+        <span>发现: ${fmtTime(rule.discovered_at)}</span>
+        ${comboStr}
+      </div>
+      ${llmBlock}
+      ${actions}
+    </div>`;
+}
+
+// ── 加载全部数据 ──────────────────────────────────────────────────────────────
+async function loadAll() {
+  const [state, pending, review, approved] = await Promise.all([
+    fetchJSON('/api/state'),
+    fetchJSON('/api/pending'),
+    fetchJSON('/api/review'),
+    fetchJSON('/api/approved'),
+  ]);
+
+  // 更新状态卡
+  updateStatusCard(state);
+
+  // 更新徽章
+  document.getElementById('nav-badge-pending').textContent = pending.length;
+  document.getElementById('nav-badge-review').textContent = review.length;
+  document.getElementById('nav-badge-approved').textContent = approved.length;
+
+  // 渲染页面
+  renderPending(pending);
+  renderReview(review);
+  renderApproved(approved);
+  renderForceLibrary(state.force_library_summary || []);
+  renderDecisions(state.recent_decisions || []);
+
+  // 配置页
+  const lcfg = state.llm_config || {};
+  if (lcfg.api_key_hint) document.getElementById('cfg-key-hint').textContent = lcfg.api_key_hint;
+  if (lcfg.base_url) document.getElementById('cfg-base-url').value = lcfg.base_url;
+  if (lcfg.model) document.getElementById('cfg-model').value = lcfg.model;
+  const thr = state.thresholds || {};
+  if (thr.auto_approve) document.getElementById('cfg-auto-approve').value = thr.auto_approve;
+  if (thr.review_queue) document.getElementById('cfg-review-queue').value = thr.review_queue;
+}
+
+function updateStatusCard(state) {
+  const status = state.status || 'idle';
+  const dot = document.getElementById('status-dot');
+  dot.className = 'status-dot dot-' + status;
+  document.getElementById('status-text').textContent = {idle:'空闲', running:'运行中', error:'错误'}[status] || status;
+  document.getElementById('last-run-text').textContent = fmtTime(state.last_run_at);
+  document.getElementById('next-run-text').textContent = fmtTime(state.next_run_at);
+
+  const stats = state.stats || {};
+  document.getElementById('metric-pending').textContent = stats.pending_count ?? '—';
+  document.getElementById('metric-review').textContent = stats.review_count ?? '—';
+  document.getElementById('metric-approved').textContent = stats.approved_count ?? '—';
+}
+
+function renderPending(rules) {
+  const el = document.getElementById('pending-list');
+  const unvalidated = rules.filter(r => !r.llm_validated);
+  const validated = rules.filter(r => r.llm_validated);
+  if (!rules.length) { el.innerHTML = '<div class="empty">暂无待验证候选</div>'; return; }
+  let html = '';
+  if (unvalidated.length) {
+    html += `<h3>未验证（${unvalidated.length} 条）</h3>`;
+    html += unvalidated.map(r => renderCandidateCard(r, false)).join('');
+  }
+  if (validated.length) {
+    html += `<h3 style="margin-top:16px">已验证待批准（${validated.length} 条）</h3>`;
+    html += validated.map(r => renderCandidateCard(r, true)).join('');
+  }
+  el.innerHTML = html;
+}
+
+function renderReview(rules) {
+  const el = document.getElementById('review-list');
+  if (!rules.length) { el.innerHTML = '<div class="empty">审查队列为空</div>'; return; }
+  el.innerHTML = rules.map(r => renderCandidateCard(r, true, true)).join('');
+}
+
+function renderApproved(rules) {
+  const el = document.getElementById('approved-list');
+  if (!rules.length) { el.innerHTML = '<div class="empty">暂无已批准策略</div>'; return; }
+  // 倒序显示最新
+  el.innerHTML = [...rules].reverse().map(r => {
+    const entry = r.entry || {};
+    const stats = r.stats || {};
+    const dir = entry.direction || '?';
+    const approvedBy = r.approved_by === 'llm_auto' ? '🤖 自动批准' : '👤 人工批准';
+    return `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">${r.rule_str || r.id}</div>
+          ${dirTag(dir)}<span class="tag tag-approved">批准</span>
+        </div>
+        <div class="card-meta">
+          <span>OOS胜率: <span class="highlight">${(stats.oos_win_rate||0).toFixed(1)}%</span></span>
+          <span>PF: <span class="highlight">${(stats.oos_pf||0).toFixed(2)}</span></span>
+          <span>n: ${stats.n_oos||0}</span>
+          <span>机制: <span class="highlight">${r.mechanism_type || '—'}</span></span>
+          <span>${approvedBy} ${fmtTime(r.approved_at)}</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderForceLibrary(catalog) {
+  const el = document.getElementById('force-grid');
+  if (!catalog.length) { el.innerHTML = '<div class="empty">力库数据不可用</div>'; return; }
+  el.innerHTML = catalog.map(m => `
+    <div class="force-card">
+      <div class="force-cat">${m.category_name || m.category}</div>
+      <div class="force-name">${m.display_name}</div>
+      <div class="force-essence">${m.essence || '暂无描述'}</div>
+      <div class="force-validated">实证策略: <span>${(m.validated_by||[]).join(', ') || '暂无'}</span></div>
+      ${m.llm_confidence > 0 ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">LLM 置信度: ${(m.llm_confidence*100).toFixed(0)}%</div>` : ''}
+    </div>`).join('');
+}
+
+function renderDecisions(decisions) {
+  const el = document.getElementById('decisions-list');
+  if (!decisions.length) { el.innerHTML = '<div class="empty">暂无决策记录</div>'; return; }
+  el.innerHTML = '<div class="decision-list">' +
+    [...decisions].reverse().map(d => `
+      <div class="decision-item">
+        ${decisionTag(d.decision)}
+        <div class="decision-rule">${d.rule_str || d.id}</div>
+        ${d.confidence != null ? `<div class="decision-conf" style="color:${confColor(d.confidence)}">${(d.confidence*100).toFixed(0)}%</div>` : '<div class="decision-conf">—</div>'}
+        <div class="decision-time">${fmtTime(d.decided_at)}</div>
+      </div>`).join('') +
+    '</div>';
+}
+
+// ── 动作 ──────────────────────────────────────────────────────────────────────
+async function approveRule(id) {
+  const r = await postJSON('/api/approve', {id});
+  if (r.ok) { toast('✓ 已批准'); loadAll(); }
+  else toast('批准失败: ' + (r.error || '?'));
+}
+
+async function rejectRule(id) {
+  const r = await postJSON('/api/reject', {id});
+  if (r.ok) { toast('✗ 已拒绝'); loadAll(); }
+  else toast('拒绝失败: ' + (r.error || '?'));
+}
+
+async function triggerRunNow() {
+  toast('正在触发 LLM 验证...');
+  const r = await postJSON('/api/run_now', {});
+  if (r.ok) {
+    toast(r.message || '已触发，请稍后刷新');
+    setTimeout(loadAll, 3000);
+  }
+}
+
+async function saveConfig() {
+  const body = {
+    api_key: document.getElementById('cfg-api-key').value,
+    base_url: document.getElementById('cfg-base-url').value,
+    model: document.getElementById('cfg-model').value,
+  };
+  const aa = document.getElementById('cfg-auto-approve').value;
+  const rq = document.getElementById('cfg-review-queue').value;
+  if (aa) body.auto_approve = parseFloat(aa);
+  if (rq) body.review_queue = parseFloat(rq);
+  const r = await postJSON('/api/config', body);
+  if (r.ok) { toast('✓ 配置已保存'); loadAll(); }
+  else toast('保存失败');
+}
+
+// ── 初始化 ────────────────────────────────────────────────────────────────────
+loadAll();
+setInterval(loadAll, 30000);  // 每 30 秒自动刷新
+</script>
+</body>
+</html>

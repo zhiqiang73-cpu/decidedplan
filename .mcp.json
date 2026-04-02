@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "codex": {
+      "command": "codex",
+      "args": ["mcp-server"]
+    },
+    "opencode": {
+      "command": "D:/Program Files/opencode/opencode-cli.exe",
+      "args": ["acp"]
+    }
+  }
+}
