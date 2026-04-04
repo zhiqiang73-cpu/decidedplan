@@ -14,19 +14,28 @@ import pandas as pd
 import numpy as np
 from core.feature_engine import FeatureEngine
 
-# Load features and trades
-engine = FeatureEngine()
-features_df = engine.load_date_range("2024-10-01", "2026-03-16")
-trades_df = pd.read_csv("monitor/output/pipeline_backtest_new_signals/trades.csv")
-p18_trades = trades_df[trades_df["rule"].str.contains("P1-8|vwap_vol")].copy()
+FEATURES_START = "2024-10-01"
+FEATURES_END = "2026-03-16"
+TRADES_CSV = Path("monitor/output/pipeline_backtest_new_signals/trades.csv")
 
-print(f"Features loaded: {features_df.shape[0]} bars")
-print(f"P1-8 trades: {len(p18_trades)}")
+features_df = pd.DataFrame()
+p18_trades = pd.DataFrame()
+ts_col = np.array([])
+close_col = np.array([])
+ts_to_idx: dict[int, int] = {}
 
-# Build timestamp index for feature matching
-ts_col = features_df["timestamp"].values
-close_col = features_df["close"].values
-ts_to_idx = {int(ts): i for i, ts in enumerate(ts_col)}
+
+def load_validation_inputs() -> None:
+    global features_df, p18_trades, ts_col, close_col, ts_to_idx
+
+    engine = FeatureEngine()
+    features_df = engine.load_date_range(FEATURES_START, FEATURES_END)
+    trades_df = pd.read_csv(TRADES_CSV)
+    p18_trades = trades_df[trades_df["rule"].str.contains("P1-8|vwap_vol")].copy()
+
+    ts_col = features_df["timestamp"].values
+    close_col = features_df["close"].values
+    ts_to_idx = {int(ts): i for i, ts in enumerate(ts_col)}
 
 # Exit conditions for LONG
 LONG_COMBOS = [
@@ -195,50 +204,56 @@ def test_exit_strategy(trades, combos, max_bars=120, fee_pct=0.04):
         "details": rdf,
     }
 
-print("\n" + "="*70)
-print("Testing P1-8 Exit Strategies")
-print("="*70)
+if __name__ == "__main__":
+    load_validation_inputs()
+    print(f"Features loaded: {features_df.shape[0]} bars")
+    print(f"P1-8 trades: {len(p18_trades)}")
 
-for direction in ["long", "short"]:
-    print(f"\n{direction.upper()} Direction:")
-    sub_trades = p18_trades[p18_trades["direction"] == direction]
+    print("\n" + "="*70)
+    print("Testing P1-8 Exit Strategies")
+    print("="*70)
 
-    combos = LONG_COMBOS if direction == "long" else SHORT_COMBOS
+    for direction in ["long", "short"]:
+        print(f"\n{direction.upper()} Direction:")
+        sub_trades = p18_trades[p18_trades["direction"] == direction]
 
-    # Test baselines
-    print(f"\n  Baselines (fixed hold):")
-    for hold_bars in [35, 90]:
-        # Simple baseline: just hold for N bars
-        results = []
-        for _, trade in sub_trades.iterrows():
-            ts_ms = int(trade["timestamp_ms"])
-            if ts_ms not in ts_to_idx:
-                continue
-            entry_idx = ts_to_idx[ts_ms]
-            entry_price = close_col[entry_idx]
+        combos = LONG_COMBOS if direction == "long" else SHORT_COMBOS
 
-            exit_idx = min(entry_idx + hold_bars, len(close_col) - 1)
+        print(f"\n  Baselines (fixed hold):")
+        for hold_bars in [35, 90]:
+            results = []
+            for _, trade in sub_trades.iterrows():
+                ts_ms = int(trade["timestamp_ms"])
+                if ts_ms not in ts_to_idx:
+                    continue
+                entry_idx = ts_to_idx[ts_ms]
+                entry_price = close_col[entry_idx]
 
-            if direction == "long":
-                pnl = (close_col[exit_idx] - entry_price) / entry_price * 100
-            else:
-                pnl = (entry_price - close_col[exit_idx]) / entry_price * 100
+                exit_idx = min(entry_idx + hold_bars, len(close_col) - 1)
 
-            results.append({"net_pnl": pnl - 0.04})
+                if direction == "long":
+                    pnl = (close_col[exit_idx] - entry_price) / entry_price * 100
+                else:
+                    pnl = (entry_price - close_col[exit_idx]) / entry_price * 100
 
-        if results:
-            rdf = pd.DataFrame(results)
-            wr = (rdf["net_pnl"] > 0).mean() * 100
-            total_net = rdf["net_pnl"].sum()
-            wins = rdf[rdf["net_pnl"] > 0]["net_pnl"].sum()
-            losses = abs(rdf[rdf["net_pnl"] <= 0]["net_pnl"].sum())
-            pf = wins / losses if losses > 0 else float("inf")
-            print(f"    Fixed {hold_bars}bar: WR={wr:.1f}%, total={total_net:.4f}%, PF={pf:.2f}")
+                results.append({"net_pnl": pnl - 0.04})
 
-    # Test combo strategy
-    print(f"\n  Combo strategy (earliest trigger):")
-    result = test_exit_strategy(sub_trades, combos)
-    if result:
-        print(f"    {result['trades']:3d} trades: WR={result['win_rate']:.1f}%, total={result['total_net_pct']:+.4f}%, PF={result['profit_factor']:.2f}, avg exit={result['avg_exit_bar']:.0f}bar")
+            if results:
+                rdf = pd.DataFrame(results)
+                wr = (rdf["net_pnl"] > 0).mean() * 100
+                total_net = rdf["net_pnl"].sum()
+                wins = rdf[rdf["net_pnl"] > 0]["net_pnl"].sum()
+                losses = abs(rdf[rdf["net_pnl"] <= 0]["net_pnl"].sum())
+                pf = wins / losses if losses > 0 else float("inf")
+                print(f"    Fixed {hold_bars}bar: WR={wr:.1f}%, total={total_net:.4f}%, PF={pf:.2f}")
 
-print("\n" + "="*70)
+        print(f"\n  Combo strategy (earliest trigger):")
+        result = test_exit_strategy(sub_trades, combos)
+        if result:
+            print(
+                f"    {result['trades']:3d} trades: WR={result['win_rate']:.1f}%, "
+                f"total={result['total_net_pct']:+.4f}%, PF={result['profit_factor']:.2f}, "
+                f"avg exit={result['avg_exit_bar']:.0f}bar"
+            )
+
+    print("\n" + "="*70)

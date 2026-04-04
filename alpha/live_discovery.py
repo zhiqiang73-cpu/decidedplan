@@ -43,6 +43,7 @@ from alpha.auto_explain import AutoExplainer
 from alpha.combo_scanner import ComboScanner, CONFIRM_FEATURES
 from alpha.realtime_seed_miner import RealtimeSeedMiner
 from utils.file_io import read_json_file, write_json_atomic
+from monitor.exit_policy_config import ExitParams
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,15 @@ _MIN_OOS_N = 30           # OOS 触发次数
 _MIN_DEGRADATION = 0.5    # IS->OOS ICIR 保留比例
 _MIN_OOS_NET = 0.0        # OOS 净收益 (%, 费后)
 _ALPHA_EXIT_MAX_HOLD = 120
+
+_ALPHA_DEFAULT_EXIT_PARAMS = ExitParams(
+    stop_pct=0.70,
+    protect_start_pct=0.20,
+    protect_gap_ratio=0.50,
+    protect_floor_pct=0.03,
+    min_hold_bars=5,
+    max_hold_factor=4,
+)
 
 
 # ── 机制类型推断（从入场特征推断物理机制）────────────────────────────────────
@@ -253,6 +263,7 @@ def _derive_mechanism_exit(
         "feature":   entry_feature,
         "operator":  exit_op,
         "threshold": round(_exit_thr(entry_op, entry_threshold), 8),
+        "source":    "causal",
     }
 
     combos: list[dict] = [
@@ -274,6 +285,7 @@ def _derive_mechanism_exit(
             "feature":   cc["feature"],
             "operator":  "<" if cc_op == ">" else ">",
             "threshold": round(_exit_thr(cc_op, cc_thr), 8),
+            "source":    "causal",
         }
         combos.append({
             "conditions":  [primary, cc_exit],
@@ -281,7 +293,7 @@ def _derive_mechanism_exit(
             "description": "Both entry conditions reversed: full mechanism gone",
         })
 
-    return {"top3": combos}
+    return {"top3": combos, "exit_method": "causal"}
 
 
 class LiveDiscoveryEngine:
@@ -497,8 +509,16 @@ class LiveDiscoveryEngine:
                     }],
                 )
 
+                # Backtest exit conditions on OOS data
+                exit_metrics = self._shadow_smart_exit_backtest(
+                    df, entry_mask, final_exit, direction, int(row["horizon"]),
+                    params=_ALPHA_DEFAULT_EXIT_PARAMS,
+                )
+                final_exit.update(exit_metrics)
+
                 # 构建策略卡片
                 card = self._build_combo_card(row, final_exit)
+                card["exit_params"] = _ALPHA_DEFAULT_EXIT_PARAMS.to_dict()
                 results.append(card)
         else:
             logger.info("[DISCOVERY] 组合扫描未找到合格候选")
@@ -516,7 +536,14 @@ class LiveDiscoveryEngine:
                     entry_op=atom.operator,
                     entry_threshold=float(atom.threshold),
                 )
+                entry_mask_atom = self._build_entry_mask(df, atom)
+                exit_metrics = self._shadow_smart_exit_backtest(
+                    df, entry_mask_atom, exit_cond, atom.direction, int(atom.horizon),
+                    params=_ALPHA_DEFAULT_EXIT_PARAMS,
+                )
+                exit_cond.update(exit_metrics)
                 card = self._build_card(atom, wf, exit_cond)
+                card["exit_params"] = _ALPHA_DEFAULT_EXIT_PARAMS.to_dict()
                 results.append(card)
 
         if not results:
@@ -774,6 +801,218 @@ class LiveDiscoveryEngine:
                 card["status"] = "auto_rejected"
             annotated.append(card)
         return annotated
+
+
+    def _shadow_smart_exit_backtest(
+        self,
+        df,
+        entry_mask,
+        exit_info,
+        direction,
+        horizon,
+        params,
+    ):
+        """
+        OOS 回测出场条件，模拟 P1 智能出场框架的 5 层逻辑。
+
+        模拟层:
+          Layer 1: 硬止损 (adverse >= stop_pct)
+          Layer 3: 利润保护追踪止损 (protect_armed once mfe >= protect_start_pct)
+          Layer 5: 最小持仓保护 (skip logic_complete if j < min_hold_bars)
+          Layer 7: 信号消失出场 (entry combo 反转, current_return > 0)
+          Fallback: 时间上限 (time_cap at max_hold_bars)
+
+        OOS 切分: 使用最后 33% 数据 (split_idx = int(len(df)*0.67))
+        """
+        _EMPTY = {
+            "earliest_pf": 0.0,
+            "net_return_with_exit": 0.0,
+            "improvement": 0.0,
+            "triggered_exit_pct": 0.0,
+            "n_samples": 0,
+            "exit_reason_counts": {"hard_stop": 0, "profit_protect": 0, "logic_complete": 0, "time_cap": 0},
+            "avg_bars_held": 0.0,
+            "win_rate": 0.0,
+        }
+
+        combos = exit_info.get("top3") if isinstance(exit_info, dict) else None
+        if not isinstance(combos, list) or not combos:
+            return _EMPTY
+
+        n_total = len(df)
+        split_idx = int(n_total * 0.67)
+        close_arr = df["close"].values if "close" in df.columns else None
+        if close_arr is None:
+            return _EMPTY
+
+        max_hold_bars = horizon * params.max_hold_factor
+
+        # 预先验证每个 combo 的条件是否都能在 df 中找到对应列
+        valid_combos = []
+        for combo in combos:
+            conds = combo.get("conditions")
+            if not isinstance(conds, list) or not conds:
+                continue
+            parsed = []
+            ok = True
+            for cond in conds:
+                feat = cond.get("feature")
+                op = cond.get("operator")
+                thr = cond.get("threshold")
+                if feat not in df.columns or op not in ("<", ">"):
+                    ok = False
+                    break
+                parsed.append((df[feat].values, op, float(thr)))
+            if ok and parsed:
+                valid_combos.append(parsed)
+
+        if not valid_combos:
+            return _EMPTY
+
+        # 入场位置: 只取 OOS 部分
+        mask_values = entry_mask.reindex(df.index, fill_value=False).values
+        oos_entry_positions = [
+            i for i in range(split_idx, n_total)
+            if mask_values[i] and (i + 1) < n_total
+        ]
+
+        if not oos_entry_positions:
+            return _EMPTY
+
+        fee = 0.04  # 0.04% round-trip maker fee
+
+        exit_returns = []
+        hold_returns = []
+        bars_held_list = []
+        reason_counts = {"hard_stop": 0, "profit_protect": 0, "logic_complete": 0, "time_cap": 0}
+
+        sign = -1.0 if direction == "short" else 1.0
+
+        for entry_idx in oos_entry_positions:
+            entry_price = close_arr[entry_idx]
+            if entry_price == 0 or np.isnan(entry_price):
+                continue
+
+            hold_end_idx = min(entry_idx + horizon, n_total - 1)
+            hold_price = close_arr[hold_end_idx]
+            if hold_price == 0 or np.isnan(hold_price):
+                continue
+
+            hold_ret = (hold_price - entry_price) / entry_price * sign * 100.0 - fee
+            hold_returns.append(hold_ret)
+
+            mfe = 0.0
+            protect_armed = False
+            protect_floor = -999.0
+            exit_reason = None
+            exit_bar = None
+
+            for j in range(1, max_hold_bars + 1):
+                bar_idx = entry_idx + j
+                if bar_idx >= n_total:
+                    break
+
+                current_return = (close_arr[bar_idx] - entry_price) / entry_price * sign * 100.0
+                adverse = max(0.0, -current_return)
+                mfe = max(mfe, current_return)
+
+                # Layer 1: 硬止损
+                if adverse >= params.stop_pct:
+                    exit_reason = "hard_stop"
+                    exit_bar = j
+                    break
+
+                # Layer 3: 利润保护追踪止损
+                if mfe >= params.protect_start_pct:
+                    protect_armed = True
+                if protect_armed:
+                    gap = max(params.protect_floor_pct, mfe * params.protect_gap_ratio)
+                    new_floor = mfe - gap
+                    new_floor = max(new_floor, params.protect_floor_pct)
+                    protect_floor = max(protect_floor, new_floor)
+                    if current_return <= protect_floor:
+                        exit_reason = "profit_protect"
+                        exit_bar = j
+                        break
+
+                # Layer 5: 最小持仓保护
+                if j < params.min_hold_bars:
+                    continue
+
+                # Layer 7: 信号消失出场 (只在盈利时触发)
+                combo_fired = False
+                for combo_conds in valid_combos:
+                    all_met = True
+                    for (col_arr, op, thr) in combo_conds:
+                        val = col_arr[bar_idx]
+                        if np.isnan(val):
+                            all_met = False
+                            break
+                        if op == "<" and not (val < thr):
+                            all_met = False
+                            break
+                        if op == ">" and not (val > thr):
+                            all_met = False
+                            break
+                    if all_met:
+                        combo_fired = True
+                        break
+
+                if combo_fired and current_return > 0:
+                    exit_reason = "logic_complete"
+                    exit_bar = j
+                    break
+
+            # Fallback: 时间上限
+            if exit_reason is None:
+                exit_reason = "time_cap"
+                exit_bar = min(max_hold_bars, n_total - 1 - entry_idx)
+
+            reason_counts[exit_reason] = reason_counts.get(exit_reason, 0) + 1
+            bars_held_list.append(exit_bar)
+
+            actual_exit_idx = entry_idx + exit_bar
+            if actual_exit_idx >= n_total:
+                actual_exit_idx = n_total - 1
+            exit_price = close_arr[actual_exit_idx]
+
+            if exit_price == 0 or np.isnan(exit_price):
+                exit_returns.append(hold_ret)
+                continue
+
+            ret = (exit_price - entry_price) / entry_price * sign * 100.0 - fee
+            exit_returns.append(ret)
+
+        n_samples = len(exit_returns)
+        if n_samples == 0:
+            return _EMPTY
+
+        wins = [r for r in exit_returns if r > 0]
+        losses = [r for r in exit_returns if r <= 0]
+        if losses:
+            sum_losses = abs(sum(losses))
+            earliest_pf = sum(wins) / sum_losses if sum_losses > 1e-10 else 1.5
+        else:
+            earliest_pf = 1.5 if wins else 1.0
+
+        net_return_with_exit = float(np.mean(exit_returns))
+        hold_mean = float(np.mean(hold_returns)) if hold_returns else 0.0
+        improvement = net_return_with_exit - hold_mean
+        triggered_count = n_samples - reason_counts.get("time_cap", 0)
+        triggered_exit_pct = triggered_count / n_samples * 100.0
+        avg_bars_held = float(np.mean(bars_held_list)) if bars_held_list else 0.0
+        win_rate = len(wins) / n_samples * 100.0
+
+        return {
+            "earliest_pf":         round(earliest_pf, 4),
+            "net_return_with_exit": round(net_return_with_exit, 4),
+            "improvement":          round(improvement, 4),
+            "triggered_exit_pct":   round(triggered_exit_pct, 2),
+            "n_samples":            n_samples,
+            "exit_reason_counts":   dict(reason_counts),
+            "avg_bars_held":        round(avg_bars_held, 2),
+            "win_rate":             round(win_rate, 2),
+        }
 
     def _save_pending(self, new_cards: list[dict]) -> None:
         """

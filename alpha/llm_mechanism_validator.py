@@ -281,8 +281,13 @@ class LLMMechanismValidator:
             try:
                 from openai import OpenAI
             except ImportError as exc:
+                import sys
+                logger.error(
+                    "[LLMValidator] openai import failed: %s\nsys.path=%s",
+                    exc, sys.path[:5],
+                )
                 raise RuntimeError(
-                    "openai 包未安装。请运行: pip install openai"
+                    f"openai 包导入失败: {exc}"
                 ) from exc
             self._client = OpenAI(
                 api_key=self._api_key,

@@ -95,6 +95,36 @@ def _normalize_alpha_exit_conditions(payload: object) -> list[dict[str, float | 
     return normalized
 
 
+def _normalize_alpha_exit_params(payload: object) -> dict[str, float | int] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    normalized: dict[str, float | int] = {}
+    float_keys = (
+        "take_profit_pct",
+        "stop_pct",
+        "protect_start_pct",
+        "protect_gap_ratio",
+        "protect_floor_pct",
+        "decay_exit_threshold",
+        "decay_tighten_threshold",
+        "tighten_gap_ratio",
+    )
+    int_keys = ("min_hold_bars", "max_hold_factor", "exit_confirm_bars")
+
+    for key in float_keys:
+        value = _coerce_float(payload.get(key))
+        if value is not None:
+            normalized[key] = value
+
+    for key in int_keys:
+        value = _coerce_float(payload.get(key))
+        if value is not None:
+            normalized[key] = int(value)
+
+    return normalized or None
+
+
 def _build_alpha_exit_summary(
     exit_conditions: list[dict[str, float | str]],
     stop_pct: Optional[float],
@@ -133,6 +163,7 @@ def build_entry_snapshot(alert: Dict, features: Optional[pd.Series]) -> Dict[str
     )
     # Top-3 combos from ExitConditionMiner (preferred over flat conditions)
     alpha_exit_combos = alert.get("alpha_exit_combos") or []
+    alpha_exit_params = _normalize_alpha_exit_params(alert.get("alpha_exit_params"))
 
     stop_pct = _coerce_float(alert.get("stop_pct"))
     snapshot: Dict[str, object] = {
@@ -150,6 +181,8 @@ def build_entry_snapshot(alert: Dict, features: Optional[pd.Series]) -> Dict[str
         snapshot["alpha_exit_conditions"] = alpha_exit_conditions
     if alpha_exit_combos:
         snapshot["alpha_exit_combos"] = alpha_exit_combos
+    if alpha_exit_params:
+        snapshot["alpha_exit_params"] = alpha_exit_params
     if stop_pct is not None:
         snapshot["alpha_stop_pct"] = stop_pct
     if features is None:
@@ -905,5 +938,4 @@ def _adverse_pct(position: Dict, close: float) -> float:
     if direction == "short":
         return max(0.0, (close - entry) / entry * 100)
     return max(0.0, (entry - close) / entry * 100)
-
 

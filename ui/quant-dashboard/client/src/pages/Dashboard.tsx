@@ -13,6 +13,9 @@ export default function Dashboard() {
   const { data: strategies } = trpc.strategies.list.useQuery({ status: "active" });
   const { data: liveSnapshot } = trpc.execution.getLiveSnapshot.useQuery(undefined, { refetchInterval: 5000 });
   const { data: tradingPairs } = trpc.tradingPairs.list.useQuery(undefined, { refetchInterval: 30000 });
+  const { data: regimeData } = trpc.alphaEngine.getRegimeStatus.useQuery(undefined, { refetchInterval: 10000 });
+  const { data: winRates } = trpc.alphaEngine.getSignalWinRates.useQuery(undefined, { refetchInterval: 30000 });
+  const { data: forceData } = trpc.alphaEngine.getForceConcentration.useQuery(undefined, { refetchInterval: 10000 });
 
   const totalEquity = parseFloat(wallet?.totalEquity ?? "0");
   const unrealizedPnl = parseFloat(wallet?.unrealizedPnl ?? "0");
@@ -24,6 +27,26 @@ export default function Dashboard() {
   const markPrice = liveSnapshot?.price ?? null;
 
   const totalNotional = positions.reduce((sum, p) => sum + (p.entryPrice ?? 0) * (p.quantity ?? 0), 0);
+
+  const REGIME_LABEL: Record<string, string> = {
+    QUIET_TREND: "安静趋势",
+    VOLATILE_TREND: "波动趋势",
+    RANGE_BOUND: "区间震荡",
+    VOL_EXPANSION: "波动扩张",
+    CRISIS: "危机",
+    UNKNOWN: "未知",
+  };
+  const REGIME_COLOR: Record<string, string> = {
+    QUIET_TREND: "#0ecb81",
+    VOLATILE_TREND: "#f0b90b",
+    RANGE_BOUND: "#1890ff",
+    VOL_EXPANSION: "#f6a600",
+    CRISIS: "#f6465d",
+    UNKNOWN: "#848e9c",
+  };
+  const currentRegime = regimeData?.regime ?? "UNKNOWN";
+  const regimeColor = REGIME_COLOR[currentRegime] ?? "#848e9c";
+  const regimeLabel = REGIME_LABEL[currentRegime] ?? currentRegime;
 
   return (
     <QuantLayout>
@@ -44,7 +67,7 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
           <KpiCard
             title="账户权益"
             value={`$${totalEquity.toLocaleString("en-US", { minimumFractionDigits: 2 })}`}
@@ -72,6 +95,118 @@ export default function Dashboard() {
             valueColor={winRate >= 60 ? "#0ecb81" : "#f0a500"}
             icon={<Target size={16} />}
           />
+          <KpiCard
+            title="市场状态"
+            value={regimeLabel}
+            sub="BTCUSDT · 实时"
+            valueColor={regimeColor}
+            icon={<BarChart2 size={16} />}
+          />
+        </div>
+
+        {/* Regime + Win Rates + Force Concentration */}
+        <div className="px-4 pb-3 space-y-2">
+          {/* Regime */}
+          <div className="flex items-center gap-2 text-xs">
+            <span style={{ color: "#848e9c" }}>市场状态:</span>
+            <span
+              className="px-2 py-0.5 rounded font-medium"
+              style={{
+                backgroundColor: "rgba(0,0,0,0.3)",
+                color:
+                  regimeData?.regime === "QUIET_TREND"
+                    ? "#0ecb81"
+                    : regimeData?.regime === "VOLATILE_TREND"
+                      ? "#f0b90b"
+                      : regimeData?.regime === "RANGE_BOUND"
+                        ? "#58a6ff"
+                        : ["VOL_EXPANSION", "CRISIS"].includes(regimeData?.regime ?? "")
+                          ? "#f6465d"
+                          : "#848e9c",
+              }}
+            >
+              {regimeData?.regime ?? "—"}
+            </span>
+          </div>
+
+          {/* Win Rate Bars */}
+          {winRates && winRates.length > 0 && (
+            <div>
+              <div className="text-xs mb-1" style={{ color: "#848e9c" }}>策略验证胜率</div>
+              <div className="flex flex-wrap gap-1.5">
+                {winRates.filter((r) => r.oosWinRate != null).map((r) => (
+                  <div
+                    key={r.family}
+                    className="flex items-center gap-1 px-2 py-1 rounded text-xs"
+                    style={{ backgroundColor: "#1a1d21", border: "1px solid #2b3139" }}
+                  >
+                    <span style={{ color: "#848e9c" }}>{r.family}</span>
+                    <span
+                      className="font-bold font-num"
+                      style={{ color: r.oosWinRate >= 80 ? "#0ecb81" : r.oosWinRate >= 60 ? "#f0b90b" : "#f6465d" }}
+                    >
+                      {r.oosWinRate.toFixed(1)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Force Concentration */}
+          {forceData?.concentration && Object.keys(forceData.concentration).length > 0 && (
+            <div className="flex items-center gap-2 flex-wrap text-xs">
+              <span style={{ color: "#848e9c" }}>力集中度:</span>
+              {Object.entries(forceData.concentration)
+                .filter(([, value]) => Number(value) > 0)
+                .map(([key, value]) => (
+                  <span
+                    key={key}
+                    className="px-2 py-0.5 rounded"
+                    style={{
+                      backgroundColor: "rgba(0,0,0,0.3)",
+                      color: Number(value) >= 2 ? "#f0b90b" : "#848e9c",
+                      border: `1px solid ${Number(value) >= 2 ? "#f0b90b" : "#2b3139"}`,
+                    }}
+                  >
+                    {key.split("_").slice(-1)[0]}: {Number(value)}
+                    {Number(value) >= 2 ? " ⚠" : ""}
+                  </span>
+                ))}
+            </div>
+          )}
+        </div>
+
+        {/* Signal Win Rate Bar Strip */}
+        <div className="card-q p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>策略验证正确率（白名单准入）</h3>
+            <span className="text-xs" style={{ color: "#848e9c" }}>OOS walk-forward</span>
+          </div>
+          {(!winRates || winRates.length === 0) ? (
+            <div className="text-xs" style={{ color: "#848e9c" }}>暂无数据</div>
+          ) : (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+              {winRates.map((s) => {
+                const wr = s.oosWinRate;
+                const barColor = wr == null ? "#2b3139" : wr >= 80 ? "#0ecb81" : wr >= 60 ? "#f0b90b" : "#f6465d";
+                const textColor = wr == null ? "#848e9c" : wr >= 80 ? "#0ecb81" : wr >= 60 ? "#f0b90b" : "#f6465d";
+                return (
+                  <div key={s.family} className="p-2 rounded" style={{ backgroundColor: "#161a1e" }}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs truncate" style={{ color: "#848e9c", maxWidth: "70%" }}>{s.name || s.family}</span>
+                      <span className="text-xs font-num font-bold" style={{ color: textColor }}>
+                        {wr != null ? `${wr.toFixed(0)}%` : "—"}
+                      </span>
+                    </div>
+                    <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: "#2b3139" }}>
+                      <div className="h-full rounded-full transition-all" style={{ width: `${wr ?? 0}%`, backgroundColor: barColor }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -106,6 +241,25 @@ export default function Dashboard() {
                 </div>
               ))}
             </div>
+          {/* Force Concentration Zone */}
+          {forceData?.concentration && Object.keys(forceData.concentration).length > 0 && (
+            <div className="mt-3 pt-3" style={{ borderTop: "1px solid #2b3139" }}>
+              <div className="flex items-center gap-1.5 mb-2">
+                <AlertCircle size={12} style={{ color: "#f0a500" }} />
+                <span className="text-xs font-medium" style={{ color: "#848e9c" }}>力量集中度</span>
+              </div>
+              <div className="space-y-1">
+                {Object.entries(forceData.concentration).map(([category, count]) => (
+                  <div key={category} className="flex items-center justify-between text-xs">
+                    <span style={{ color: "#848e9c" }}>{category}</span>
+                    <span className="font-num font-medium" style={{ color: (count as number) >= 2 ? "#f6465d" : "#eaecef" }}>
+                      {count as number} 仓{(count as number) >= 2 ? " ⚠" : ""}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           </div>
 
           <div className="card-q p-4">

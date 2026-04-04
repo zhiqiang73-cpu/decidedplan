@@ -32,6 +32,7 @@ const P = {
   reviewQueue:    path.join(ROOT, "alpha/output/review_queue.json"),
   rejectedRules:  path.join(ROOT, "alpha/output/rejected_rules.json"),
   promoterConfig: path.join(ROOT, "alpha/output/promoter_config.json"),
+  forceLibraryState: path.join(ROOT, "monitor/output/force_library_state.json"),
 };
 
 // 闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸?Types 闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕
@@ -345,10 +346,15 @@ export function getTradeStats() {
     if (dd < maxDD) maxDD = dd;
   }
 
-  // Today's PnL (last 24h by exitAt UTC)
-  const cutoff24h = new Date(Date.now() - 86400000);
+  // Today's PnL (UTC+8 calendar day, not rolling 24h)
+  const nowUtc8 = new Date(Date.now() + 8 * 3600000);
+  const todayStr = nowUtc8.toISOString().slice(0, 10);
   const todayPnl = allClosed
-    .filter(t => t.exitAt && t.exitAt > cutoff24h)
+    .filter(t => {
+      if (!t.exitAt) return false;
+      const exitUtc8 = new Date(t.exitAt.getTime() + 8 * 3600000);
+      return exitUtc8.toISOString().slice(0, 10) === todayStr;
+    })
     .reduce((s, t) => s + parseFloat(t.pnl ?? "0"), 0);
 
   return {
@@ -778,4 +784,6 @@ export function promoterReject(ruleId: string): boolean {
   return true;
 }
 
-
+export function getForceLibraryState(): any {
+  return readJSON<any>(P.forceLibraryState) ?? null;
+}

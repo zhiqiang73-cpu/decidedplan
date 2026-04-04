@@ -14,6 +14,7 @@ import {
   Wifi,
   WifiOff,
   Clock,
+  Shield,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -21,8 +22,9 @@ import { splitDateTimeUTC8 } from "@/lib/time";
 
 const NAV_ITEMS = [
   { path: "/", icon: LayoutDashboard, label: "仪表盘" },
-  { path: "/alpha", icon: Zap, label: "Alpha引擎" },
   { path: "/strategies", icon: TrendingUp, label: "策略池" },
+  { path: "/forces", icon: Shield, label: "力库" },
+  { path: "/alpha", icon: Zap, label: "Alpha引擎" },
   { path: "/pairs", icon: BarChart2, label: "交易对" },
   { path: "/trades", icon: History, label: "交易记录" },
   { path: "/positions", icon: Activity, label: "持仓监控" },

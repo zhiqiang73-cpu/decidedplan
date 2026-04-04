@@ -143,11 +143,21 @@ def _write_discovery_alert(cards: list[dict]) -> None:
             f"OOS win={stats['oos_win_rate']:.1f}% n={stats['n_oos']} "
             f"net={stats['oos_net_return']:+.4f}%"
         )
-        if exit_info:
-            lines.append(
-                f"       exit: {exit_info['feature']} {exit_info['operator']} "
-                f"{exit_info['threshold']:.4g} | expected_hold~{exit_info['expected_hold_bars']:.0f}bar"
-            )
+        if exit_info and isinstance(exit_info, dict):
+            top3 = exit_info.get("top3", [])
+            if top3 and isinstance(top3, list):
+                first = top3[0]
+                conds = first.get("conditions", [])
+                desc = " & ".join(
+                    f"{c.get('feature','')} {c.get('operator','')} {c.get('threshold','')}"
+                    for c in conds if isinstance(c, dict)
+                )
+                lines.append(f"       exit: [{desc}]")
+            elif "feature" in exit_info:
+                lines.append(
+                    f"       exit: {exit_info['feature']} {exit_info.get('operator','')} "
+                    f"{exit_info.get('threshold','')}"
+                )
 
     lines.extend(
         [
@@ -184,7 +194,10 @@ def run_once(args: argparse.Namespace) -> int:
     )
     cards = engine.run_once(data_days=args.data_days)
     if cards:
-        _write_discovery_alert(cards)
+        try:
+            _write_discovery_alert(cards)
+        except Exception as exc:
+            logger.warning("[DISCOVERY] Alert log write failed (non-blocking): %s", exc)
 
     # LLM 自动验证：对新进入 pending 的候选立即跑一次促进器
     try:
@@ -201,11 +214,38 @@ def run_once(args: argparse.Namespace) -> int:
     return len(cards)
 
 
+_DISCOVERY_HEARTBEAT = ROOT / "monitor" / "output" / "discovery_heartbeat.json"
+
+
+def _set_discovery_alive(alive: bool) -> None:
+    """Write discovery heartbeat to a dedicated file (read by run_monitor.py).
+
+    Uses a separate file so run_monitor.py does NOT overwrite this flag when
+    it regenerates system_state.json every tick.
+    """
+    import json
+    import os
+    try:
+        _DISCOVERY_HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"alive": alive, "pid": os.getpid(), "updated": time.time()}
+        tmp = _DISCOVERY_HEARTBEAT.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(_DISCOVERY_HEARTBEAT)
+    except Exception as exc:
+        logger.warning("[DISCOVERY] Could not write discovery_heartbeat.json: %s", exc)
+
+
 def main() -> None:
     args = parse_args()
+    import atexit
+    atexit.register(_set_discovery_alive, False)
 
     if args.once:
-        count = run_once(args)
+        _set_discovery_alive(True)
+        try:
+            count = run_once(args)
+        finally:
+            _set_discovery_alive(False)
         if count > 0:
             logger.info("[DISCOVERY] Completed with %s candidate rules", count)
         else:
@@ -218,6 +258,7 @@ def main() -> None:
         args.symbol.upper(),
         args.interval,
     )
+    _set_discovery_alive(True)
 
     run_count = 0
     while True:

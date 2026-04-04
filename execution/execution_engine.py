@@ -15,7 +15,7 @@ from typing import Any
 from execution import config
 from execution.order_manager import OrderManager, OrderManagerError
 from execution.trade_logger import TradeLogger
-from monitor.mechanism_tracker import MechanismTracker, resolve_mechanism_type
+from monitor.mechanism_tracker import MechanismTracker, resolve_mechanism_type, get_mechanism_for_family, get_force_category
 from monitor.live_catalog import EXECUTION_WHITELIST
 from monitor.exit_policy_config import ExitParams, get_exit_params_for_signal, has_explicit_exit_params
 from monitor.smart_exit_policy import (
@@ -122,7 +122,8 @@ class ExecutionEngine:
         self._mechanism_tracker = MechanismTracker()
         self._current_regime: str = "QUIET_TREND"
         self._current_flow: str = "PASSIVE"
-        # A2 family 1-bar entry confirmation: key="{family}|{direction}" → first_seen_ts
+        self._current_trend: str = "TREND_NEUTRAL"
+        # A2 family 1-bar entry confirmation: key="{family}|{direction}" 閳?first_seen_ts
         self._entry_confirm_pending: dict[str, float] = {}
 
         # Persist open positions across restarts
@@ -140,10 +141,16 @@ class ExecutionEngine:
         else:
             logger.warning("[EXEC] Testnet API credentials missing; paper mode only")
 
-    def update_market_state(self, regime: str, flow_type: str) -> None:
+    def update_market_state(
+        self,
+        regime: str,
+        flow_type: str,
+        trend_direction: str = "TREND_NEUTRAL",
+    ) -> None:
         """Receive current market state from signal_runner."""
         self._current_regime = regime
         self._current_flow = flow_type
+        self._current_trend = trend_direction
 
     def on_signal(self, alert: dict[str, Any], latest_features: Any | None = None) -> None:
         if not self.enabled or self.order_manager is None:
@@ -175,30 +182,6 @@ class ExecutionEngine:
             )
             return
 
-        # A2-26/A2-29 both require HIGH confidence (conf>=3, dual physical confirm).
-        # At conf=2 both fire too often in QUIET_TREND; 15h audit showed 22% WR at conf=2.
-        if family in {"A2-26", "A2-29"} and confidence < 3:
-            logger.debug(
-                "[EXEC] Skip %s %s: conf=%s < 3 (require HIGH for A2 family)",
-                family, signal_name, confidence,
-            )
-            return
-
-        # All P2 alpha SHORT in QUIET_TREND require HIGH confidence (conf>=3).
-        # Data: 42 QUIET_TREND trades had WR=38% avg=-0.022% (shorting into uptrend).
-        # conf=3 subset: WR=60% avg=+0.19%.  conf=2 subset: WR=44% avg=-0.026%.
-        if (
-            is_alpha
-            and direction == "short"
-            and self._current_regime == "QUIET_TREND"
-            and confidence < 3
-        ):
-            logger.info(
-                "[EXEC] Skip %s: alpha SHORT in QUIET_TREND requires conf>=3 (got %s)",
-                signal_name, confidence,
-            )
-            return
-
         if not is_alpha and (family, direction) not in EXECUTION_WHITELIST:
             logger.debug("[EXEC] Rejected %s %s: not in whitelist", family, direction)
             return
@@ -211,15 +194,15 @@ class ExecutionEngine:
             logger.info("[EXEC] Skip %s: execution cooldown (%ss remaining)", signal_name, remaining)
             return
 
-        # A2 family: require 1 bar (≥55s) of continuous confirmation before entering.
-        # Filters trades #49/50/51 pattern: instant-reversal entries where the
-        # signal fired on 1 bar and price reversed within the same candle.
+        # A2 family: require at least 1 bar (閳?5s) of signal persistence before entering.
+        # Filters instant-reversal entries where the signal fired on 1 bar only.
+        # Window upper bound is 30 min to accommodate low-frequency P2 composite signals.
         if family.startswith("A2"):
             confirm_key = f"{family}|{direction}"
             first_seen = self._entry_confirm_pending.get(confirm_key)
             if first_seen is None:
                 self._entry_confirm_pending[confirm_key] = now_ts
-                logger.debug("[EXEC] A2 entry deferred %s: waiting 1-bar confirm", signal_name)
+                logger.info("[EXEC] A2 entry deferred %s: waiting confirm (55s~30min)", signal_name)
                 return
             elapsed = now_ts - first_seen
             if elapsed < 55:
@@ -228,15 +211,15 @@ class ExecutionEngine:
                     signal_name, int(elapsed),
                 )
                 return
-            if elapsed > 180:
-                # Stale (>3 bars without a clean repeat): reset the timer
+            if elapsed > 1800:
+                # Stale (>30min without a repeat): reset the timer
                 self._entry_confirm_pending[confirm_key] = now_ts
-                logger.debug("[EXEC] A2 entry confirm expired %s, resetting timer", signal_name)
+                logger.info("[EXEC] A2 entry confirm expired %s after %ds, resetting", signal_name, int(elapsed))
                 return
-            # 55s ≤ elapsed ≤ 180s: condition persisted across ≥1 bar → proceed
+            # 55s 閳?elapsed 閳?1800s: condition persisted 閳?proceed
             del self._entry_confirm_pending[confirm_key]
             logger.info(
-                "[EXEC] A2 entry confirmed %s after %ds (1-bar filter passed)",
+                "[EXEC] A2 entry confirmed %s after %ds (persistence filter passed)",
                 signal_name, int(elapsed),
             )
 
@@ -277,6 +260,20 @@ class ExecutionEngine:
                 logger.info("[EXEC] Skip %s: external|any already active", signal_name)
                 return
 
+            # --- Force concentration gate (inside lock to prevent TOCTOU) ---
+            alert_mechanism = get_mechanism_for_family(family)
+            alert_force_cat = get_force_category(alert_mechanism)
+            force_count = sum(
+                1 for pos in self._open_positions.values()
+                if get_force_category(get_mechanism_for_family(pos.family)) == alert_force_cat
+            )
+            if force_count >= 2:
+                logger.info(
+                    "REJECT %s: force concentration %s=%d >= 2",
+                    signal_name, alert_force_cat, force_count,
+                )
+                return
+
             total = len(self._pending_entries) + len(self._open_positions)
             if total >= self.max_positions:
                 logger.info(
@@ -311,7 +308,7 @@ class ExecutionEngine:
                 attempt_plan = self._build_entry_attempt(direction, attempt=1)
                 # QUIET_TREND uses a smaller position (5% vs 8% default).
                 # 11 of 12 losses in the 15h audit occurred in QUIET_TREND;
-                # same stop % × smaller notional = smaller dollar loss per trade.
+                # same stop % 鑴?smaller notional = smaller dollar loss per trade.
                 _QUIET_POSITION_PCT = 0.05
                 effective_pct = (
                     _QUIET_POSITION_PCT
@@ -320,7 +317,7 @@ class ExecutionEngine:
                 )
                 if effective_pct != self.position_pct:
                     logger.debug(
-                        "[EXEC] %s regime=%s: position_pct %.0f%% → %.0f%%",
+                        "[EXEC] %s regime=%s: position_pct %.0f%% 閳?%.0f%%",
                         signal_name, self._current_regime,
                         self.position_pct * 100, effective_pct * 100,
                     )
@@ -497,27 +494,19 @@ class ExecutionEngine:
 
             stop_pct = self._safe_float(
                 alert.get("stop_pct"),
-                default=self._safe_float(entry_snapshot.get("alpha_stop_pct"), 0.70),
+                default=self._safe_float(entry_snapshot.get("alpha_stop_pct"), None),
             )
-            # Prefer best_params.json values (protect thresholds, decay config, etc.)
-            # when an explicit entry for this family+direction exists.
-            # Only stop_pct is overridden from the alpha card definition itself.
-            if has_explicit_exit_params(family, direction):
-                _base = get_exit_params_for_signal(family, direction)
-                params = ExitParams(
-                    stop_pct=float(stop_pct or _base.stop_pct),
-                    protect_start_pct=_base.protect_start_pct,
-                    protect_gap_ratio=_base.protect_gap_ratio,
-                    protect_floor_pct=_base.protect_floor_pct,
-                    min_hold_bars=_base.min_hold_bars,
-                    max_hold_factor=_base.max_hold_factor,
-                    exit_confirm_bars=_base.exit_confirm_bars,
-                    decay_exit_threshold=_base.decay_exit_threshold,
-                    decay_tighten_threshold=_base.decay_tighten_threshold,
-                )
+            card_params = self._exit_params_from_dict(entry_snapshot.get("alpha_exit_params"))
+            if card_params is None:
+                card_params = self._exit_params_from_dict(alert.get("alpha_exit_params"))
+
+            if card_params is not None:
+                base = card_params
+            elif has_explicit_exit_params(family, direction):
+                base = get_exit_params_for_signal(family, direction)
             else:
-                params = ExitParams(
-                    stop_pct=float(stop_pct or 0.70),
+                base = ExitParams(
+                    stop_pct=0.70,
                     protect_start_pct=0.12,
                     protect_gap_ratio=0.50,
                     protect_floor_pct=0.03,
@@ -525,13 +514,26 @@ class ExecutionEngine:
                     max_hold_factor=4,
                     exit_confirm_bars=1,
                 )
+
+            params = ExitParams(
+                take_profit_pct=base.take_profit_pct,
+                stop_pct=float(stop_pct if stop_pct is not None else base.stop_pct),
+                protect_start_pct=base.protect_start_pct,
+                protect_gap_ratio=base.protect_gap_ratio,
+                protect_floor_pct=base.protect_floor_pct,
+                min_hold_bars=base.min_hold_bars,
+                max_hold_factor=base.max_hold_factor,
+                exit_confirm_bars=base.exit_confirm_bars,
+                decay_exit_threshold=base.decay_exit_threshold,
+                decay_tighten_threshold=base.decay_tighten_threshold,
+                tighten_gap_ratio=base.tighten_gap_ratio,
+            )
             entry_snapshot["alpha_exit_params"] = params.to_dict()
             return True, params
 
         if not has_explicit_exit_params(family, direction):
             return False, None
         return True, get_exit_params_for_signal(family, direction)
-
     def _resolve_position_exit_params(self, position: OpenPosition) -> ExitParams:
         snapshot = position.entry_snapshot or {}
         alpha_params = self._exit_params_from_dict(snapshot.get("alpha_exit_params"))
@@ -812,7 +814,7 @@ class ExecutionEngine:
                 entry_fee_type=pending.entry_fee_type,
                 entry_regime=self._current_regime,
                 entry_flow_type=self._current_flow,
-                mechanism_type=resolve_mechanism_type(pending.signal_name, pending.direction),
+                mechanism_type=resolve_mechanism_type(pending.signal_name, pending.direction, family=pending.family),
             )
             del self._pending_entries[order_id]
             self._signal_cooldown.pop(pos_key, None)
@@ -971,6 +973,29 @@ class ExecutionEngine:
         elif not has_external and ext_key in self._open_positions:
             logger.info("[EXEC] External position cleared")
             del self._open_positions[ext_key]
+
+        # Detect system-tracked positions that vanished from exchange
+        # (user manually closed on Binance, or liquidation, etc.)
+        if not self._pending_entries:
+            stale_keys: list[str] = []
+            for pos_key, pos in self._open_positions.items():
+                if pos.external:
+                    continue
+                # System position exists but exchange has zero or less qty in this direction
+                if exchange_qty.get(pos.direction, 0.0) < 1e-6:
+                    stale_keys.append(pos_key)
+
+            for pos_key in stale_keys:
+                pos = self._open_positions.pop(pos_key)
+                logger.warning(
+                    "[EXEC] Position %s vanished from exchange (manual close?), removed from tracking. "
+                    "entry=%.2f qty=%.6f held=%s bars",
+                    pos_key, pos.entry_price, pos.qty,
+                    (datetime.now(timezone.utc) - pos.entry_time).seconds // 60
+                    if pos.entry_time else "?",
+                )
+            if stale_keys:
+                self._save_positions_state()
 
     @staticmethod
     def _extract_alert_time(alert: dict[str, Any]) -> datetime:

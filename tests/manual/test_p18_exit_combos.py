@@ -14,8 +14,11 @@ import pandas as pd
 import numpy as np
 from itertools import combinations
 
-# Load the analysis results
-df = pd.read_csv("monitor/output/p18_exit_analysis/trade_features_at_mfe.csv")
+ANALYSIS_CSV = Path("monitor/output/p18_exit_analysis/trade_features_at_mfe.csv")
+
+
+def load_analysis_frame(csv_path: Path = ANALYSIS_CSV) -> pd.DataFrame:
+    return pd.read_csv(csv_path)
 
 # Top conditions from effect size analysis (delta features only)
 LONG_TOP_FEATURES = [
@@ -205,6 +208,7 @@ if __name__ == "__main__":
     print("P1-8 Exit Condition Combination Testing")
     print("="*70)
 
+    df = load_analysis_frame()
     long_results = analyze_direction(df, "long", LONG_TOP_FEATURES)
     short_results = analyze_direction(df, "short", SHORT_TOP_FEATURES)
 

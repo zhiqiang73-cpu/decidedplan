@@ -4,7 +4,7 @@ from __future__ import annotations
 
 STRATEGY_ZH: dict[str, dict[str, str]] = {
     "P0-2": {
-        "name": "Funding Rate Arbitrage",
+        "name": "资金费率套利",
         "direction": "short",
         "entry_zh": (
             "Short when funding rate is above 0.01%.\n"
@@ -16,7 +16,7 @@ STRATEGY_ZH: dict[str, dict[str, str]] = {
         ),
     },
     "P1-2": {
-        "name": "VWAP/TWAP Slicing",
+        "name": "VWAP/TWAP\u62c6\u5355\u7b97\u6cd5",
         "direction": "long",
         "entry_zh": (
             "Current code requires all 3 footprints together: volume_autocorr_lag5 > 0.55, "
@@ -29,7 +29,7 @@ STRATEGY_ZH: dict[str, dict[str, str]] = {
         ),
     },
     "P1-6": {
-        "name": "Bottom Volume Drought",
+        "name": "\u5e95\u90e8\u91cf\u80fd\u67af\u7aed",
         "direction": "long",
         "entry_zh": (
             "Price sits near the 24h low while volume dries below average.\n"
@@ -41,7 +41,7 @@ STRATEGY_ZH: dict[str, dict[str, str]] = {
         ),
     },
     "P1-8": {
-        "name": "VWAP Deviation + Volume Drought",
+        "name": "VWAP\u504f\u79bb+\u91cf\u80fd\u67af\u7aed",
         "direction": "both",
         "entry_zh": (
             "LONG: below VWAP with persistent volume drought. SHORT: above VWAP with persistent volume drought.\n"
@@ -53,7 +53,7 @@ STRATEGY_ZH: dict[str, dict[str, str]] = {
         ),
     },
     "P1-9": {
-        "name": "Position Compression",
+        "name": "\u4ed3\u4f4d\u538b\u7f29\u91ca\u653e",
         "direction": "long",
         "entry_zh": (
             "Open interest keeps falling while price compresses.\n"
@@ -65,7 +65,7 @@ STRATEGY_ZH: dict[str, dict[str, str]] = {
         ),
     },
     "P1-10": {
-        "name": "Taker Exhaustion Bottom",
+        "name": "\u5356\u65b9\u8017\u5c3d\u89e6\u5e95",
         "direction": "long",
         "entry_zh": (
             "Taker selling pressure is extremely low while price sits near the 24h low.\n"
@@ -77,7 +77,7 @@ STRATEGY_ZH: dict[str, dict[str, str]] = {
         ),
     },
     "P1-11": {
-        "name": "High Position + Negative Funding",
+        "name": "\u9ad8\u4f4d+\u8d1f\u8d44\u91d1\u8d39\u7387\u505a\u7a7a",
         "direction": "short",
         "entry_zh": (
             "Price is high in the 4h range while funding is negative.\n"
@@ -89,7 +89,7 @@ STRATEGY_ZH: dict[str, dict[str, str]] = {
         ),
     },
     "C1": {
-        "name": "Funding Window Oversold Long",
+        "name": "\u8d44\u91d1\u8d39\u7387\u8fc7\u5356\u505a\u591a",
         "direction": "long",
         "entry_zh": (
             "Price is near the 24h low while funding is negative.\n"
@@ -101,7 +101,7 @@ STRATEGY_ZH: dict[str, dict[str, str]] = {
         ),
     },
     "A2-26": {
-        "name": "High Proximity + OI Cooldown Short",
+        "name": "\u9ad8\u4f4d\u8fd1\u5c16+OI\u51b7\u5374\u505a\u7a7a",
         "direction": "short",
         "entry_zh": (
             "Price stays close to the 24h high (dist_to_24h_high > -0.009746) while "
@@ -114,7 +114,7 @@ STRATEGY_ZH: dict[str, dict[str, str]] = {
         ),
     },
     "A2-29": {
-        "name": "High Proximity + Wide Spread Short",
+        "name": "\u9ad8\u4f4d\u8fd1\u5c16+\u5bbd\u4ef7\u5dee\u505a\u7a7a",
         "direction": "short",
         "entry_zh": (
             "Price stays close to the 24h high (dist_to_24h_high > -0.009746) and "
@@ -127,7 +127,7 @@ STRATEGY_ZH: dict[str, dict[str, str]] = {
         ),
     },
     "A3-OI": {
-        "name": "OI Divergence Short",
+        "name": "OI\u80cc\u79bb\u505a\u7a7a",
         "direction": "short",
         "entry_zh": (
             "Price stays very close to the 24h high while 1h open interest is clearly falling.\n"
@@ -138,8 +138,23 @@ STRATEGY_ZH: dict[str, dict[str, str]] = {
             "Exit follows alpha card Top-3 exit combos + mechanism decay; this family tracks oi_divergence and leaves when the divergence finishes or price structure breaks."
         ),
     },
+    "A4-PIR": {
+        "name": "\u9ad8\u4f4d\u4ed3\u4f4d\u505c\u6ede\u505a\u7a7a",
+        "direction": "short",
+        "entry_zh": (
+            "Price sits in the top 28% of the 4h range (position_in_range_4h > 0.7159) "
+            "while 1h OI growth is nearly flat (oi_change_rate_1h < 7.4e-05).\n"
+            "Physical logic: price is elevated but no new longs are building positions to sustain it, "
+            "so the high is maintained by existing inventory rather than fresh demand."
+        ),
+        "exit_zh": (
+            "Stop: 0.70%.\n"
+            "Exit follows alpha card Top-3 exit combos + mechanism decay (oi_divergence); "
+            "exits when position_in_range_4h drops below 0.50 or OI growth resumes."
+        ),
+    },
     "RT-1": {
-        "name": "Regime Transition Long",
+        "name": "\u5e02\u573a\u72b6\u6001\u8f6c\u6362\u505a\u591a",
         "direction": "long",
         "entry_zh": (
             "Confirmed RANGE_BOUND -> QUIET_TREND transition, with volume_vs_ma20 > 1.1 "

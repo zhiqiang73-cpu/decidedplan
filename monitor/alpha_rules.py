@@ -103,19 +103,36 @@ def _extract_top3_exit_combos(exit_payload: dict | None) -> list[list[dict]]:
 
 
 def _is_enabled_approved_card(card: dict) -> bool:
-    """Only load cards that are explicitly approved for live execution."""
+    """Only load cards that are explicitly approved for live execution.
+
+    Requires BOTH:
+      1. status in {"approved", "live", "enabled"}
+      2. approved_by is set (LLM auto-approve or human manual approve)
+    Cards without a clear approval trail are rejected to prevent
+    unapproved strategies from trading.
+    """
     if not isinstance(card, dict):
         return False
 
     status = str(card.get("status", "") or "").strip().lower()
-    if status in {"approved", "live", "enabled"}:
-        return True
     if status in {"pending", "rejected", "flagged", "disabled", "retired"}:
         return False
+    if status not in {"approved", "live", "enabled"}:
+        enabled = card.get("enabled")
+        if not (isinstance(enabled, bool) and enabled):
+            return False
 
-    enabled = card.get("enabled")
-    if isinstance(enabled, bool):
-        return enabled
+    # Gate: must have explicit approval record
+    approved_by = str(card.get("approved_by") or "").strip()
+    if not approved_by or approved_by == "UNKNOWN":
+        card_id = str(card.get("id", "?"))[:30]
+        logger.warning(
+            "[AlphaRules] BLOCKED %s: status=%s but no approved_by record",
+            card_id, status,
+        )
+        return False
+
+    return True
 
     # Legacy fallback: if status is absent, trust explicit APPROVE validation.
     validation = card.get("validation")
@@ -172,6 +189,9 @@ def _build_alpha_rules_from_approved(approved: list[dict]) -> list[dict]:
                     "combo_conditions": combo_conditions,
                     "exit": exit_condition,
                     "exit_combos": exit_combos,
+                    "exit_params": dict(card.get("exit_params") or {})
+                    if isinstance(card.get("exit_params"), dict)
+                    else None,
                     "stop_pct": stop_pct,
                     "rule_str": str(card.get("rule_str", "") or ""),
                     "card_id": str(card.get("id", entry["feature"])),
@@ -306,6 +326,9 @@ class AlphaRuleChecker:
                 "confidence_label": label,
                 "alpha_exit_conditions": [rule["exit"]] if rule.get("exit") else [],
                 "alpha_exit_combos": list(rule.get("exit_combos") or []),
+                "alpha_exit_params": dict(rule.get("exit_params") or {})
+                if isinstance(rule.get("exit_params"), dict)
+                else None,
                 "stop_pct": rule.get("stop_pct"),
                 "rule_str": rule.get("rule_str", ""),
                 "card_id": rule.get("card_id", name),

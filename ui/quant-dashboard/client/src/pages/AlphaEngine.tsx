@@ -13,6 +13,25 @@ import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
+const MECHANISM_ZH: Record<string, string> = {
+  funding_settlement: "资金费率结算",
+  funding_divergence: "资金费率背离",
+  funding_cycle_oversold: "资金费率过卖",
+  seller_drought: "卖方枯竭",
+  vwap_reversion: "VWAP回归",
+  compression_release: "仓位压缩释放",
+  bottom_taker_exhaust: "底部卖方耗尽",
+  near_high_distribution: "高位分发",
+  oi_divergence: "OI背离",
+  mm_rebalance: "做市商再平衡",
+  algo_slicing: "算法拆单",
+  regime_transition: "状态转换",
+  generic_alpha: "通用Alpha",
+  taker_snap_reversal: "吃单反转",
+  amplitude_absorption: "振幅吸收",
+  volume_climax_reversal: "量能高潮反转",
+};
+
 const ENGINE_PHASES = [
   { key: "data_download", label: "数据下载", desc: "获取历史K线数据" },
   { key: "ic_scan", label: "IC扫描", desc: "52+特征信息系数计算" },
@@ -410,7 +429,7 @@ export default function AlphaEngine() {
                         </span>
                         {(c as any).mechanismType && (
                           <span className="text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "rgba(240,185,11,0.1)", color: "#f0b90b", border: "1px solid rgba(240,185,11,0.2)" }}>
-                            {(c as any).mechanismType}
+                            {MECHANISM_ZH[(c as any).mechanismType] ?? (c as any).mechanismType}
                           </span>
                         )}
                         {(c as any).causalScore != null && (
@@ -711,7 +730,7 @@ export default function AlphaEngine() {
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-xs font-mono font-medium" style={{ color: "#eaecef" }}>{c.fullExpression}</span>
-                            <span className={`text-xs px-1.5 py-0.5 rounded ${c.direction === "LONG" ? "text-profit bg-profit-subtle" : "text-loss bg-loss-subtle"}`}>{c.direction}</span>
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${c.direction === "LONG" ? "text-profit bg-profit-subtle" : "text-loss bg-loss-subtle"}`}>{c.direction === "LONG" ? "\u505a\u591a" : "\u505a\u7a7a"}</span>
                             {llmR?.mechanism_display_name && (
                               <span className="text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "rgba(188,140,255,0.1)", color: "#bc8cff" }}>{llmR.mechanism_display_name}</span>
                             )}
@@ -889,7 +908,7 @@ export default function AlphaEngine() {
                   <div className="flex-1 min-w-0 pb-2">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-medium font-mono" style={{ color: "#eaecef" }}>{c.candidateId}</span>
-                      <span className={`text-xs px-1.5 py-0.5 rounded ${c.direction === "LONG" ? "text-profit bg-profit-subtle" : "text-loss bg-loss-subtle"}`}>{c.direction}</span>
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${c.direction === "LONG" ? "text-profit bg-profit-subtle" : "text-loss bg-loss-subtle"}`}>{c.direction === "LONG" ? "\u505a\u591a" : "\u505a\u7a7a"}</span>
                       <span className="text-xs" style={{ color: "#848e9c" }}>{c.symbol}</span>
                     </div>
                     <div className="flex items-center gap-4 mt-1">

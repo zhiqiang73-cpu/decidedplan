@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pandas as pd
 
@@ -172,19 +173,34 @@ SIGNAL_MECHANISM_MAP: dict[str, str] = {
     "A2-26": "near_high_distribution",
     "A2-29": "near_high_distribution",
     "A3-OI": "oi_divergence",
+    "A4-PIR": "oi_divergence",
     # ── 制度转换策略 ──────────────────────────────────────────────────────────
     "RT-1": "regime_transition",
     "RT-1_regime_transition_long": "regime_transition",
 }
 
 
-def resolve_mechanism_type(signal_name: str, direction: str = "") -> str:
-    """把信号名解析成机制类型，先精确匹配，再前缀匹配。"""
+def resolve_mechanism_type(signal_name: str, direction: str = "", family: str = "") -> str:
+    """把信号名解析成机制类型，先 family 匹配，再 signal_name 匹配。
+
+    Alpha 卡片的 signal_name 是时间戳格式（如 20260330_053917_dist_to__spread_v），
+    但 SIGNAL_MECHANISM_MAP 用 family 名（如 A2-29）。所以 family 优先查。
+    P1 系列的 signal_name 直接匹配（如 P1-8_vwap_vol_drought）。
+    """
     # P1-10 SHORT 特判
     if signal_name.startswith("P1-10") and str(direction).lower() == "short":
         return "top_buyer_exhaust"
 
-    # 精确匹配
+    # 优先用 family 查（Alpha 卡片的正确路径）
+    if family:
+        mechanism = SIGNAL_MECHANISM_MAP.get(family, "")
+        if mechanism:
+            return mechanism
+        for key, mech in SIGNAL_MECHANISM_MAP.items():
+            if family.startswith(key) or key.startswith(family):
+                return mech
+
+    # signal_name 精确匹配（P1 系列走这条路径）
     mechanism = SIGNAL_MECHANISM_MAP.get(signal_name, "")
     if mechanism:
         return mechanism
@@ -194,6 +210,10 @@ def resolve_mechanism_type(signal_name: str, direction: str = "") -> str:
         if signal_name.startswith(key) or key.startswith(signal_name):
             return mech
 
+    logger.warning(
+        "[MECHANISM] No mapping for signal=%s family=%s, falling back to generic_alpha",
+        signal_name, family,
+    )
     return "generic_alpha"
 
 
@@ -1070,6 +1090,70 @@ MECHANISM_CATALOG: dict[str, MechanismConfig] = {
 }
 
 
+
+# ─── Force Relationship Helpers ──────────────────────────────────────
+
+_FAMILY_TO_MECHANISM: dict[str, str] = {
+    "P0-2": "funding_settlement",
+    "P1-1": "mm_rebalance",
+    "P1-2": "algo_slicing",
+    "P1-6": "seller_drought",
+    "P1-8": "vwap_reversion",
+    "P1-9": "compression_release",
+    "P1-10": "bottom_taker_exhaust",
+    "P1-11": "funding_divergence",
+    "C1": "funding_cycle_oversold",
+    "RT-1": "regime_transition",
+    "A2-26": "near_high_distribution",
+    "A2-29": "near_high_distribution",
+    "A3-OI": "oi_divergence",
+    "A4-PIR": "oi_divergence",
+}
+
+
+def get_mechanism_for_family(family: str) -> str:
+    """Map strategy family to its primary mechanism ID. Falls back to 'generic_alpha'."""
+    return _FAMILY_TO_MECHANISM.get(family, "generic_alpha")
+
+
+def get_force_category(mechanism: str) -> str:
+    """Return the force category for a mechanism (e.g., 'leverage_cost_imbalance').
+
+    Looks up the mechanism in MECHANISM_CATALOG and returns its .category attribute.
+    Falls back to 'generic' for unknown mechanisms.
+    """
+    cfg = MECHANISM_CATALOG.get(mechanism)
+    if cfg is None:
+        return "generic"
+    return cfg.category
+
+
+def check_conflicts(mech_a: str, mech_b: str) -> bool:
+    """Return True if two mechanisms conflict with each other."""
+    cfg_a = MECHANISM_CATALOG.get(mech_a)
+    cfg_b = MECHANISM_CATALOG.get(mech_b)
+    if not cfg_a or not cfg_b:
+        return False
+    return (mech_b in cfg_a.relations.get("conflicts_with", [])) or            (mech_a in cfg_b.relations.get("conflicts_with", []))
+
+
+def check_reinforces(mech_a: str, mech_b: str) -> bool:
+    """Return True if the two mechanisms reinforce each other."""
+    cfg_a = MECHANISM_CATALOG.get(mech_a)
+    cfg_b = MECHANISM_CATALOG.get(mech_b)
+    if not cfg_a or not cfg_b:
+        return False
+    return (mech_b in cfg_a.relations.get("reinforces", [])) or            (mech_a in cfg_b.relations.get("reinforces", []))
+
+
+def get_chain_precedents(mechanism: str) -> list[str]:
+    """Return mechanisms that typically precede this one (often_follows)."""
+    cfg = MECHANISM_CATALOG.get(mechanism)
+    if not cfg:
+        return []
+    return list(cfg.relations.get("often_follows", []))
+
+
 class MechanismTracker:
     """追踪每个持仓背后因果机制的生命周期。"""
 
@@ -1346,13 +1430,248 @@ class MechanismTracker:
         return current_distance <= entry_distance * 0.5
 
 
+# ─── Dynamic Mechanism Registration (LLM-discovered forces) ──────────
+
+_CUSTOM_MECHANISMS_PATH = Path("monitor/output/custom_mechanisms.json")
+
+# Category aliases: map LLM's free-form category names to canonical IDs
+_CATEGORY_ALIASES: dict[str, str] = {
+    "leverage_cost": "leverage_cost_imbalance",
+    "liquidity": "liquidity_vacuum",
+    "exhaustion": "unilateral_exhaustion",
+    "algorithmic": "algorithmic_trace",
+    "potential_energy": "potential_energy_release",
+    "distribution": "distribution_pattern",
+    "oi_divergence": "open_interest_divergence",
+    "oi": "open_interest_divergence",
+    "inventory": "inventory_rebalance",
+    "regime": "regime_change",
+}
+
+
+def _resolve_category(raw_category: str) -> str:
+    """Normalize a category string to a canonical MECHANISM_CATEGORIES key."""
+    raw = raw_category.strip().lower().replace(" ", "_")
+    if raw in MECHANISM_CATEGORIES:
+        return raw
+    if raw in _CATEGORY_ALIASES:
+        return _CATEGORY_ALIASES[raw]
+    # Fuzzy match: check if raw is a substring of any canonical category
+    for key in MECHANISM_CATEGORIES:
+        if raw in key or key in raw:
+            return key
+    return "generic"
+
+
+def register_mechanism(
+    mechanism_type: str,
+    family: str,
+    direction: str,
+    category: str,
+    display_name: str = "",
+    physics: dict | None = None,
+    primary_decay_feature: str = "",
+    primary_decay_condition: str = "",
+    decay_narrative: str = "",
+) -> bool:
+    """Register a new LLM-discovered mechanism into the live force library.
+
+    Creates a MechanismConfig, inserts into MECHANISM_CATALOG,
+    registers the category if new, maps the family, and persists to disk.
+
+    Returns True if a NEW mechanism was registered, False if it already existed.
+    """
+    mechanism_type = mechanism_type.strip()
+    if not mechanism_type or mechanism_type in ("generic", "generic_alpha"):
+        return False
+
+    # Already known — just ensure family mapping exists
+    if mechanism_type in MECHANISM_CATALOG:
+        if family and family not in _FAMILY_TO_MECHANISM:
+            _FAMILY_TO_MECHANISM[family] = mechanism_type
+            _save_custom_mechanisms()
+        return False
+
+    # Parse primary decay condition from LLM string like "oi_change_rate_1h > 0.001"
+    primary = _parse_decay_condition(primary_decay_feature, primary_decay_condition)
+
+    resolved_cat = _resolve_category(category)
+    physics = physics or {}
+
+    config = MechanismConfig(
+        mechanism_type=mechanism_type,
+        primary=primary,
+        confirms=[],
+        description=decay_narrative or display_name or mechanism_type,
+        category=resolved_cat,
+        display_name=display_name,
+        physics=physics,
+        entry_fingerprint=[primary_decay_feature] if primary_decay_feature else [],
+        relations={},
+        validated_by=[family] if family else [],
+    )
+
+    # Register into live data structures
+    config._is_custom = True  # type: ignore[attr-defined]
+    MECHANISM_CATALOG[mechanism_type] = config
+
+    if resolved_cat not in MECHANISM_CATEGORIES:
+        MECHANISM_CATEGORIES[resolved_cat] = display_name or resolved_cat
+
+    if family:
+        _FAMILY_TO_MECHANISM[family] = mechanism_type
+        SIGNAL_MECHANISM_MAP[family] = mechanism_type
+
+    _save_custom_mechanisms()
+
+    logger.info(
+        "[FORCE_REGISTRY] New mechanism registered: %s (category=%s, family=%s)",
+        mechanism_type, resolved_cat, family,
+    )
+    return True
+
+
+def _parse_decay_condition(feature: str, condition_str: str) -> DecayCondition:
+    """Parse LLM decay condition string like 'oi_change_rate_1h > 0.001'."""
+    import re as _re
+    feature = feature.strip()
+    condition_str = condition_str.strip()
+
+    # Try to parse "feature op threshold" from condition string
+    m = _re.match(r"(\w+)\s*([<>]=?)\s*([-\d.eE+]+)", condition_str)
+    if m:
+        feature = m.group(1)
+        op = m.group(2).replace(">=", ">").replace("<=", "<")
+        threshold = float(m.group(3))
+    else:
+        op = ">"
+        threshold = 0.0
+
+    return DecayCondition(
+        feature=feature or "generic",
+        op=op,
+        threshold=threshold,
+        description=condition_str or "LLM-derived decay condition",
+    )
+
+
+def _save_custom_mechanisms() -> None:
+    """Persist LLM-discovered mechanisms to JSON for restart survival."""
+    import json as _json
+
+    custom: list[dict] = []
+    for mtype, cfg in MECHANISM_CATALOG.items():
+        # Only save mechanisms not in the original hardcoded catalog
+        if not hasattr(cfg, "_is_custom"):
+            continue
+        custom.append({
+            "mechanism_type": cfg.mechanism_type,
+            "category": cfg.category,
+            "display_name": cfg.display_name,
+            "description": cfg.description,
+            "physics": cfg.physics,
+            "primary": {
+                "feature": cfg.primary.feature,
+                "op": cfg.primary.op,
+                "threshold": cfg.primary.threshold,
+                "description": cfg.primary.description,
+            },
+            "entry_fingerprint": cfg.entry_fingerprint,
+            "relations": cfg.relations,
+            "validated_by": cfg.validated_by,
+        })
+
+    # Also save custom family mappings
+    families: dict[str, str] = {}
+    for fam, mech in _FAMILY_TO_MECHANISM.items():
+        if mech in {c["mechanism_type"] for c in custom}:
+            families[fam] = mech
+
+    data = {"mechanisms": custom, "family_mappings": families}
+    try:
+        _CUSTOM_MECHANISMS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _CUSTOM_MECHANISMS_PATH.with_suffix(".tmp")
+        tmp.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_CUSTOM_MECHANISMS_PATH)
+    except Exception as exc:
+        logger.warning("[FORCE_REGISTRY] Failed to save custom mechanisms: %s", exc)
+
+
+def _load_custom_mechanisms() -> None:
+    """Load LLM-discovered mechanisms from JSON on startup."""
+    import json as _json
+
+    if not _CUSTOM_MECHANISMS_PATH.exists():
+        return
+    try:
+        data = _json.loads(_CUSTOM_MECHANISMS_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("[FORCE_REGISTRY] Failed to load custom mechanisms: %s", exc)
+        return
+
+    for entry in data.get("mechanisms", []):
+        mtype = entry.get("mechanism_type", "")
+        if not mtype or mtype in MECHANISM_CATALOG:
+            continue
+
+        primary_data = entry.get("primary", {})
+        primary = DecayCondition(
+            feature=primary_data.get("feature", "generic"),
+            op=primary_data.get("op", ">"),
+            threshold=primary_data.get("threshold", 0.0),
+            description=primary_data.get("description", ""),
+        )
+
+        cfg = MechanismConfig(
+            mechanism_type=mtype,
+            primary=primary,
+            confirms=[],
+            description=entry.get("description", ""),
+            category=entry.get("category", "generic"),
+            display_name=entry.get("display_name", ""),
+            physics=entry.get("physics", {}),
+            entry_fingerprint=entry.get("entry_fingerprint", []),
+            relations=entry.get("relations", {}),
+            validated_by=entry.get("validated_by", []),
+        )
+        cfg._is_custom = True  # type: ignore[attr-defined]
+        MECHANISM_CATALOG[mtype] = cfg
+
+        cat = entry.get("category", "generic")
+        if cat and cat not in MECHANISM_CATEGORIES:
+            MECHANISM_CATEGORIES[cat] = entry.get("display_name", cat)
+
+    for fam, mech in data.get("family_mappings", {}).items():
+        if fam not in _FAMILY_TO_MECHANISM:
+            _FAMILY_TO_MECHANISM[fam] = mech
+            SIGNAL_MECHANISM_MAP[fam] = mech
+
+    count = len(data.get("mechanisms", []))
+    if count:
+        logger.info("[FORCE_REGISTRY] Loaded %d custom mechanisms from disk", count)
+
+
+# Load custom mechanisms on module import
+_load_custom_mechanisms()
+
+
 __all__ = [
     "DecayCondition",
     "MechanismConfig",
     "DecayResult",
     "MechanismTracker",
     "MECHANISM_CATALOG",
+    "MECHANISM_CATEGORIES",
     "SIGNAL_MECHANISM_MAP",
     "_safe_get",
     "resolve_mechanism_type",
+    # Force relationship helpers
+    "_FAMILY_TO_MECHANISM",
+    "get_mechanism_for_family",
+    "get_force_category",
+    "check_conflicts",
+    "check_reinforces",
+    "get_chain_precedents",
+    # Dynamic registration
+    "register_mechanism",
 ]

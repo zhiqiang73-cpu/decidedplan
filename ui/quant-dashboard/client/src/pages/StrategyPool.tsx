@@ -1,5 +1,5 @@
-import QuantLayout from "@/components/QuantLayout";
-import React, { useState } from "react";
+﻿import QuantLayout from "@/components/QuantLayout";
+import React, { useMemo, useState } from "react";
 import { SkeletonCard, SkeletonRow } from "@/components/LoadingSkeleton";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
@@ -34,6 +34,12 @@ export default function StrategyPool() {
     status: statusFilter || undefined,
     search: search || undefined,
   }, { refetchInterval: 15000 });
+  const { data: winRates } = trpc.alphaEngine.getSignalWinRates.useQuery(undefined, { refetchInterval: 30000 });
+
+  const winRateMap = useMemo(
+    () => Object.fromEntries((winRates ?? []).map((r: any) => [r.family, r.oosWinRate])),
+    [winRates],
+  );
 
   // Client-side direction filter
   const dirFiltered = (strategies ?? []).filter(s => !dirFilter || s.direction === dirFilter);
@@ -211,6 +217,7 @@ export default function StrategyPool() {
                   <th className="px-4 py-3 text-left text-xs font-medium" style={{ color: "#848e9c" }}>策略</th>
                   <th className="px-4 py-3 text-left text-xs font-medium" style={{ color: "#848e9c" }}>状态</th>
                   <SortTh label="OOS胜率" sortKey="oosWinRate" current={sortKey} dir={sortDir} onSort={toggleSort} />
+                  <th className="px-4 py-3 text-left text-xs font-medium" style={{ color: "#848e9c" }}>验证胜率</th>
                   <SortTh label="平均收益" sortKey="oosAvgReturn" current={sortKey} dir={sortDir} onSort={toggleSort} />
                   <SortTh label="7日盈亏" sortKey="pnl7d" current={sortKey} dir={sortDir} onSort={toggleSort} />
                   <SortTh label="置信度" sortKey="confidenceScore" current={sortKey} dir={sortDir} onSort={toggleSort} />
@@ -219,8 +226,12 @@ export default function StrategyPool() {
                 </tr>
               </thead>
               <tbody>
-                {sorted.map(s => (
-                  <React.Fragment key={s.strategyId}>
+                {sorted.map(s => {
+                  const vrVal = winRateMap[(s as any).family ?? s.strategyId];
+                  const vrColor = vrVal == null ? "#848e9c" : vrVal >= 80 ? "#0ecb81" : vrVal >= 60 ? "#f0b90b" : "#f6465d";
+
+                  return (
+                    <React.Fragment key={s.strategyId}>
                     <tr
                       className="cursor-pointer transition-colors"
                       style={{ borderBottom: "1px solid #1e2329" }}
@@ -247,6 +258,11 @@ export default function StrategyPool() {
                           </span>
                         </div>
                         <div className="text-xs" style={{ color: "#848e9c" }}>n={s.oosSampleSize}</div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="text-sm font-num font-bold" style={{ color: vrColor }}>
+                          {vrVal == null ? "—" : `${vrVal.toFixed(1)}%`}
+                        </span>
                       </td>
                       <td className="px-4 py-3">
                         <span className="text-sm font-num text-profit">+{((s.oosAvgReturn ?? 0) * 100).toFixed(3)}%</span>
@@ -296,7 +312,7 @@ export default function StrategyPool() {
                     {/* Expanded Row */}
                     {expandedId === s.strategyId && (
                       <tr key={`${s.strategyId}-expanded`} style={{ backgroundColor: "#161a1e" }}>
-                        <td colSpan={8} className="px-4 py-4">
+                        <td colSpan={9} className="px-4 py-4">
                           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
                             {/* Entry Condition */}
                             <div>
@@ -396,11 +412,12 @@ export default function StrategyPool() {
                         </td>
                       </tr>
                     )}
-                  </React.Fragment>
-                ))}
+                    </React.Fragment>
+                  );
+                })}
                 {sorted.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="px-4 py-12 text-center">
+                    <td colSpan={9} className="px-4 py-12 text-center">
                       <div className="flex flex-col items-center gap-2" style={{ color: "#848e9c" }}>
                         <TrendingUp size={32} style={{ opacity: 0.3 }} />
                         <p className="text-sm">暂无策略数据</p>
@@ -409,7 +426,7 @@ export default function StrategyPool() {
                     </td>
                   </tr>
                 )}
-              {strategiesLoading && Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} cols={8} />)}
+              {strategiesLoading && Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} cols={9} />)}
               </tbody>
             </table>
           </div>

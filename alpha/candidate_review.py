@@ -13,7 +13,7 @@ MIN_REVIEW_OOS_N = 30
 MIN_REVIEW_EDGE_PCT = 0.02
 MIN_EXIT_SAMPLES = 30
 MIN_EXIT_PF = 1.0
-MIN_EXIT_TRIGGER_PCT = 25.0
+MIN_EXIT_TRIGGER_PCT = 10.0
 MIN_EXIT_TRIGGER_COUNT = 10
 
 _DELAYED_API_FEATURES = {
@@ -212,6 +212,17 @@ def _exit_reasons(card: dict[str, Any], reasons: list[str]) -> None:
     top3 = exit_info.get("top3")
     if not isinstance(top3, list) or not top3:
         reasons.append("缺少出场候选组合 top3")
+
+    # Hard stop ratio check: if >60% of trades hit hard stop,
+    # the entry signal lacks edge and profits only from stop loss capping.
+    reason_counts = exit_info.get("exit_reason_counts")
+    if isinstance(reason_counts, dict) and exit_samples > 0:
+        hard_stop_count = _safe_int(reason_counts.get("hard_stop"))
+        hard_stop_pct = hard_stop_count / exit_samples * 100.0
+        if hard_stop_pct > 60:
+            reasons.append(
+                f"止损出场占比过高: {hard_stop_pct:.0f}% > 60% (策略缺乏正期望)"
+            )
 
 
 def review_card(card: dict[str, Any]) -> ReviewDecision:

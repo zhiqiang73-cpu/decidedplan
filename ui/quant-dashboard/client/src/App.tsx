@@ -12,6 +12,7 @@ import AlphaEngine from "./pages/AlphaEngine";
 import TradingPairs from "./pages/TradingPairs";
 import TradeHistory from "./pages/TradeHistory";
 import DevProgress from "./pages/DevProgress";
+import ForceLibrary from "./pages/ForceLibrary";
 
 function Router() {
   return (
@@ -20,6 +21,7 @@ function Router() {
       <Route path="/api-config" component={ApiConfig} />
       <Route path="/positions" component={Positions} />
       <Route path="/strategies" component={StrategyPool} />
+      <Route path="/forces" component={ForceLibrary} />
       <Route path="/alpha" component={AlphaEngine} />
       <Route path="/pairs" component={TradingPairs} />
       <Route path="/trades" component={TradeHistory} />

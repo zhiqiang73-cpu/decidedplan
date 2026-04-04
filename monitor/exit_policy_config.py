@@ -127,3 +127,13 @@ def has_explicit_exit_params(family: str, direction: str | None = None) -> bool:
         return False
     direction_key = resolve_exit_params_key(family, direction)
     return direction_key in raw or family in raw
+
+
+def save_exit_params(key: str, params: ExitParams) -> None:
+    """Merge a single family|direction entry into best_params.json (atomic write)."""
+    raw = _load_raw_params()
+    raw[key] = params.to_dict()
+    BEST_PARAMS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = BEST_PARAMS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(raw, indent=4), encoding="utf-8")
+    tmp.replace(BEST_PARAMS_PATH)

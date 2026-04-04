@@ -1,4 +1,4 @@
-﻿"""Unit tests for the execution layer."""
+"""Unit tests for the execution layer."""
 
 from __future__ import annotations
 
@@ -314,6 +314,16 @@ class ExecutionLayerTests(unittest.TestCase):
                         "expected_hold_bars": 4,
                     }
                 ],
+                "alpha_exit_params": {
+                    "stop_pct": 0.3,
+                    "protect_start_pct": 0.12,
+                    "protect_gap_ratio": 0.5,
+                    "protect_floor_pct": 0.03,
+                    "min_hold_bars": 1,
+                    "max_hold_factor": 4,
+                    "exit_confirm_bars": 1,
+                    "tighten_gap_ratio": 0.3,
+                },
                 "stop_pct": 0.3,
             },
             latest_features={"close": 100.5, "oi_change_rate_5m": 0.02},
@@ -326,6 +336,7 @@ class ExecutionLayerTests(unittest.TestCase):
         self.assertTrue(pos.dynamic_exit_enabled)
         self.assertEqual(pos.family, "ALPHA::mean_revert::short::10")
         self.assertIn("alpha_exit_conditions", pos.entry_snapshot)
+        self.assertEqual(pos.entry_snapshot["alpha_exit_params"]["min_hold_bars"], 1)
 
         engine.on_bar(
             {
@@ -382,6 +393,16 @@ class ExecutionLayerTests(unittest.TestCase):
                         },
                     ]
                 ],
+                "alpha_exit_params": {
+                    "stop_pct": 0.3,
+                    "protect_start_pct": 0.12,
+                    "protect_gap_ratio": 0.5,
+                    "protect_floor_pct": 0.03,
+                    "min_hold_bars": 1,
+                    "max_hold_factor": 4,
+                    "exit_confirm_bars": 1,
+                    "tighten_gap_ratio": 0.3,
+                },
                 "stop_pct": 0.3,
             },
             latest_features={"close": 100.5, "oi_change_rate_5m": 0.02, "volume_vs_ma20": 1.0},
@@ -394,6 +415,7 @@ class ExecutionLayerTests(unittest.TestCase):
         self.assertTrue(pos.dynamic_exit_enabled)
         self.assertEqual(pos.family, "ALPHA::combo_revert::short::10")
         self.assertIn("alpha_exit_combos", pos.entry_snapshot)
+        self.assertEqual(pos.entry_snapshot["alpha_exit_params"]["exit_confirm_bars"], 1)
 
         engine.on_bar(
             {

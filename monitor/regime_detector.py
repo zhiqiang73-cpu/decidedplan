@@ -19,10 +19,23 @@
   VOL_EXPANSION  波动率爆发    → 高危，仅 HIGH 置信度 SHORT 入场，禁 LONG
   CRISIS         危机/去杠杆   → 禁止所有 P2 Alpha 入场，仅保留事件型 P1
 
+趋势方向（与制度正交的第二维度）:
+
+  TREND_UP       上涨趋势      → P2 Alpha SHORT 需要 HIGH 置信度
+  TREND_DOWN     下跌趋势      → P2 Alpha LONG 需要 HIGH 置信度
+  TREND_NEUTRAL  无明确趋势    → 不额外限制
+
+  物理依据: 在安静上涨中，"价格接近24h高点"永远为真（因为不断创新高），
+  但做空的因果前提（高位分发力）并不存在。趋势方向过滤防止逆势入场。
+
+  判定方法: 三票制投票（价格斜率 + 方向自相关 + 区间位置），2/3多数决定。
+  同样使用 CONFIRM_BARS 惯性确认。
+
 实盘验证已知规则:
   - 大跌日应更严格限制抄底类 LONG
   - 全部 SHORT 规则在 VOLATILE_TREND 下跌最有效（Mar 18-19 数据）
   - CRISIS 期间 Alpha 规则系统性失效（极端事件打破统计规律）
+  - 2026-04-04: 安静上涨中 SHORT alpha 反复亏损 → 加入趋势方向过滤
 """
 
 import logging
@@ -38,6 +51,19 @@ VOLATILE_TREND = "VOLATILE_TREND"
 RANGE_BOUND    = "RANGE_BOUND"
 VOL_EXPANSION  = "VOL_EXPANSION"
 CRISIS         = "CRISIS"
+
+# ── 趋势方向常量（与制度正交）────────────────────────────────────────────────
+TREND_UP       = "TREND_UP"
+TREND_DOWN     = "TREND_DOWN"
+TREND_NEUTRAL  = "TREND_NEUTRAL"
+
+# ── 趋势方向判断阈值 ────────────────────────────────────────────────────────
+TREND_PRICE_SLOPE_PCT  = 0.002   # 20根K线涨跌 > 0.2% 才算有方向
+TREND_DIR_AUTOCORR_MIN = 0.12    # 方向自相关 > 0.12 才算有持续性
+TREND_DIR_NET_MIN      = 0.05    # 净方向 > 0.05 才有意义
+TREND_RANGE_HIGH       = 0.75    # 24h 区间位置 > 75% = 高位
+TREND_RANGE_LOW        = 0.25    # 24h 区间位置 < 25% = 低位
+TREND_LOOKBACK_BARS    = 20      # 趋势检测回看窗口
 
 # ── 制度判断阈值（基于物理特征，不用 ML）─────────────────────────────────────
 
@@ -84,6 +110,8 @@ class RegimeDetector:
         self._regime_history = []   # 最近 CONFIRM_BARS 根 K 线的原始制度判断
         self._current_regime = QUIET_TREND
         self._regime_bar_count = 0
+        self._trend_history: list[str] = []
+        self._current_trend = TREND_NEUTRAL
 
     # ── 主接口 ────────────────────────────────────────────────────────────────
 
@@ -116,23 +144,47 @@ class RegimeDetector:
                     )
                     self._current_regime = raw
 
+        # 趋势方向检测（独立于 regime，正交维度）
+        raw_trend = self._classify_trend_direction(row, df_tail)
+        self._trend_history.append(raw_trend)
+        if len(self._trend_history) > CONFIRM_BARS:
+            self._trend_history.pop(0)
+        if (
+            len(self._trend_history) == CONFIRM_BARS
+            and all(t == raw_trend for t in self._trend_history)
+        ):
+            if raw_trend != self._current_trend:
+                logger.info(
+                    "[TREND] %s -> %s (confirmed %d bars)",
+                    self._current_trend, raw_trend, CONFIRM_BARS,
+                )
+                self._current_trend = raw_trend
+
         return self._current_regime
 
-    def filter_alerts(self, alerts: list, regime: str) -> list:
+    def filter_alerts(
+        self,
+        alerts: list,
+        regime: str,
+        trend_direction: str = TREND_NEUTRAL,
+    ) -> list:
         """
-        根据制度过滤信号列表。
+        根据制度和趋势方向过滤信号列表。
 
-        过滤逻辑（物理依据）:
+        制度过滤（物理依据）:
           CRISIS:         禁止所有 P2 Alpha 信号
-                          P2 = 统计均值回归，危机期间统计规律失效
-          VOL_EXPANSION:  禁止 LONG 入场（死猫反弹风险极高）
-                          仅允许 HIGH 置信度 SHORT 入场
+          VOL_EXPANSION:  禁止 LONG 入场，SHORT 需 HIGH 置信度
           VOLATILE_TREND: 仅允许 MEDIUM+ 置信度信号
-          RANGE_BOUND:    所有信号正常（震荡中均值回归最有效）
+          RANGE_BOUND:    所有信号正常
           QUIET_TREND:    所有信号正常
 
+        趋势方向过滤:
+          TREND_UP:       P2 Alpha SHORT 需 HIGH 置信度（防止逆势做空）
+          TREND_DOWN:     P2 Alpha LONG 需 HIGH 置信度（防止逆势做多）
+          TREND_NEUTRAL:  不额外限制
+
         Returns:
-            过滤后的信号列表，每条被过滤的信号会打印 WARNING 日志
+            过滤后的信号列表
         """
         if not alerts:
             return []
@@ -148,16 +200,28 @@ class RegimeDetector:
                 regime, phase, direction, conf
             )
 
+            # 趋势方向过滤：逆势 P2 Alpha 信号需要 HIGH 置信度
+            if reject_reason is None and phase == "P2":
+                if trend_direction == TREND_UP and direction == "short" and conf < 3:
+                    reject_reason = (
+                        f"TREND_UP: P2 SHORT requires HIGH confidence (got {conf})"
+                    )
+                elif trend_direction == TREND_DOWN and direction == "long" and conf < 3:
+                    reject_reason = (
+                        f"TREND_DOWN: P2 LONG requires HIGH confidence (got {conf})"
+                    )
+
             if reject_reason:
                 logger.warning(
-                    f"[REGIME {regime}] Rejected {name} ({direction.upper()}) "
-                    f"confidence={conf}: {reject_reason}"
+                    f"[REGIME {regime}|{trend_direction}] Rejected {name} "
+                    f"({direction.upper()}) confidence={conf}: {reject_reason}"
                 )
                 continue
 
-            # 给信号附加制度标签（便于 execution_log 记录）
+            # 给信号附加制度和趋势标签
             a = dict(a)
             a["regime"] = regime
+            a["trend_direction"] = trend_direction
             filtered.append(a)
 
         return filtered
@@ -165,6 +229,10 @@ class RegimeDetector:
     @property
     def current_regime(self) -> str:
         return self._current_regime
+
+    @property
+    def current_trend(self) -> str:
+        return self._current_trend
 
     # ── 内部方法 ──────────────────────────────────────────────────────────────
 
@@ -205,6 +273,53 @@ class RegimeDetector:
 
         # ── QUIET_TREND: 默认（低波动，趋势或震荡均可）─────────────────────
         return QUIET_TREND
+
+    @staticmethod
+    def _classify_trend_direction(row: pd.Series, df_tail: pd.DataFrame) -> str:
+        """
+        判断当前趋势方向（三票制投票，2/3 多数决定）。
+
+        投票1: 近 TREND_LOOKBACK_BARS 根K线的收盘价斜率
+               物理依据: 价格在涨还是在跌——最直接的趋势证据
+        投票2: 方向自相关 + 净方向
+               物理依据: 成交方向的持续性——是趋势性买卖，不是随机噪音
+        投票3: 24h 区间位置
+               物理依据: 价格在顶部/底部区域——持续处于极端区域说明趋势驱动
+        """
+        votes_up = 0
+        votes_down = 0
+
+        # 投票1: 收盘价斜率
+        if len(df_tail) >= TREND_LOOKBACK_BARS and "close" in df_tail.columns:
+            recent = df_tail["close"].iloc[-TREND_LOOKBACK_BARS:]
+            first_close = recent.iloc[0]
+            if first_close > 0:
+                pct_change = (recent.iloc[-1] - first_close) / first_close
+                if pct_change > TREND_PRICE_SLOPE_PCT:
+                    votes_up += 1
+                elif pct_change < -TREND_PRICE_SLOPE_PCT:
+                    votes_down += 1
+
+        # 投票2: 方向自相关 + 净方向
+        dir_autocorr = _safe_get(row, "direction_autocorr", default=0.0)
+        dir_net = _safe_get(row, "direction_net_1m", default=0.0)
+        if dir_autocorr > TREND_DIR_AUTOCORR_MIN and dir_net > TREND_DIR_NET_MIN:
+            votes_up += 1
+        elif dir_autocorr > TREND_DIR_AUTOCORR_MIN and dir_net < -TREND_DIR_NET_MIN:
+            votes_down += 1
+
+        # 投票3: 24h 区间位置
+        pos_range = _safe_get(row, "position_in_range_24h", default=0.5)
+        if pos_range > TREND_RANGE_HIGH:
+            votes_up += 1
+        elif pos_range < TREND_RANGE_LOW:
+            votes_down += 1
+
+        if votes_up >= 2:
+            return TREND_UP
+        if votes_down >= 2:
+            return TREND_DOWN
+        return TREND_NEUTRAL
 
     @staticmethod
     def _check_regime_filter(

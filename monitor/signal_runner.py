@@ -24,6 +24,12 @@ from signals.taker_exhaustion_low import TakerExhaustionLowDetector
 from signals.vwap_twap import VWAPTWAPDetector
 from signals.vwap_vol_drought import VwapVolDroughtDetector
 from signals.regime_transition import RegimeTransitionDetector
+from monitor.mechanism_tracker import (
+    get_mechanism_for_family,
+    get_force_category,
+    check_conflicts,
+    check_reinforces,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +201,8 @@ class SignalRunner:
             raw_alerts.append(alert)
 
         regime = self._regime_detector.detect(latest_row, window)
-        logger.debug(f"[REGIME] current regime: {regime}")
+        trend_dir = self._regime_detector.current_trend
+        logger.debug("[REGIME] current regime: %s  trend: %s", regime, trend_dir)
         flow_type = self._flow_classifier.classify(latest_row)
         logger.debug("[FLOW] current flow: %s", flow_type)
 
@@ -209,11 +216,15 @@ class SignalRunner:
             if len(composite_alerts) < _pre_count:
                 logger.info("[HEALTH] Filtered %d alerts by signal health", _pre_count - len(composite_alerts))
 
-        composite_alerts = self._regime_detector.filter_alerts(composite_alerts, regime)
-        # 附加 flow_type 和 regime 标签
+        composite_alerts = self._regime_detector.filter_alerts(
+            composite_alerts, regime, trend_direction=trend_dir,
+        )
+        composite_alerts = self._apply_force_logic(composite_alerts)
+        # attach flow_type and regime labels
         for alert in composite_alerts:
             alert["flow_type"] = flow_type
             alert["regime"] = regime
+            alert["trend_direction"] = trend_dir
         return raw_alerts, composite_alerts
 
     @property
@@ -223,6 +234,10 @@ class SignalRunner:
     @property
     def current_flow(self) -> str:
         return self._flow_classifier.current_flow
+
+    @property
+    def current_trend(self) -> str:
+        return self._regime_detector.current_trend
 
     def strategy_status_rows(self) -> list[dict]:
         return build_strategy_status_rows(has_explicit_exit_params)
@@ -379,6 +394,79 @@ class SignalRunner:
             )
 
         return composites
+
+
+    def _apply_force_logic(self, alerts: list[dict]) -> list[dict]:
+        """Enrich alerts with mechanism/force metadata; resolve conflicts and reinforcements.
+
+        For each alert:
+          - Adds 'mechanism_type' and 'force_category' fields.
+
+        Pairwise across all alerts:
+          - Conflicting mechanisms: keep the higher-confidence one, drop the lower.
+            Equal confidence: keep the earlier one (index order).
+          - Reinforcing mechanisms: boost confidence of both by 1 (cap at 3);
+            append peer mechanism to 'force_reinforced_by' list.
+
+        Returns a new list; input list is not mutated.
+        """
+        if not alerts:
+            return []
+
+        # Shallow-copy each alert and annotate with mechanism fields
+        enriched: list[dict] = []
+        for alert in alerts:
+            a = dict(alert)
+            family = str(a.get("family") or "")
+            mech = get_mechanism_for_family(family)
+            a["mechanism_type"] = mech
+            a["force_category"] = get_force_category(mech)
+            a.setdefault("force_reinforced_by", [])
+            enriched.append(a)
+
+        # --- Conflict pass: mark losers for removal ---
+        drop_indices: set[int] = set()
+        for i in range(len(enriched)):
+            for j in range(i + 1, len(enriched)):
+                if i in drop_indices or j in drop_indices:
+                    continue
+                mech_i = enriched[i]["mechanism_type"]
+                mech_j = enriched[j]["mechanism_type"]
+                if check_conflicts(mech_i, mech_j):
+                    conf_i = int(enriched[i].get("confidence") or 1)
+                    conf_j = int(enriched[j].get("confidence") or 1)
+                    if conf_i >= conf_j:
+                        drop_idx = j
+                        dropped = mech_j
+                    else:
+                        drop_idx = i
+                        dropped = mech_i
+                    drop_indices.add(drop_idx)
+                    logger.info(
+                        "[FORCE] Conflict: %s vs %s, dropping %s",
+                        mech_i, mech_j, dropped,
+                    )
+
+        # --- Reinforcement pass (only on non-dropped alerts) ---
+        for i in range(len(enriched)):
+            if i in drop_indices:
+                continue
+            for j in range(i + 1, len(enriched)):
+                if j in drop_indices:
+                    continue
+                mech_i = enriched[i]["mechanism_type"]
+                mech_j = enriched[j]["mechanism_type"]
+                if check_reinforces(mech_i, mech_j):
+                    enriched[i]["confidence"] = min(3, int(enriched[i].get("confidence") or 1) + 1)
+                    enriched[j]["confidence"] = min(3, int(enriched[j].get("confidence") or 1) + 1)
+                    enriched[i]["force_reinforced_by"].append(mech_j)
+                    enriched[j]["force_reinforced_by"].append(mech_i)
+                    logger.info(
+                        "[FORCE] Reinforcement: %s + %s",
+                        mech_i, mech_j,
+                    )
+
+        return [a for idx, a in enumerate(enriched) if idx not in drop_indices]
 
     def _filter_by_health(self, alerts: list[dict]) -> list[dict]:
         """按信号健康度过滤: 任一 card retired 则丢弃, 任一 degraded 则降 1 级置信度。"""

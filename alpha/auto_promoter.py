@@ -181,11 +181,35 @@ class AutoPromoter:
         rejected = _read_json(_REJECTED_FILE, [])
         review = _read_json(_REVIEW_FILE, [])
 
-        # 只处理尚未经过 LLM 验证的条目
+        # Dedup: collect rule_str keys already in approved/review to skip re-validation
+        existing_rule_strs: set[str] = set()
+        for pool in (approved, review):
+            for c in pool:
+                rs = str(c.get("rule_str", "") or "").strip()
+                if rs:
+                    existing_rule_strs.add(rs)
+
+        # 只处理尚未经过 LLM 验证且不重复的条目
         unvalidated = [
             c for c in pending
             if not c.get("llm_validated")
+            and str(c.get("rule_str", "") or "").strip() not in existing_rule_strs
         ][:self._max_batch]
+
+        # Remove duplicates from pending silently
+        dup_count = sum(
+            1 for c in pending
+            if not c.get("llm_validated")
+            and str(c.get("rule_str", "") or "").strip() in existing_rule_strs
+        )
+        if dup_count:
+            logger.info("[AutoPromoter] 跳过 %d 条重复候选 (已在审查队列/已批准)", dup_count)
+            pending = [
+                c for c in pending
+                if c.get("llm_validated")
+                or str(c.get("rule_str", "") or "").strip() not in existing_rule_strs
+            ]
+            _write_json(_PENDING_FILE, pending)
 
         if not unvalidated:
             logger.info("[AutoPromoter] 没有需要验证的候选，跳过")
@@ -241,6 +265,8 @@ class AutoPromoter:
                 approved_ids.add(cid)
                 decision_entry["decision"] = "AUTO_APPROVED"
                 self._total_approved += 1
+                self._persist_exit_params(candidate)
+                self._register_mechanism_if_new(candidate, result)
                 logger.info(
                     "[AutoPromoter] AUTO_APPROVE conf=%.2f mechanism=%s  %s",
                     result.confidence, result.mechanism_type, cid[:24],
@@ -284,7 +310,16 @@ class AutoPromoter:
         _write_json(_PENDING_FILE, remaining_pending)
         _write_json(_APPROVED_FILE, approved + new_approved)
         _write_json(_REJECTED_FILE, rejected + new_rejected)
-        _write_json(_REVIEW_FILE, review + new_review)
+
+        # Dedup review queue by rule_str before writing
+        merged_review: dict[str, dict] = {}
+        for c in review:
+            key = str(c.get("rule_str", "") or c.get("id", ""))
+            merged_review[key] = c
+        for c in new_review:
+            key = str(c.get("rule_str", "") or c.get("id", ""))
+            merged_review[key] = c  # newer replaces older
+        _write_json(_REVIEW_FILE, list(merged_review.values()))
 
         summary = {
             "approved": len(new_approved),
@@ -319,6 +354,116 @@ class AutoPromoter:
             logger.info("[AutoPromoter] 下次运行: %s", next_str)
             time.sleep(self._interval_hours * 3600)
 
+    # ── 出场参数持久化 ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _persist_exit_params(card: dict) -> None:
+        """Write candidate's ExitParams into best_params.json for runtime pickup.
+
+        This aligns Alpha strategies with P1: once approved, the runtime's
+        smart_exit_policy uses the same ExitParams framework via
+        has_explicit_exit_params() / get_exit_params_for_signal().
+        """
+        from monitor.exit_policy_config import (
+            ExitParams,
+            resolve_exit_params_key,
+            save_exit_params,
+        )
+
+        exit_params_dict = card.get("exit_params")
+        if not isinstance(exit_params_dict, dict):
+            return
+
+        entry = card.get("entry", {})
+        direction = str(entry.get("direction", "")).lower()
+        family = str(card.get("family") or "").strip()
+        if not family:
+            group = str(card.get("group") or card.get("id", ""))
+            horizon = int(entry.get("horizon", 0))
+            family = f"ALPHA::{group}::{direction}::{horizon}"
+
+        key = resolve_exit_params_key(family, direction)
+        try:
+            valid_fields = {f.name for f in ExitParams.__dataclass_fields__.values()}
+            params = ExitParams(**{
+                k: v for k, v in exit_params_dict.items()
+                if k in valid_fields
+            })
+            save_exit_params(key, params)
+            logger.info("[AutoPromoter] Wrote exit params for %s", key)
+        except Exception as exc:
+            logger.warning("[AutoPromoter] Failed to write exit params for %s: %s", key, exc)
+
+    # ── 力库自动注册（LLM 发现的新机制） ─────────────────────────────────────
+
+    @staticmethod
+    def _register_mechanism_if_new(candidate: dict, result: Any) -> None:
+        """Register a new mechanism into the force library if LLM discovered one."""
+        from monitor.mechanism_tracker import register_mechanism, MECHANISM_CATALOG
+
+        mtype = getattr(result, "mechanism_type", "") or ""
+        if not mtype or mtype in ("generic", "generic_alpha"):
+            return
+        if mtype in MECHANISM_CATALOG:
+            # Already known — just ensure family mapping
+            entry = candidate.get("entry", {})
+            family = str(candidate.get("family") or "").strip()
+            if family:
+                from monitor.mechanism_tracker import _FAMILY_TO_MECHANISM
+                if family not in _FAMILY_TO_MECHANISM:
+                    _FAMILY_TO_MECHANISM[family] = mtype
+            return
+
+        entry = candidate.get("entry", {})
+        family = str(candidate.get("family") or "").strip()
+        direction = str(entry.get("direction", "")).lower()
+
+        # Extract physics from LLM result
+        physics = {}
+        for attr in ("physics_essence", "physics_why_temporary", "physics_edge_source"):
+            val = getattr(result, attr, "")
+            if val:
+                physics[attr.replace("physics_", "")] = val
+
+        register_mechanism(
+            mechanism_type=mtype,
+            family=family,
+            direction=direction,
+            category=mtype.split("_")[0] if "_" in mtype else "generic",
+            display_name=getattr(result, "mechanism_display_name", ""),
+            physics=physics,
+            primary_decay_feature=getattr(result, "primary_decay_feature", ""),
+            primary_decay_condition=getattr(result, "primary_decay_condition", ""),
+            decay_narrative=getattr(result, "decay_narrative", ""),
+        )
+
+    @staticmethod
+    def _register_mechanism_from_card(card: dict) -> None:
+        """Register mechanism from an already-validated card (manual approve path)."""
+        from monitor.mechanism_tracker import register_mechanism, MECHANISM_CATALOG
+
+        llm_result = card.get("llm_result", {})
+        mtype = str(card.get("mechanism_type") or llm_result.get("mechanism_type") or "")
+        if not mtype or mtype in ("generic", "generic_alpha") or mtype in MECHANISM_CATALOG:
+            return
+
+        entry = card.get("entry", {})
+        family = str(card.get("family") or "").strip()
+        physics = llm_result.get("physics", {})
+        primary_decay = llm_result.get("primary_decay", {})
+
+        register_mechanism(
+            mechanism_type=mtype,
+            family=family,
+            direction=str(entry.get("direction", "")).lower(),
+            category=mtype.split("_")[0] if "_" in mtype else "generic",
+            display_name=llm_result.get("mechanism_display_name", ""),
+            physics=physics,
+            primary_decay_feature=primary_decay.get("feature", ""),
+            primary_decay_condition=primary_decay.get("condition", ""),
+            decay_narrative=primary_decay.get("narrative", ""),
+        )
+
     # ── 手动审批接口（供 dashboard API 调用） ─────────────────────────────────
 
     def manual_approve(self, rule_id: str) -> bool:
@@ -337,6 +482,8 @@ class AutoPromoter:
                 target["approved_by"] = "human_manual"
                 approved.append(target)
                 _write_json(_APPROVED_FILE, approved)
+                self._persist_exit_params(target)
+                self._register_mechanism_from_card(target)
 
                 self._recent_decisions.append({
                     "id": rule_id[:32],

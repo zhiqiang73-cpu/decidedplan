@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,8 @@ class LiveStrategySpec:
     notes: str
     uses_card_exit: bool = False
     live_wired: bool = True
+    oos_win_rate: Optional[float] = None
+    mechanism_type: str = ""
 
 
 LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
@@ -26,6 +28,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         directions=("long", "short"),
         execution_directions=("long", "short"),
         notes="Live via check_live(); both directions execution-whitelisted.",
+        oos_win_rate=67.0,
+        mechanism_type="funding_settlement",
     ),
     LiveStrategySpec(
         phase="P1",
@@ -34,6 +38,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         directions=("long",),
         execution_directions=("long",),
         notes="Live detector, execution-whitelisted, and exit params exist.",
+        oos_win_rate=None,
+        mechanism_type="algo_slicing",
     ),
     LiveStrategySpec(
         phase="P1",
@@ -42,6 +48,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         directions=("long",),
         execution_directions=("long",),
         notes="First-line long family. Live detector bypasses fatigue and is trade-ready.",
+        oos_win_rate=54.0,
+        mechanism_type="seller_drought",
     ),
     LiveStrategySpec(
         phase="P1",
@@ -50,6 +58,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         directions=("long", "short"),
         execution_directions=("long", "short"),
         notes="Live detector with both long and short execution coverage.",
+        oos_win_rate=93.5,
+        mechanism_type="vwap_reversion",
     ),
     LiveStrategySpec(
         phase="P1",
@@ -58,6 +68,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         directions=("long", "short"),
         execution_directions=("long",),
         notes="Live detector, but only the long side is execution-whitelisted.",
+        oos_win_rate=88.0,
+        mechanism_type="compression_release",
     ),
     LiveStrategySpec(
         phase="P1",
@@ -66,6 +78,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         directions=("long", "short"),
         execution_directions=("long",),
         notes="Live detector, but only the long side is execution-whitelisted.",
+        oos_win_rate=78.5,
+        mechanism_type="bottom_taker_exhaust",
     ),
     LiveStrategySpec(
         phase="P1",
@@ -74,6 +88,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         directions=("short",),
         execution_directions=("short",),
         notes="Live detector, execution-whitelisted, and exit params exist.",
+        oos_win_rate=80.4,
+        mechanism_type="funding_divergence",
     ),
     LiveStrategySpec(
         phase="P1",
@@ -82,6 +98,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         directions=("long",),
         execution_directions=("long",),
         notes="Funding cycle oversold LONG. Smart exit configured and execution-ready.",
+        oos_win_rate=None,
+        mechanism_type="funding_cycle_oversold",
     ),
     LiveStrategySpec(
         phase="P2",
@@ -94,6 +112,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
             "oi_change_rate_5m < 1.452e-05, with card Top-3 exit combos."
         ),
         uses_card_exit=True,
+        oos_win_rate=75.0,
+        mechanism_type="near_high_distribution",
     ),
     LiveStrategySpec(
         phase="P2",
@@ -106,6 +126,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
             "spread_vs_ma20 > 1.688, with card Top-3 exit combos."
         ),
         uses_card_exit=True,
+        oos_win_rate=72.0,
+        mechanism_type="near_high_distribution",
     ),
     LiveStrategySpec(
         phase="P2",
@@ -119,6 +141,23 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
             "Mechanism: oi_divergence. OOS WR=80.7% n=57 PF=7.38. Card Top-3 exit combos."
         ),
         uses_card_exit=True,
+        oos_win_rate=None,
+        mechanism_type="oi_divergence",
+    ),
+    LiveStrategySpec(
+        phase="P2",
+        family="A4-PIR",
+        label="position_high_oi_stall_short",
+        directions=("short",),
+        execution_directions=("short",),
+        notes=(
+            "Approved alpha card: position_in_range_4h > 0.7159 + "
+            "oi_change_rate_1h < 7.4e-05 (high position + OI stall = distribution). "
+            "OOS WR=68.75% n=32 PF=1.99. Card Top-3 exit combos."
+        ),
+        uses_card_exit=True,
+        oos_win_rate=68.75,
+        mechanism_type="oi_divergence",
     ),
     LiveStrategySpec(
         phase="P1",
@@ -127,6 +166,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         directions=("long",),
         execution_directions=("long",),
         notes="RANGE_BOUND->QUIET_TREND phase transition. Early trend entry.",
+        oos_win_rate=None,
+        mechanism_type="regime_transition",
     ),
 )
 

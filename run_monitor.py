@@ -53,10 +53,16 @@ from execution.execution_engine import ExecutionEngine
 from execution.order_manager import OrderManager
 from execution.trade_logger import TradeLogger
 from monitor.live_engine import LiveFeatureEngine
-from monitor.live_catalog import build_strategy_status_rows
+from monitor.live_catalog import build_strategy_status_rows, LIVE_STRATEGIES
 from monitor.signal_runner import SignalRunner
 from monitor.alert_handler import AlertHandler
 from utils.file_io import read_json_file, write_json_atomic
+from monitor.mechanism_tracker import (
+    MECHANISM_CATALOG,
+    MECHANISM_CATEGORIES,
+    _FAMILY_TO_MECHANISM,
+    get_force_category,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -74,8 +80,12 @@ except Exception:
     _STRATEGY_ZH: dict = {}
 
 _STATE_PATH = PROJECT_ROOT / "monitor" / "output" / "system_state.json"
+_FORCE_STATE_PATH = PROJECT_ROOT / "monitor" / "output" / "force_library_state.json"
+
+# Lookup: family -> LiveStrategySpec (for oos_win_rate + mechanism_type in strategy payload)
+_LIVE_SPEC_BY_FAMILY: dict = {spec.family: spec for spec in LIVE_STRATEGIES}
 _TRADES_CSV = PROJECT_ROOT / "execution" / "logs" / "trades.csv"
-_DISCOVERY_LOG = PROJECT_ROOT / "alpha" / "output" / "discovery.log"
+_DISCOVERY_HEARTBEAT = PROJECT_ROOT / "monitor" / "output" / "discovery_heartbeat.json"
 
 
 def _count_today_trades() -> dict:
@@ -132,6 +142,7 @@ def _build_strategy_payload(
         fam_stats = today_stats.get(
             family, {"triggers": 0, "wins": 0, "not_filled": 0, "errors": 0}
         )
+        _spec = _LIVE_SPEC_BY_FAMILY.get(family)
         strategies.append(
             {
                 "family": family,
@@ -141,6 +152,8 @@ def _build_strategy_payload(
                 "entry_conditions": info.get("entry_zh", ""),
                 "exit_conditions": info.get("exit_zh", ""),
                 "today": fam_stats,
+                "oos_win_rate": _spec.oos_win_rate if _spec is not None else None,
+                "mechanism_type": _spec.mechanism_type if _spec is not None else "",
             }
         )
         for key in daily_totals:
@@ -161,11 +174,13 @@ def _write_system_state(
         heartbeat_ts_utc = datetime.now(timezone.utc).isoformat()
         market_ts_utc = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
 
-        # Discovery alive: discovery.log modified within last 10 minutes
+        # Discovery alive: read dedicated heartbeat written by run_live_discovery.py.
+        # Using a heartbeat file avoids the mtime-heuristic problem where the discovery
+        # process sleeping between scans (up to 6h) would falsely appear as dead.
         discovery_alive = False
         try:
-            mtime = _DISCOVERY_LOG.stat().st_mtime
-            discovery_alive = (time.time() - mtime) < 600
+            hb = json.loads(_DISCOVERY_HEARTBEAT.read_text(encoding="utf-8"))
+            discovery_alive = bool(hb.get("alive", False))
         except Exception:
             pass
 
@@ -249,6 +264,89 @@ def _write_system_state(
         }
 
         write_json_atomic(_STATE_PATH, state, ensure_ascii=False, indent=2)
+        _write_force_library_state()
+
+    except Exception:
+        pass
+
+
+def _write_force_library_state() -> None:
+    """Write monitor/output/force_library_state.json atomically. Never raises."""
+    try:
+        # 1. Build mechanism -> [family] mapping from _FAMILY_TO_MECHANISM
+        mech_to_families: dict = {}
+        for family, mech in _FAMILY_TO_MECHANISM.items():
+            mech_to_families.setdefault(mech, []).append(family)
+
+        # 2. oos_win_rate per family from LIVE_STRATEGIES
+        family_to_oos: dict = {spec.family: spec.oos_win_rate for spec in LIVE_STRATEGIES}
+
+        # 3. Concentration: count open positions per force category
+        concentration: dict = {cat: 0 for cat in MECHANISM_CATEGORIES}
+        try:
+            state = read_json_file(_STATE_PATH, {})
+            for pos in state.get("positions", []):
+                fam = pos.get("family", "")
+                mech = _FAMILY_TO_MECHANISM.get(fam, "generic_alpha")
+                cat = get_force_category(mech)
+                concentration[cat] = concentration.get(cat, 0) + 1
+        except Exception:
+            pass
+
+        # 4. Group mechanisms by category
+        cat_to_mechs: dict = {}
+        for mech_id, cfg in MECHANISM_CATALOG.items():
+            cat_to_mechs.setdefault(cfg.category, []).append(mech_id)
+
+        # 5. Build categories list
+        categories = []
+        for cat_id, cat_desc in MECHANISM_CATEGORIES.items():
+            # MECHANISM_CATEGORIES values are "DisplayName — description"
+            if " — " in cat_desc:
+                cat_name, cat_description = cat_desc.split(" — ", 1)
+            else:
+                cat_name = cat_id
+                cat_description = cat_desc
+
+            mechanisms = []
+            for mech_id in cat_to_mechs.get(cat_id, []):
+                cfg = MECHANISM_CATALOG[mech_id]
+                families = mech_to_families.get(mech_id, [])
+                rates = [
+                    family_to_oos[f]
+                    for f in families
+                    if f in family_to_oos and family_to_oos[f] is not None
+                ]
+                oos_wr = round(sum(rates) / len(rates), 1) if rates else None
+                phys = cfg.physics if isinstance(cfg.physics, dict) else {}
+                mechanisms.append({
+                    "id": mech_id,
+                    "display_name": cfg.display_name or mech_id,
+                    "essence": phys.get("essence", ""),
+                    "why_temporary": phys.get("why_temporary", ""),
+                    "edge_source": phys.get("edge_source", ""),
+                    "strategies": families,
+                    "oos_win_rate": oos_wr,
+                    "relations": {
+                        "reinforces": cfg.relations.get("reinforces", []) if isinstance(cfg.relations, dict) else [],
+                        "conflicts_with": cfg.relations.get("conflicts_with", []) if isinstance(cfg.relations, dict) else [],
+                        "often_follows": cfg.relations.get("often_follows", []) if isinstance(cfg.relations, dict) else [],
+                    },
+                })
+
+            categories.append({
+                "id": cat_id,
+                "name": cat_name,
+                "description": cat_description,
+                "mechanisms": mechanisms,
+            })
+
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "categories": categories,
+            "concentration": concentration,
+        }
+        write_json_atomic(_FORCE_STATE_PATH, payload, ensure_ascii=False, indent=2)
 
     except Exception:
         pass
@@ -577,9 +675,11 @@ async def run_websocket(
                         logger.warning(f"淇″彿妫€娴嬪紓甯? {exc}")
                         continue
 
-                    # 同步市场状态到执行引擎（regime + flow_type）
+                    # 同步市场状态到执行引擎（regime + flow_type + trend）
                     execution_engine.update_market_state(
-                        runner.current_regime, runner.current_flow
+                        runner.current_regime,
+                        runner.current_flow,
+                        trend_direction=runner.current_trend,
                     )
 
                     if raw_alerts:
