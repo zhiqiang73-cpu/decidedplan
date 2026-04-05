@@ -70,7 +70,10 @@ export default function StrategyPool() {
   const stats = {
     total: strategies?.length ?? 0,
     active: strategies?.filter(s => s.status === "active").length ?? 0,
-    avgWinRate: strategies?.length ? (strategies.reduce((s, x) => s + (x.oosWinRate ?? 0), 0) / strategies.length).toFixed(1) : "0",
+    avgWinRate: (() => {
+      const withOos = strategies?.filter(s => s.oosWinRate != null && s.oosWinRate > 0) ?? [];
+      return withOos.length ? (withOos.reduce((s, x) => s + (x.oosWinRate ?? 0), 0) / withOos.length).toFixed(1) : "N/A";
+    })(),
     totalPnl7d: strategies?.reduce((s, x) => s + parseFloat(x.pnl7d ?? "0"), 0).toFixed(2) ?? "0",
   };
 

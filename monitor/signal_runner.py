@@ -36,6 +36,42 @@ logger = logging.getLogger(__name__)
 _PHASE1_TAIL = 300
 
 
+class AdaptiveCooldown:
+    """Self-tuning cooldown per group: hot strategies trade faster, cold ones get throttled.
+
+    Tracks last N outcomes per (group, direction) and adjusts cooldown accordingly:
+    - WR >= 60% last 5 trades: 3 min (let hot strategies fire more)
+    - WR 40-60%: default (10 min)
+    - WR < 40%: 20 min (throttle)
+    - WR < 25%: 30 min (near-frozen)
+    """
+
+    def __init__(self, default_cooldown_ms: int, window: int = 5):
+        self._default_ms = default_cooldown_ms
+        self._window = max(3, window)
+        self._outcomes: dict[str, list[bool]] = {}  # key -> [win, loss, win, ...]
+
+    def record_outcome(self, group_key: str, is_win: bool) -> None:
+        buf = self._outcomes.setdefault(group_key, [])
+        buf.append(is_win)
+        if len(buf) > self._window * 2:
+            self._outcomes[group_key] = buf[-self._window:]
+
+    def get_cooldown_ms(self, group_key: str) -> int:
+        buf = self._outcomes.get(group_key, [])
+        if len(buf) < self._window:
+            return self._default_ms
+        recent = buf[-self._window:]
+        wr = sum(recent) / len(recent)
+        if wr >= 0.60:
+            return int(self._default_ms * 0.3)  # 3 min if default is 10
+        if wr >= 0.40:
+            return self._default_ms
+        if wr >= 0.25:
+            return int(self._default_ms * 2.0)  # 20 min
+        return int(self._default_ms * 3.0)  # 30 min
+
+
 class SignalRunner:
     """Run live event detectors and alpha rules on the latest feature frame."""
 
@@ -89,11 +125,16 @@ class SignalRunner:
         self._p2_group_cooldown_ms = max(0, int(p2_group_cooldown_min) * 60 * 1000)
         self._p2_max_groups_per_bar = max(1, int(p2_max_groups_per_bar))
         self._p2_group_cooldown: dict[str, int] = {}
+        self._adaptive_cooldown = AdaptiveCooldown(default_cooldown_ms=self._p2_group_cooldown_ms)
         self._last_p2_startup_block_log_bar = -1
 
     def set_signal_health(self, health: SignalHealth) -> None:
         """注入信号健康度监控实例（可选）。"""
         self._signal_health = health
+
+    def record_p2_outcome(self, group_key: str, is_win: bool) -> None:
+        """Feed trade outcome to adaptive cooldown for self-tuning."""
+        self._adaptive_cooldown.record_outcome(group_key, is_win)
 
     def run(self, df: Optional[pd.DataFrame]) -> Tuple[List[dict], List[dict]]:
         if df is None or df.empty:
@@ -363,13 +404,14 @@ class SignalRunner:
         for candidate in candidates:
             group_key = str(candidate.get("group", ""))
             cooldown_key = f"{group_key}|{candidate.get('direction')}|{candidate.get('horizon')}"
-            if self._p2_group_cooldown_ms > 0:
+            effective_cd_ms = self._adaptive_cooldown.get_cooldown_ms(cooldown_key)
+            if effective_cd_ms > 0:
                 last_ts = self._p2_group_cooldown.get(cooldown_key, 0)
-                if latest_ts - last_ts < self._p2_group_cooldown_ms:
+                if latest_ts - last_ts < effective_cd_ms:
                     logger.debug(
-                        "[P2 GROUP_CD] suppressed %s (%s min cooldown)",
+                        "[P2 GROUP_CD] suppressed %s (%s min adaptive cooldown)",
                         cooldown_key,
-                        self._p2_group_cooldown_ms // 60000,
+                        effective_cd_ms // 60000,
                     )
                     continue
 

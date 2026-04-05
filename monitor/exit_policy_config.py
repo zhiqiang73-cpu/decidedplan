@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict
 
@@ -46,6 +46,17 @@ class ExitParams:
     decay_exit_threshold: float = 0.85
     decay_tighten_threshold: float = 0.5
     tighten_gap_ratio: float = 0.30
+    # Adaptive stop multipliers
+    confidence_stop_multipliers: dict = field(default_factory=lambda: {1: 0.7, 2: 1.0, 3: 1.3})
+    regime_stop_multipliers: dict = field(default_factory=lambda: {
+        "QUIET_TREND": 0.8,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5,
+    })
+    mfe_ratchet_threshold: float = 0.15
+    mfe_ratchet_ratio: float = 0.4
 
     def to_dict(self) -> Dict[str, float | int]:
         return asdict(self)

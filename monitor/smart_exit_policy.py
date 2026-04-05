@@ -728,7 +728,21 @@ def evaluate_exit_action(
     current_return = _current_return(position, close)
     adverse = _adverse_pct(position, close)
 
-    if adverse >= params.stop_pct:
+    # --- Adaptive hard stop ---
+    base_stop = params.stop_pct
+    _confidence = int(runtime_state.get("confidence", 2) or 2)
+    _regime = str(runtime_state.get("entry_regime", "RANGE_BOUND") or "RANGE_BOUND")
+    _mfe = float(runtime_state.get("mfe_pct", 0.0) or 0.0)
+
+    _conf_mult = params.confidence_stop_multipliers.get(_confidence, 1.0)
+    _regime_mult = params.regime_stop_multipliers.get(_regime, 1.0)
+    effective_stop = base_stop * _conf_mult * _regime_mult
+
+    if _mfe > params.mfe_ratchet_threshold:
+        ratcheted_stop = _mfe * params.mfe_ratchet_ratio
+        effective_stop = min(effective_stop, ratcheted_stop)
+
+    if adverse >= effective_stop:
         return {
             "action": "exit",
             "reason": "hard_stop",
@@ -823,6 +837,10 @@ def evaluate_exit_action(
             decay_exit_threshold=params.decay_exit_threshold,
             decay_tighten_threshold=params.decay_tighten_threshold,
             tighten_gap_ratio=params.tighten_gap_ratio,
+            confidence_stop_multipliers=params.confidence_stop_multipliers,
+            regime_stop_multipliers=params.regime_stop_multipliers,
+            mfe_ratchet_threshold=params.mfe_ratchet_threshold,
+            mfe_ratchet_ratio=params.mfe_ratchet_ratio,
         )
         _refresh_runtime_protect(runtime_state, tightened)
         if runtime_state.get("protect_armed"):

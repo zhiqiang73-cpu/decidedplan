@@ -1398,11 +1398,11 @@ class MechanismTracker:
         volume = _safe_get(current_features, "volume_vs_ma20")
         taker_ratio = _safe_get(current_features, "taker_buy_sell_ratio")
 
-        volume_reverted = volume is not None and volume < 1.0
+        volume_reverted = volume is not None and volume < 0.8
         taker_neutral = (
-            taker_ratio is not None and 0.85 <= taker_ratio <= 1.15
+            taker_ratio is not None and 0.90 <= taker_ratio <= 1.10
         )
-        return volume_reverted or taker_neutral
+        return volume_reverted and taker_neutral
 
     def _check_revert_to_neutral(
         self,

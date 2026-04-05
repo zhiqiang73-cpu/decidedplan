@@ -123,6 +123,8 @@ class ExecutionEngine:
         self._current_regime: str = "QUIET_TREND"
         self._current_flow: str = "PASSIVE"
         self._current_trend: str = "TREND_NEUTRAL"
+        self._signal_health: Any | None = None
+        self._signal_runner: Any | None = None
         # A2 family 1-bar entry confirmation: key="{family}|{direction}" 閳?first_seen_ts
         self._entry_confirm_pending: dict[str, float] = {}
 
@@ -140,6 +142,14 @@ class ExecutionEngine:
                 logger.warning("[EXEC] set_leverage failed: %s", exc)
         else:
             logger.warning("[EXEC] Testnet API credentials missing; paper mode only")
+
+    def set_signal_health(self, signal_health: Any) -> None:
+        """Inject signal health tracker for outcome recording."""
+        self._signal_health = signal_health
+
+    def set_signal_runner(self, runner: Any) -> None:
+        """Inject signal runner for adaptive cooldown feedback."""
+        self._signal_runner = runner
 
     def update_market_state(
         self,
@@ -182,6 +192,21 @@ class ExecutionEngine:
             )
             return
 
+        # Block weak SHORT entries in uptrend -- don't swim upstream.
+        # Alpha SHORT in TREND_UP needs HIGH confidence (3+) AND 2+ physical confirms.
+        if (
+            direction == "short"
+            and is_alpha
+            and self._current_trend == "TREND_UP"
+        ):
+            physical_confirms = alert.get("physical_confirms", [])
+            if confidence < 3 or len(physical_confirms) < 2:
+                logger.info(
+                    "[EXEC] Skip %s: alpha SHORT suppressed in TREND_UP (conf=%d, confirms=%d)",
+                    signal_name, confidence, len(physical_confirms),
+                )
+                return
+
         if not is_alpha and (family, direction) not in EXECUTION_WHITELIST:
             logger.debug("[EXEC] Rejected %s %s: not in whitelist", family, direction)
             return
@@ -194,34 +219,37 @@ class ExecutionEngine:
             logger.info("[EXEC] Skip %s: execution cooldown (%ss remaining)", signal_name, remaining)
             return
 
-        # A2 family: require at least 1 bar (閳?5s) of signal persistence before entering.
-        # Filters instant-reversal entries where the signal fired on 1 bar only.
-        # Window upper bound is 30 min to accommodate low-frequency P2 composite signals.
+        # A2 family: signal persistence filter.
+        # HIGH confidence (3+) bypasses persistence -- 2+ physical confirms are
+        # sufficient confirmation. Otherwise require 15s persistence (was 55s).
         if family.startswith("A2"):
             confirm_key = f"{family}|{direction}"
-            first_seen = self._entry_confirm_pending.get(confirm_key)
-            if first_seen is None:
-                self._entry_confirm_pending[confirm_key] = now_ts
-                logger.info("[EXEC] A2 entry deferred %s: waiting confirm (55s~30min)", signal_name)
-                return
-            elapsed = now_ts - first_seen
-            if elapsed < 55:
-                logger.debug(
-                    "[EXEC] A2 entry deferred %s: %ds < 55s confirm window",
+            if confidence >= 3:
+                # HIGH confidence: immediate entry, skip persistence
+                self._entry_confirm_pending.pop(confirm_key, None)
+                logger.info("[EXEC] A2 fast entry %s: HIGH confidence bypass (conf=%d)", signal_name, confidence)
+            else:
+                first_seen = self._entry_confirm_pending.get(confirm_key)
+                if first_seen is None:
+                    self._entry_confirm_pending[confirm_key] = now_ts
+                    logger.info("[EXEC] A2 entry deferred %s: waiting confirm (15s~30min)", signal_name)
+                    return
+                elapsed = now_ts - first_seen
+                if elapsed < 15:
+                    logger.debug(
+                        "[EXEC] A2 entry deferred %s: %ds < 15s confirm window",
+                        signal_name, int(elapsed),
+                    )
+                    return
+                if elapsed > 1800:
+                    self._entry_confirm_pending[confirm_key] = now_ts
+                    logger.info("[EXEC] A2 entry confirm expired %s after %ds, resetting", signal_name, int(elapsed))
+                    return
+                del self._entry_confirm_pending[confirm_key]
+                logger.info(
+                    "[EXEC] A2 entry confirmed %s after %ds (persistence filter passed)",
                     signal_name, int(elapsed),
                 )
-                return
-            if elapsed > 1800:
-                # Stale (>30min without a repeat): reset the timer
-                self._entry_confirm_pending[confirm_key] = now_ts
-                logger.info("[EXEC] A2 entry confirm expired %s after %ds, resetting", signal_name, int(elapsed))
-                return
-            # 55s 閳?elapsed 閳?1800s: condition persisted 閳?proceed
-            del self._entry_confirm_pending[confirm_key]
-            logger.info(
-                "[EXEC] A2 entry confirmed %s after %ds (persistence filter passed)",
-                signal_name, int(elapsed),
-            )
 
         horizon_min = max(1, self._safe_int(alert.get("horizon"), 1))
         signal_time = self._extract_alert_time(alert)
@@ -569,7 +597,7 @@ class ExecutionEngine:
                 )
                 # Mechanism lifecycle evaluation
                 decay_result = self._mechanism_tracker.evaluate_decay(
-                    mechanism_type=position.mechanism_type or "generic_alpha",
+                    mechanism_type=position.mechanism_type or get_mechanism_for_family(position.family),
                     entry_snapshot=position.entry_snapshot or {},
                     current_features=latest_features,
                     entry_regime=position.entry_regime,
@@ -579,6 +607,9 @@ class ExecutionEngine:
                 runtime_state["decay_score"] = decay_result.decay_score
                 runtime_state["decay_action"] = decay_result.recommended_action
                 runtime_state["decay_reason"] = decay_result.reason
+                # Adaptive stop context
+                runtime_state["confidence"] = position.confidence
+                runtime_state["entry_regime"] = position.entry_regime
                 decision = evaluate_exit_action(
                     position={
                         "rule": position.signal_name,
@@ -874,6 +905,41 @@ class ExecutionEngine:
             regime=position.entry_regime,
         )
 
+        # Record outcome for signal health tracking
+        if self._signal_health is not None:
+            try:
+                ep = float(exit_price) if exit_price is not None else position.entry_price
+                gross_ret = ((ep - position.entry_price) / position.entry_price) * 100
+                if position.direction == "short":
+                    gross_ret = -gross_ret
+                net_ret = gross_ret - total_fee_rate * 100
+                card_id = position.signal_name
+                self._signal_health.record_outcome(
+                    card_id=card_id,
+                    direction=position.direction,
+                    net_return_pct=net_ret,
+                    flow_type=position.entry_flow_type,
+                    regime=position.entry_regime,
+                )
+            except Exception as exc:
+                logger.warning("[EXEC] Signal health record failed: %s", exc)
+
+        # Feed outcome to adaptive cooldown for self-tuning
+        if self._signal_runner is not None:
+            try:
+                ep = float(exit_price) if exit_price is not None else position.entry_price
+                gross_ret = ((ep - position.entry_price) / position.entry_price) * 100
+                if position.direction == "short":
+                    gross_ret = -gross_ret
+                net_ret = gross_ret - total_fee_rate * 100
+                is_win = net_ret > 0
+                # Use the position's entry_snapshot to extract group for cooldown key
+                group = str(position.entry_snapshot.get("group", position.family) if position.entry_snapshot else position.family)
+                cooldown_key = f"{group}|{position.direction}|{position.horizon_min}"
+                self._signal_runner.record_p2_outcome(cooldown_key, is_win)
+            except Exception as exc:
+                logger.warning("[EXEC] Adaptive cooldown feedback failed: %s", exc)
+
         with self._lock:
             pos_key = f"{position.family}|{position.direction}"
             self._open_positions.pop(pos_key, None)
@@ -1150,7 +1216,7 @@ class ExecutionEngine:
                     entry_fee_type=str(data.get("entry_fee_type", "maker")),
                     entry_regime=str(data.get("entry_regime", "")),
                     entry_flow_type=str(data.get("entry_flow_type", "")),
-                    mechanism_type=str(data.get("mechanism_type", "")),
+                    mechanism_type=str(data.get("mechanism_type", "")) or get_mechanism_for_family(str(data.get("family", ""))),
                 )
                 with self._lock:
                     self._open_positions[key] = pos

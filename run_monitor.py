@@ -55,6 +55,7 @@ from execution.trade_logger import TradeLogger
 from monitor.live_engine import LiveFeatureEngine
 from monitor.live_catalog import build_strategy_status_rows, LIVE_STRATEGIES
 from monitor.signal_runner import SignalRunner
+from monitor.signal_health import SignalHealth
 from monitor.alert_handler import AlertHandler
 from utils.file_io import read_json_file, write_json_atomic
 from monitor.mechanism_tracker import (
@@ -856,6 +857,13 @@ async def main():
         min_confidence=exec_config.MIN_CONFIDENCE,
         entry_timeout_s=exec_config.ENTRY_TIMEOUT_S,
     )
+
+    # Wire signal health tracking for auto-degradation of failing strategies
+    signal_health = SignalHealth()
+    runner.set_signal_health(signal_health)
+    execution_engine.set_signal_health(signal_health)
+    execution_engine.set_signal_runner(runner)
+    logger.info("[INIT] SignalHealth + AdaptiveCooldown wired to runner and execution engine")
 
     runtime_state: dict[str, float | int | bool | None] = {
         "price": _last_price or 0.0,
