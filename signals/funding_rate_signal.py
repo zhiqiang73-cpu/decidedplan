@@ -153,6 +153,9 @@ class FundingRateDetector(SignalDetector):
             ),
             "confidence": 2,
             "confidence_label": "MEDIUM",
+            "apply_fatigue": False,
+            "feature": "funding_rate",
+            "feature_value": display_val,
         }
 
     def report(self, df: pd.DataFrame, fee_pct: float = 0.10) -> dict:

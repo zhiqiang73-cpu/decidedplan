@@ -115,7 +115,7 @@ class BottomVolumeDroughtDetector(SignalDetector):
         result = pd.Series(False, index=mask.index)
         last_trigger = -COOLDOWN_BARS - 1
         for idx in np.flatnonzero(mask.to_numpy()):
-            if idx - last_trigger <= COOLDOWN_BARS:
+            if idx - last_trigger < COOLDOWN_BARS:
                 continue
             result.iloc[idx] = True
             last_trigger = idx

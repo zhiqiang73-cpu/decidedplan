@@ -15,6 +15,7 @@
 """
 
 import logging
+import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -95,6 +96,7 @@ class LiveFeatureEngine:
             "long_account": np.nan,
             "short_account": np.nan,
         }
+        self._side_cache_ts: dict[str, float] = {}
 
         # 最新特征 DataFrame（完整窗口，每次 update 后刷新）
         self._df: Optional[pd.DataFrame] = None
@@ -205,7 +207,17 @@ class LiveFeatureEngine:
         bar = self._parse_kline(kline)
 
         # 将辅助数据缓存注入 bar
+        now_ts = time.time()
         for key, val in self._side_cache.items():
+            age_s = now_ts - self._side_cache_ts.get(key, 0.0)
+            if age_s > 600:
+                logger.warning(
+                    "[LiveEngine] side data stale: %s age=%.0fs > 600s, setting NaN",
+                    key,
+                    age_s,
+                )
+                bar[key] = np.nan
+                continue
             bar[key] = val
 
         self._bars.append(bar)
@@ -235,6 +247,7 @@ class LiveFeatureEngine:
         for key, val in updates.items():
             if val is not None:
                 self._side_cache[key] = float(val)
+                self._side_cache_ts[key] = time.time()
 
     @property
     def oi_ready(self) -> bool:

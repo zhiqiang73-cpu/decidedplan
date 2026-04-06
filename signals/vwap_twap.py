@@ -121,4 +121,7 @@ class VWAPTWAPDetector(SignalDetector):
             ),
             "confidence": 2,
             "confidence_label": "MEDIUM",
+            "apply_fatigue": False,
+            "feature": "volume_autocorr_lag5",
+            "feature_value": ac,
         }

@@ -35,10 +35,11 @@ def write_json_atomic(
     *,
     ensure_ascii: bool = False,
     indent: int | None = 2,
+    default: Any | None = None,
 ) -> None:
     """Atomically write JSON to disk."""
     write_text_atomic(
         path,
-        json.dumps(payload, ensure_ascii=ensure_ascii, indent=indent),
+        json.dumps(payload, ensure_ascii=ensure_ascii, indent=indent, default=default),
         encoding="utf-8",
     )

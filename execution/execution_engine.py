@@ -30,6 +30,7 @@ from monitor.smart_exit_policy import (
     normalize_family,
     update_mfe_mae,
 )
+from utils.file_io import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -1299,10 +1300,7 @@ class ExecutionEngine:
                 "positions": snapshot,
             }
             self._state_file.parent.mkdir(parents=True, exist_ok=True)
-            self._state_file.write_text(
-                json.dumps(payload, indent=2, default=str),
-                encoding="utf-8",
-            )
+            write_json_atomic(self._state_file, payload, indent=2, default=str)
         except Exception as exc:
             logger.warning("[EXEC] Failed to save positions state: %s", exc)
 

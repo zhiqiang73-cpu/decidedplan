@@ -406,7 +406,7 @@ class AlphaRuleChecker:
         if direction == "short":
             if volume_ma >= 1.0 and taker_ratio < 1.0:
                 confirms.append("volume_confirm")
-            if oi_change is not None and oi_change > 0:
+            if oi_change is not None and oi_change < 0:
                 confirms.append("oi_confirm")
         elif direction == "long":
             if volume_ma >= 1.0 and taker_ratio > 1.0:
