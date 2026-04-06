@@ -231,22 +231,34 @@ class ExecutionEngine:
                               confidence, "LONG blocked during LIQUIDATION flow")
             return
 
-        # Block weak SHORT entries in uptrend -- don't swim upstream.
-        # Alpha SHORT in TREND_UP needs HIGH confidence (3+) AND 2+ physical confirms.
+        # Block ALL weak SHORT in uptrend / weak LONG in downtrend.
+        # Only HIGH confidence (3+) signals can fight the trend.
+        # Data: 2026-04-06 all 6 SHORT losses were conf<=2 in TREND_UP.
         if (
             direction == "short"
-            and is_alpha
             and self._current_trend == "TREND_UP"
+            and confidence < 3
         ):
-            physical_confirms = alert.get("physical_confirms", [])
-            if confidence < 3 or len(physical_confirms) < 2:
-                logger.info(
-                    "[EXEC] Skip %s: alpha SHORT suppressed in TREND_UP (conf=%d, confirms=%d)",
-                    signal_name, confidence, len(physical_confirms),
-                )
-                self._log_blocked(signal_name, family, direction, "trend_filter",
-                                  confidence, f"alpha SHORT in TREND_UP (conf={confidence}, confirms={len(physical_confirms)})")
-                return
+            logger.info(
+                "[EXEC] Skip %s: SHORT blocked in TREND_UP (conf=%d < 3)",
+                signal_name, confidence,
+            )
+            self._log_blocked(signal_name, family, direction, "trend_filter",
+                              confidence, f"SHORT in TREND_UP needs HIGH conf (got {confidence})")
+            return
+
+        if (
+            direction == "long"
+            and self._current_trend == "TREND_DOWN"
+            and confidence < 3
+        ):
+            logger.info(
+                "[EXEC] Skip %s: LONG blocked in TREND_DOWN (conf=%d < 3)",
+                signal_name, confidence,
+            )
+            self._log_blocked(signal_name, family, direction, "trend_filter",
+                              confidence, f"LONG in TREND_DOWN needs HIGH conf (got {confidence})")
+            return
 
         if not is_alpha and (family, direction) not in EXECUTION_WHITELIST:
             logger.debug("[EXEC] Rejected %s %s: not in whitelist", family, direction)
