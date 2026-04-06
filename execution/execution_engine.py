@@ -330,24 +330,21 @@ class ExecutionEngine:
             entry_snapshot=entry_snapshot,
         )
         if not dynamic_exit_enabled or exit_params is None:
-            if is_alpha:
-                logger.warning(
-                    "[EXEC] Rejected %s: alpha card has no dedicated exit feature",
-                    signal_name,
-                )
-            else:
-                logger.warning(
-                    "[EXEC] Rejected %s: no exit params configured for %s|%s",
-                    signal_name,
-                    family,
-                    direction,
-                )
+            reason = (
+                "alpha card has no dedicated exit feature" if is_alpha
+                else f"no exit params configured for {family}|{direction}"
+            )
+            logger.warning("[EXEC] Rejected %s: %s", signal_name, reason)
+            self._log_blocked(signal_name, family, direction, "no_exit_params",
+                              confidence, reason)
             return
 
         with self._lock:
             self._sync_external_position_locked()
             if any(position.external for position in self._open_positions.values()):
                 logger.info("[EXEC] Skip %s: external|any already active", signal_name)
+                self._log_blocked(signal_name, family, direction, "external_position",
+                                  confidence, "external position active")
                 return
 
             # --- Force concentration gate (inside lock to prevent TOCTOU) ---
