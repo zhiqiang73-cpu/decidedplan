@@ -23,7 +23,7 @@ MIN_CONFIDENCE = 2
 # Entry execution defaults to a passive maker attempt first, then one capped
 # aggressive IOC retry. This matches the live execution path and the execution
 # layer tests; if you want pure maker-only behavior, override via config.
-ENTRY_TIMEOUT_S = 12
+ENTRY_TIMEOUT_S = 20
 ENTRY_RETRY_TIMEOUT_S = 2
 ENTRY_MAX_ATTEMPTS = 2
 ENTRY_FINAL_CROSS_TICKS = 2

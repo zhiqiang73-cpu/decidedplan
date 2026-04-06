@@ -1371,7 +1371,11 @@ class ExecutionEngine:
                     entry_fee_type=str(data.get("entry_fee_type", "maker")),
                     entry_regime=str(data.get("entry_regime", "")),
                     entry_flow_type=str(data.get("entry_flow_type", "")),
-                    mechanism_type=str(data.get("mechanism_type", "")) or get_mechanism_for_family(str(data.get("family", ""))),
+                    mechanism_type=(
+                        lambda _mt, _fam: (
+                            get_mechanism_for_family(_fam) if _mt == "generic_alpha" and _fam else _mt
+                        ) or get_mechanism_for_family(_fam)
+                    )(str(data.get("mechanism_type", "")), str(data.get("family", ""))),
                 )
                 with self._lock:
                     self._open_positions[key] = pos
