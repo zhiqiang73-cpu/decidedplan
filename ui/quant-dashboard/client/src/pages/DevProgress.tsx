@@ -15,7 +15,7 @@ const MODULES = [
       { name: "数据库Schema设计 (10张核心表)", status: "done", priority: "P0" },
       { name: "深色主题UI系统 (币安风格)", status: "done", priority: "P0" },
       { name: "侧边栏导航布局", status: "done", priority: "P0" },
-      { name: "WebSocket实时推送", status: "in-progress", priority: "P1" },
+      { name: "实时推送通道", status: "in-progress", priority: "P1" },
       { name: "UTC时区统一处理", status: "done", priority: "P0" },
     ]
   },
@@ -29,12 +29,12 @@ const MODULES = [
       { name: "多阶段进度可视化", status: "done", priority: "P0" },
       { name: "候选策略审批工作流", status: "done", priority: "P0" },
       { name: "参数微调界面 (IC阈值/胜率/条件数)", status: "done", priority: "P0" },
-      { name: "Top-3出场条件展示", status: "done", priority: "P0" },
+      { name: "前三出场条件展示", status: "done", priority: "P0" },
       { name: "回测结果权益曲线", status: "done", priority: "P0" },
       { name: "真实数据下载进度", status: "in-progress", priority: "P1" },
       { name: "Binance API真实数据接入", status: "planned", priority: "P1" },
       { name: "IC扫描真实计算", status: "planned", priority: "P1" },
-      { name: "Walk-Forward真实验证", status: "planned", priority: "P1" },
+      { name: "样本外滚动验证", status: "planned", priority: "P1" },
     ]
   },
   {
@@ -87,7 +87,7 @@ const MODULES = [
     icon: Settings,
     color: "#f0a500",
     features: [
-      { name: "API Key/Secret输入界面", status: "done", priority: "P0" },
+      { name: "接口密钥录入页面", status: "done", priority: "P0" },
       { name: "测试网/实盘切换", status: "done", priority: "P0" },
       { name: "连接测试功能", status: "done", priority: "P0" },
       { name: "钱包状态展示", status: "done", priority: "P0" },
@@ -231,10 +231,10 @@ export default function DevProgress() {
           <div className="space-y-2">
             {[
               { step: "1", task: "接入真实Binance API，实现账户余额、持仓、历史交易数据同步", priority: "P1" },
-              { step: "2", task: "实现WebSocket实时推送，信号触发、回测完成等事件通知", priority: "P1" },
+              { step: "2", task: "实现实时推送通道，信号触发、回测完成等事件通知", priority: "P1" },
               { step: "3", task: "构建真实数据下载引擎，支持多周期K线数据自动获取", priority: "P1" },
               { step: "4", task: "实现IC扫描真实计算，基于历史数据计算52+特征信息系数", priority: "P1" },
-              { step: "5", task: "Walk-Forward验证引擎，确保策略OOS真实性", priority: "P1" },
+              { step: "5", task: "搭建样本外滚动验证引擎，确保策略在真实场景里不过度美化", priority: "P1" },
             ].map(item => (
               <div key={item.step} className="flex items-start gap-3 p-3 rounded-lg" style={{ backgroundColor: "#161a1e" }}>
                 <span className="w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0" style={{ backgroundColor: "#2b3139", color: "#f0b90b" }}>

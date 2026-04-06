@@ -95,11 +95,33 @@ def _normalize_alpha_exit_conditions(payload: object) -> list[dict[str, float | 
     return normalized
 
 
-def _normalize_alpha_exit_params(payload: object) -> dict[str, float | int] | None:
+def _normalize_float_dict(payload: object, *, int_keys: bool = False) -> dict[int | str, float] | None:
     if not isinstance(payload, dict):
         return None
 
-    normalized: dict[str, float | int] = {}
+    normalized: dict[int | str, float] = {}
+    for raw_key, raw_value in payload.items():
+        value = _coerce_float(raw_value)
+        if value is None:
+            continue
+        if int_keys:
+            key_value = _coerce_float(raw_key)
+            if key_value is None:
+                continue
+            normalized[int(key_value)] = value
+        else:
+            key_text = str(raw_key).strip()
+            if not key_text:
+                continue
+            normalized[key_text] = value
+    return normalized or None
+
+
+def _normalize_alpha_exit_params(payload: object) -> dict[str, object] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    normalized: dict[str, object] = {}
     float_keys = (
         "take_profit_pct",
         "stop_pct",
@@ -109,6 +131,8 @@ def _normalize_alpha_exit_params(payload: object) -> dict[str, float | int] | No
         "decay_exit_threshold",
         "decay_tighten_threshold",
         "tighten_gap_ratio",
+        "mfe_ratchet_threshold",
+        "mfe_ratchet_ratio",
     )
     int_keys = ("min_hold_bars", "max_hold_factor", "exit_confirm_bars")
 
@@ -121,6 +145,17 @@ def _normalize_alpha_exit_params(payload: object) -> dict[str, float | int] | No
         value = _coerce_float(payload.get(key))
         if value is not None:
             normalized[key] = int(value)
+
+    confidence_stop_multipliers = _normalize_float_dict(
+        payload.get("confidence_stop_multipliers"),
+        int_keys=True,
+    )
+    if confidence_stop_multipliers:
+        normalized["confidence_stop_multipliers"] = confidence_stop_multipliers
+
+    regime_stop_multipliers = _normalize_float_dict(payload.get("regime_stop_multipliers"))
+    if regime_stop_multipliers:
+        normalized["regime_stop_multipliers"] = regime_stop_multipliers
 
     return normalized or None
 
@@ -177,6 +212,9 @@ def build_entry_snapshot(alert: Dict, features: Optional[pd.Series]) -> Dict[str
             alert.get("horizon"),
         ),
     }
+    mechanism_type = str(alert.get("mechanism_type") or "").strip()
+    if mechanism_type:
+        snapshot["mechanism_type"] = mechanism_type
     if alpha_exit_conditions:
         snapshot["alpha_exit_conditions"] = alpha_exit_conditions
     if alpha_exit_combos:
@@ -956,4 +994,3 @@ def _adverse_pct(position: Dict, close: float) -> float:
     if direction == "short":
         return max(0.0, (close - entry) / entry * 100)
     return max(0.0, (entry - close) / entry * 100)
-

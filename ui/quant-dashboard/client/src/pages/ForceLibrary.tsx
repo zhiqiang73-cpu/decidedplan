@@ -122,7 +122,7 @@ export default function ForceLibrary() {
           <table className="w-full text-xs">
             <thead>
               <tr style={{ backgroundColor: "#1a1d21", borderBottom: "1px solid #2b3139" }}>
-                {["机制","力类别","绑定策略","OOS胜率","增强","冲突"].map(h => (
+                {["机制","力类别","绑定策略","样本外胜率","增强","冲突"].map(h => (
                   <th key={h} className="px-3 py-2 text-left" style={{ color: "#848e9c" }}>{h}</th>
                 ))}
               </tr>

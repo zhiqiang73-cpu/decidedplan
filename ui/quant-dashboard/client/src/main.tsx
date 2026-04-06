@@ -52,6 +52,21 @@ const trpcClient = trpc.createClient({
   ],
 });
 
+const analyticsEndpoint = String(import.meta.env.VITE_ANALYTICS_ENDPOINT ?? "").trim();
+const analyticsWebsiteId = String(import.meta.env.VITE_ANALYTICS_WEBSITE_ID ?? "").trim();
+
+if (typeof document !== "undefined" && analyticsEndpoint && analyticsWebsiteId) {
+  const existingScript = document.querySelector<HTMLScriptElement>('script[data-analytics="umami"]');
+  if (!existingScript) {
+    const analyticsScript = document.createElement("script");
+    analyticsScript.defer = true;
+    analyticsScript.src = `${analyticsEndpoint.replace(/\/$/, "")}/umami`;
+    analyticsScript.dataset.websiteId = analyticsWebsiteId;
+    analyticsScript.dataset.analytics = "umami";
+    document.body.appendChild(analyticsScript);
+  }
+}
+
 createRoot(document.getElementById("root")!).render(
   <trpc.Provider client={trpcClient} queryClient={queryClient}>
     <QueryClientProvider client={queryClient}>

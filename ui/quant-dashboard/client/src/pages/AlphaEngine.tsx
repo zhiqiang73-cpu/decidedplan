@@ -37,7 +37,7 @@ const ENGINE_PHASES = [
   { key: "ic_scan", label: "IC扫描", desc: "52+特征信息系数计算" },
   { key: "atom_mining", label: "原子挖掘", desc: "单条件入场规则搜索" },
   { key: "combo_scan", label: "组合扫描", desc: "种子+确认条件组合" },
-  { key: "walk_forward", label: "滚动验证", desc: "OOS Walk-Forward测试" },
+  { key: "walk_forward", label: "滚动验证", desc: "样本外滚动验证" },
   { key: "causal_validate", label: "因果验证", desc: "方向-机制一致性+过拟合检测" },
   { key: "exit_mining", label: "出场挖掘", desc: "机制衰竭(A优先)+MFE兜底(B)" },
   { key: "completed", label: "完成", desc: "结果汇总" },
@@ -147,7 +147,7 @@ export default function AlphaEngine() {
         {/* System Health Overview */}
         {health && (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <HealthCard label="数据层" status={health.layers.data.status} detail={`${health.layers.data.websocket.connected}/4 WebSocket`} />
+            <HealthCard label="数据层" status={health.layers.data.status} detail={`${health.layers.data.websocket.connected}/4 实时流`} />
             <HealthCard label="特征层" status={health.layers.features.status} detail={`${health.layers.features.computed}/52 特征 · ${health.layers.features.latencyMs}ms`} />
             <HealthCard label="信号层" status={health.layers.signals.status} detail={`${health.layers.signals.p1Running} P1 + ${health.layers.signals.p2Running} P2`} />
             <HealthCard
@@ -225,7 +225,7 @@ export default function AlphaEngine() {
                   onChange={v => setParams(p => ({ ...p, icThreshold: v }))}
                 />
                 <ParamSlider
-                  label="OOS最低胜率"
+                  label="样本外最低胜率"
                   value={params.oosWinRateMin}
                   min={0.50} max={0.80} step={0.01}
                   format={v => `${(v * 100).toFixed(0)}%`}
@@ -342,7 +342,7 @@ export default function AlphaEngine() {
               <div className="flex flex-col items-center justify-center py-8" style={{ color: "#848e9c" }}>
                 <Zap size={32} style={{ opacity: 0.2 }} />
                 <p className="text-sm mt-2">尚未运行</p>
-                <p className="text-xs mt-1">点击"启动Alpha引擎"开始挖掘</p>
+                <p className="text-xs mt-1">点击“启动 Alpha 引擎”开始挖掘</p>
               </div>
             )}
           </div>
@@ -400,7 +400,7 @@ export default function AlphaEngine() {
                 </span>
               )}
             </div>
-            <span className="text-xs" style={{ color: "#848e9c" }}>OOS验证通过 · 等待人工确认</span>
+            <span className="text-xs" style={{ color: "#848e9c" }}>样本外验证通过 · 等待人工确认</span>
           </div>
 
           {pendingCandidates.length === 0 ? (
@@ -449,7 +449,7 @@ export default function AlphaEngine() {
                     <div className="flex items-center gap-4 flex-shrink-0">
                       <div className="text-center">
                         <div className={`text-sm font-bold font-num ${(c.oosWinRate ?? 0) >= 65 ? "text-profit" : "text-warning-q"}`}>{c.oosWinRate?.toFixed(1)}%</div>
-                        <div className="text-xs" style={{ color: "#848e9c" }}>OOS胜率</div>
+                        <div className="text-xs" style={{ color: "#848e9c" }}>样本外胜率</div>
                       </div>
                       <div className="text-center">
                         <div className="text-sm font-bold font-num text-profit">+{((c.oosAvgReturn ?? 0) * 100).toFixed(3)}%</div>
@@ -488,7 +488,7 @@ export default function AlphaEngine() {
                           <div className="p-3 rounded-lg font-mono text-xs mb-3" style={{ backgroundColor: "#0b0e11", color: "#f0b90b", border: "1px solid #2b3139" }}>
                             {c.fullExpression}
                           </div>
-                          <div className="text-xs font-medium mb-2" style={{ color: "#848e9c" }}>Top-3 出场条件</div>
+                          <div className="text-xs font-medium mb-2" style={{ color: "#848e9c" }}>前三出场条件</div>
                           <div className="space-y-1.5">
                             {((c.exitConditionTop3 as any[]) ?? []).map((cond: any, i: number) => (
                               <div key={i} className="flex items-center gap-2 p-2 rounded text-xs" style={{ backgroundColor: "#0b0e11", border: "1px solid #2b3139" }}>
@@ -632,7 +632,7 @@ export default function AlphaEngine() {
             <div className="px-4 py-4" style={{ backgroundColor: "#161a1e", borderBottom: "1px solid #2b3139" }}>
               <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
                 <div>
-                  <div className="text-xs mb-1" style={{ color: "#848e9c" }}>API Key</div>
+                  <div className="text-xs mb-1" style={{ color: "#848e9c" }}>接口密钥</div>
                   <input
                     type="password"
                     value={llmApiKey}
@@ -713,7 +713,7 @@ export default function AlphaEngine() {
             <div>
               <div className="px-4 py-2 flex items-center gap-2" style={{ borderBottom: "1px solid #1e2329" }}>
                 <AlertCircle size={12} style={{ color: "#f0b90b" }} />
-                <span className="text-xs font-medium" style={{ color: "#f0b90b" }}>人工审查队列 — LLM 置信度 70%~92%，请确认物理逻辑后决定</span>
+                <span className="text-xs font-medium" style={{ color: "#f0b90b" }}>人工审查队列：智能审查置信度在 70% 到 92% 之间，请确认物理逻辑后再决定</span>
                 <span className="text-xs px-1.5 py-0.5 rounded-full ml-auto" style={{ backgroundColor: "rgba(240,185,11,0.15)", color: "#f0b90b" }}>{reviewQueue.length}</span>
               </div>
               <div className="divide-y" style={{ borderColor: "#1e2329" }}>
@@ -739,7 +739,7 @@ export default function AlphaEngine() {
                         <div className="flex items-center gap-4 flex-shrink-0">
                           <div className="text-center">
                             <div className="text-sm font-bold font-num text-profit">{c.oosWinRate?.toFixed(1)}%</div>
-                            <div className="text-xs" style={{ color: "#848e9c" }}>OOS胜率</div>
+                            <div className="text-xs" style={{ color: "#848e9c" }}>样本外胜率</div>
                           </div>
                           <div className="text-center">
                             <div className="text-sm font-bold font-num" style={{ color: confColor }}>{(conf * 100).toFixed(0)}%</div>
@@ -784,7 +784,7 @@ export default function AlphaEngine() {
             <div className="flex flex-col items-center justify-center py-8" style={{ color: "#848e9c" }}>
               <Brain size={32} style={{ opacity: 0.15, color: "#bc8cff" }} />
               <p className="text-sm mt-2">审查队列为空</p>
-              <p className="text-xs mt-1" style={{ color: "#5e6673" }}>LLM 自动验证通过率 ≥92% 直接批准，&lt;70% 自动拒绝</p>
+              <p className="text-xs mt-1" style={{ color: "#5e6673" }}>智能审查通过率大于等于 92% 时直接批准，小于 70% 时自动拒绝</p>
             </div>
           )}
 
@@ -840,7 +840,7 @@ export default function AlphaEngine() {
           <div className="flex items-center gap-2 mb-4">
             <Activity size={14} style={{ color: "#848e9c" }} />
             <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>微观结构分析</h3>
-            <span className="text-xs px-2 py-0.5 rounded" style={{ backgroundColor: "rgba(240,185,11,0.1)", color: "#f0b90b" }}>LIVE</span>
+            <span className="text-xs px-2 py-0.5 rounded" style={{ backgroundColor: "rgba(240,185,11,0.1)", color: "#f0b90b" }}>实时</span>
           </div>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <MicroCard label="资金费率" value="0.0100%" sub="每8h" trend="+" />
@@ -894,7 +894,7 @@ export default function AlphaEngine() {
             <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: "1px solid #2b3139" }}>
               <div className="flex items-center gap-2">
                 <CheckCircle size={14} style={{ color: "#0ecb81" }} />
-                <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>已批准策略 Timeline</h3>
+                <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>已批准策略时间线</h3>
               </div>
               <span className="text-xs px-2 py-0.5 rounded" style={{ backgroundColor: "rgba(14,203,129,0.1)", color: "#0ecb81" }}>{approvedCandidates.length} 个活跃</span>
             </div>
@@ -912,7 +912,7 @@ export default function AlphaEngine() {
                       <span className="text-xs" style={{ color: "#848e9c" }}>{c.symbol}</span>
                     </div>
                     <div className="flex items-center gap-4 mt-1">
-                      <span className="text-xs font-num text-profit">{c.oosWinRate?.toFixed(1)}% OOS胜率</span>
+                      <span className="text-xs font-num text-profit">{c.oosWinRate?.toFixed(1)}% 样本外胜率</span>
                       <span className="text-xs" style={{ color: "#848e9c" }}>IC={c.icScore?.toFixed(3)}</span>
                       <span className="text-xs" style={{ color: "#5e6673" }}>{c.discoveredAt ? new Date(c.discoveredAt).toUTCString().slice(0, 20) : ""}</span>
                     </div>

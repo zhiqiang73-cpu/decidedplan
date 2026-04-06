@@ -8,6 +8,7 @@ from pathlib import Path
 
 from execution import config as exec_config
 from execution.trade_logger import _CSV_HEADER
+from monitor.alpha_rules import validate_approved_rule_pool
 from monitor.live_catalog import LIVE_STRATEGIES, build_strategy_status_rows, live_strategy_families
 from monitor.live_engine import LiveFeatureEngine
 from monitor.exit_policy_config import has_explicit_exit_params
@@ -134,6 +135,16 @@ def _check_alpha_rule_files(root: Path) -> CheckResult:
             ok=False,
             fatal=True,
             detail="Pending/approved alpha files are not valid JSON lists.",
+        )
+    issues = validate_approved_rule_pool(approved)
+    if issues:
+        preview = " | ".join(issues[:3])
+        more = "" if len(issues) <= 3 else f" | +{len(issues) - 3} more"
+        return CheckResult(
+            name="alpha_rule_files",
+            ok=False,
+            fatal=True,
+            detail=f"Approved alpha pool has blocking issues: {preview}{more}",
         )
     return CheckResult(
         name="alpha_rule_files",

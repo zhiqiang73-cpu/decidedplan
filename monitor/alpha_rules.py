@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+from monitor.live_catalog import live_strategy_families
+from monitor.mechanism_tracker import get_mechanism_for_family
 from utils.file_io import read_json_file
 
 logger = logging.getLogger(__name__)
@@ -134,22 +136,60 @@ def _is_enabled_approved_card(card: dict) -> bool:
 
     return True
 
-    # Legacy fallback: if status is absent, trust explicit APPROVE validation.
-    validation = card.get("validation")
-    if isinstance(validation, dict):
-        conclusion = str(validation.get("conclusion", "") or "").strip().upper()
-        if conclusion:
-            return conclusion == "APPROVE"
 
-    # No explicit approval marker -> do not load.
-    return False
+def _collect_approved_card_issues(
+    approved: list[dict],
+) -> tuple[list[tuple[dict, str, str]], list[str]]:
+    live_families = set(live_strategy_families())
+    seen_card_ids: dict[str, str] = {}
+    seen_families: dict[str, str] = {}
+    valid_cards: list[tuple[dict, str, str]] = []
+    issues: list[str] = []
+
+    for index, card in enumerate(approved):
+        if not _is_enabled_approved_card(card):
+            continue
+
+        card_id = str(card.get("id") or f"approved[{index}]").strip() or f"approved[{index}]"
+        family = str(card.get("family") or "").strip()
+        card_issues: list[str] = []
+
+        if not family:
+            card_issues.append("missing family")
+        elif family not in live_families:
+            card_issues.append(f"unknown family={family}")
+
+        existing_card_id = seen_card_ids.get(card_id)
+        if existing_card_id is not None:
+            card_issues.append(f"duplicate card_id={card_id}")
+
+        existing_family_owner = seen_families.get(family)
+        if family and existing_family_owner is not None:
+            card_issues.append(f"duplicate family={family} first_seen_in={existing_family_owner}")
+
+        if card_issues:
+            issues.append(f"{card_id}: {'; '.join(card_issues)}")
+            continue
+
+        seen_card_ids[card_id] = card_id
+        seen_families[family] = card_id
+        valid_cards.append((card, card_id, family))
+
+    return valid_cards, issues
+
+
+def validate_approved_rule_pool(approved: list[dict]) -> list[str]:
+    _, issues = _collect_approved_card_issues(approved)
+    return issues
 
 
 def _build_alpha_rules_from_approved(approved: list[dict]) -> list[dict]:
     rules: list[dict] = []
-    for card in approved:
-        if not _is_enabled_approved_card(card):
-            continue
+    valid_cards, issues = _collect_approved_card_issues(approved)
+    for issue in issues:
+        logger.warning("[AlphaRules] blocked approved card: %s", issue)
+
+    for card, card_id, family in valid_cards:
         try:
             entry = card["entry"]
             group = str(card.get("group") or card.get("rule_str") or card.get("id", entry["feature"]))
@@ -171,15 +211,12 @@ def _build_alpha_rules_from_approved(approved: list[dict]) -> list[dict]:
             # Stop loss from card or from stop optimization result
             stop_pct = _safe_float(card.get("stop_pct"))
 
-            family = (
-                str(card.get("family") or "").strip()
-                or f"ALPHA::{group}::{entry['direction']}::{int(entry['horizon'])}"
-            )
             has_exit = bool(exit_combos) or exit_condition is not None
             rules.append(
                 {
-                    "name": card.get("id", entry["feature"]),
+                    "name": card_id,
                     "family": family,
+                    "mechanism_type": get_mechanism_for_family(family),
                     "group": group,
                     "feature": entry["feature"],
                     "op": entry["operator"],
@@ -194,12 +231,12 @@ def _build_alpha_rules_from_approved(approved: list[dict]) -> list[dict]:
                     else None,
                     "stop_pct": stop_pct,
                     "rule_str": str(card.get("rule_str", "") or ""),
-                    "card_id": str(card.get("id", entry["feature"])),
+                    "card_id": card_id,
                     "trade_ready": has_exit,
                 }
             )
         except (KeyError, TypeError, ValueError) as exc:
-            logger.warning("[AlphaRules] skip malformed approved rule: %s", exc)
+            logger.warning("[AlphaRules] skip malformed approved rule %s: %s", card_id, exc)
     return rules
 
 
@@ -268,6 +305,10 @@ class AlphaRuleChecker:
             direction = str(rule.get("direction", "")).lower()
             horizon = int(rule.get("horizon", 1))
             group = str(rule.get("group", name))
+            family = str(rule.get("family") or "").strip()
+            if not family:
+                logger.warning("[AlphaRules] skip live alert without family: %s", name)
+                continue
 
             value = _safe_get(row, feature, default=None)
             if value is None:
@@ -312,7 +353,8 @@ class AlphaRuleChecker:
 
             alert = {
                 "name": name,
-                "family": str(rule.get("family") or f"ALPHA::{group}::{direction}::{horizon}"),
+                "family": family,
+                "mechanism_type": str(rule.get("mechanism_type") or get_mechanism_for_family(family)),
                 "group": group,
                 "feature": feature,
                 "feature_value": round(float(value), 6),

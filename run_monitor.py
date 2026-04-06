@@ -163,12 +163,22 @@ def _build_strategy_payload(
     return strategies, daily_totals
 
 
+def _read_discovery_alive() -> bool:
+    """Read discovery heartbeat without letting JSON/IO issues break monitor writes."""
+    try:
+        hb = json.loads(_DISCOVERY_HEARTBEAT.read_text(encoding="utf-8"))
+        return bool(hb.get("alive", False))
+    except Exception:
+        return False
+
+
 def _write_system_state(
     close: float,
     ts_ms: int,
     runner: "SignalRunner",
     execution_engine: "ExecutionEngine",
     connected: bool = True,
+    default_strategy_status: str | None = None,
 ) -> None:
     """Write monitor/output/system_state.json atomically. Never raises."""
     try:
@@ -178,18 +188,19 @@ def _write_system_state(
         # Discovery alive: read dedicated heartbeat written by run_live_discovery.py.
         # Using a heartbeat file avoids the mtime-heuristic problem where the discovery
         # process sleeping between scans (up to 6h) would falsely appear as dead.
-        discovery_alive = False
-        try:
-            hb = json.loads(_DISCOVERY_HEARTBEAT.read_text(encoding="utf-8"))
-            discovery_alive = bool(hb.get("alive", False))
-        except Exception:
-            pass
+        discovery_alive = _read_discovery_alive()
 
-        # Balance from order manager
+        # Balance from order manager — run in thread to avoid blocking the asyncio event loop
         balance = None
         try:
             if execution_engine.order_manager is not None:
-                balance = execution_engine.order_manager.get_usdt_balance()
+                import concurrent.futures as _cf
+                with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+                    _fut = _pool.submit(execution_engine.order_manager.get_usdt_balance)
+                    try:
+                        balance = _fut.result(timeout=5.0)
+                    except (_cf.TimeoutError, Exception):
+                        pass
         except Exception:
             pass
 
@@ -246,7 +257,11 @@ def _write_system_state(
         except Exception:
             pass
 
-        strategies, daily_totals = _build_strategy_payload(status_rows, today_stats)
+        strategies, daily_totals = _build_strategy_payload(
+            status_rows,
+            today_stats,
+            default_status=default_strategy_status,
+        )
 
         state = {
             "timestamp": heartbeat_ts_utc,
@@ -365,12 +380,14 @@ async def _heartbeat_state_publisher(
         state_ts_ms = int(runtime_state.get("market_ts_ms") or now_ms)
         state_price = float(runtime_state.get("price") or 0.0)
         state_connected = bool(runtime_state.get("connected"))
+        warmup_in_progress = bool(runtime_state.get("warming_up"))
         _write_system_state(
             state_price,
             state_ts_ms,
             runner,
             execution_engine,
             connected=state_connected,
+            default_strategy_status="warming_up" if warmup_in_progress else None,
         )
         await asyncio.sleep(interval_s)
 
@@ -829,7 +846,7 @@ async def main():
         _initial_state = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "monitor_alive": True,
-            "discovery_alive": False,
+            "discovery_alive": _read_discovery_alive(),
             "connected": False,
             "symbol": "BTCUSDT",
             "price": _last_price,
@@ -869,6 +886,7 @@ async def main():
         "price": _last_price or 0.0,
         "market_ts_ms": int(time.time() * 1000),
         "connected": False,
+        "warming_up": not args.no_warmup,
     }
 
     if execution_engine.order_manager is not None:
@@ -881,14 +899,21 @@ async def main():
         except Exception:
             pass
 
-    if not args.no_warmup:
-        engine.warmup()
-    else:
-        logger.info("Skipping warmup (--no-warmup)")
-
     heartbeat_task = asyncio.create_task(
         _heartbeat_state_publisher(runner, execution_engine, runtime_state)
     )
+    try:
+        if not args.no_warmup:
+            await asyncio.to_thread(engine.warmup)
+            runtime_state["warming_up"] = False
+        else:
+            logger.info("Skipping warmup (--no-warmup)")
+            runtime_state["warming_up"] = False
+    except Exception:
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        raise
+
     ws_task = asyncio.create_task(
         run_websocket(engine, runner, alerter, execution_engine, runtime_state)
     )

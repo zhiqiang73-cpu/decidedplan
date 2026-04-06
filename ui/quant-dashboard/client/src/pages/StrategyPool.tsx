@@ -15,6 +15,7 @@ import {
   BarChart, Bar, Cell
 } from "recharts";
 import { Streamdown } from "streamdown";
+import { formatDirection, formatStrategyStatus } from "@/lib/labels";
 
 type SortKey = "oosWinRate" | "oosAvgReturn" | "pnl7d" | "totalPnl" | "triggerCount7d" | "confidenceScore";
 type SortDir = "asc" | "desc";
@@ -72,7 +73,7 @@ export default function StrategyPool() {
     active: strategies?.filter(s => s.status === "active").length ?? 0,
     avgWinRate: (() => {
       const withOos = strategies?.filter(s => s.oosWinRate != null && s.oosWinRate > 0) ?? [];
-      return withOos.length ? (withOos.reduce((s, x) => s + (x.oosWinRate ?? 0), 0) / withOos.length).toFixed(1) : "N/A";
+      return withOos.length ? (withOos.reduce((s, x) => s + (x.oosWinRate ?? 0), 0) / withOos.length).toFixed(1) : "--";
     })(),
     totalPnl7d: strategies?.reduce((s, x) => s + parseFloat(x.pnl7d ?? "0"), 0).toFixed(2) ?? "0",
   };
@@ -114,7 +115,7 @@ export default function StrategyPool() {
           <div className="card-q p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>胜率分布直方图</h3>
-              <span className="text-xs" style={{ color: "#848e9c" }}>OOS验证胜率区间分布</span>
+              <span className="text-xs" style={{ color: "#848e9c" }}>样本外验证胜率区间分布</span>
             </div>
             <ResponsiveContainer width="100%" height={100}>
               <BarChart
@@ -219,7 +220,7 @@ export default function StrategyPool() {
                 <tr style={{ borderBottom: "1px solid #2b3139" }}>
                   <th className="px-4 py-3 text-left text-xs font-medium" style={{ color: "#848e9c" }}>策略</th>
                   <th className="px-4 py-3 text-left text-xs font-medium" style={{ color: "#848e9c" }}>状态</th>
-                  <SortTh label="OOS胜率" sortKey="oosWinRate" current={sortKey} dir={sortDir} onSort={toggleSort} />
+                  <SortTh label="样本外胜率" sortKey="oosWinRate" current={sortKey} dir={sortDir} onSort={toggleSort} />
                   <th className="px-4 py-3 text-left text-xs font-medium" style={{ color: "#848e9c" }}>验证胜率</th>
                   <SortTh label="平均收益" sortKey="oosAvgReturn" current={sortKey} dir={sortDir} onSort={toggleSort} />
                   <SortTh label="7日盈亏" sortKey="pnl7d" current={sortKey} dir={sortDir} onSort={toggleSort} />
@@ -245,14 +246,12 @@ export default function StrategyPool() {
                           {expandedId === s.strategyId ? <ChevronUp size={14} style={{ color: "#848e9c" }} /> : <ChevronDown size={14} style={{ color: "#848e9c" }} />}
                           <div>
                             <div className="text-sm font-medium" style={{ color: "#eaecef" }}>{s.name}</div>
-                            <div className="text-xs" style={{ color: "#848e9c" }}>{s.strategyId} · {s.symbol} · {s.direction}</div>
+                            <div className="text-xs" style={{ color: "#848e9c" }}>{s.strategyId} / {s.symbol} / {formatDirection(s.direction)}</div>
                           </div>
                         </div>
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`badge-${s.status}`}>{
-                          s.status === "active" ? "活跃" : s.status === "paused" ? "暂停" : s.status === "degraded" ? "降级" : "退役"
-                        }</span>
+                        <span className={`badge-${s.status}`}>{formatStrategyStatus(s.status)}</span>
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1">
@@ -323,7 +322,7 @@ export default function StrategyPool() {
                               <div className="p-3 rounded-lg font-mono text-xs" style={{ backgroundColor: "#0b0e11", color: "#f0b90b", border: "1px solid #2b3139" }}>
                                 {s.entryCondition}
                               </div>
-                              <div className="text-xs font-medium mt-3 mb-2" style={{ color: "#848e9c" }}>Top-3 出场条件</div>
+                              <div className="text-xs font-medium mt-3 mb-2" style={{ color: "#848e9c" }}>前三出场条件</div>
                               <div className="space-y-1.5">
                                 {((s.exitConditionTop3 as any[]) ?? []).map((c: any, i: number) => (
                                   <div key={i} className="flex items-center gap-2 p-2 rounded text-xs" style={{ backgroundColor: "#0b0e11", border: "1px solid #2b3139" }}>
@@ -361,7 +360,7 @@ export default function StrategyPool() {
                                     </div>
                                     <div className="text-center p-2 rounded" style={{ backgroundColor: "#0b0e11" }}>
                                       <div className="text-xs font-num text-profit">{s.oosWinRate?.toFixed(1)}%</div>
-                                      <div className="text-xs" style={{ color: "#848e9c" }}>OOS胜率</div>
+                                      <div className="text-xs" style={{ color: "#848e9c" }}>样本外胜率</div>
                                     </div>
                                   </div>
                                 </>

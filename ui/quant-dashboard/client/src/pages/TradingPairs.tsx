@@ -65,7 +65,7 @@ export default function TradingPairs() {
             </Button>
           </div>
           <div className="mt-3 p-3 rounded-lg text-xs" style={{ backgroundColor: "rgba(24,144,255,0.1)", color: "#848e9c", border: "1px solid rgba(24,144,255,0.2)" }}>
-            <span style={{ color: "#1890ff" }}>自动化流程：</span> 添加后 → Alpha引擎自动下载历史数据 → IC扫描 → 策略挖掘 → OOS验证 → 推荐策略
+            <span style={{ color: "#1890ff" }}>自动化流程：</span> 添加后 → Alpha引擎自动下载历史数据 → IC扫描 → 策略挖掘 → 样本外验证 → 推荐策略
           </div>
         </div>
 

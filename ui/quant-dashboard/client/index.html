@@ -1,38 +1,16 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN" translate="no">
-
   <head>
     <meta charset="UTF-8" />
     <meta name="google" content="notranslate" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1" />
-    <title>QuantAlpha 閲忓寲浜ゆ槗绯荤粺鐩戞帶骞冲彴</title>    
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+    <title>QuantAlpha 量化交易监控台</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   </head>
-
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
-        <script>
-(() => {
-  const analyticsEndpoint = "%VITE_ANALYTICS_ENDPOINT%";
-  const analyticsWebsiteId = "%VITE_ANALYTICS_WEBSITE_ID%";
-  const placeholdersUnresolved =
-    analyticsEndpoint.includes("%VITE_") ||
-    analyticsWebsiteId.includes("%VITE_");
-  if (placeholdersUnresolved || !analyticsEndpoint || !analyticsWebsiteId) {
-    return;
-  }
-  const analyticsScript = document.createElement("script");
-  analyticsScript.defer = true;
-  analyticsScript.src = `${analyticsEndpoint.replace(/\/$/, "")}/umami`;
-  analyticsScript.dataset.websiteId = analyticsWebsiteId;
-  document.body.appendChild(analyticsScript);
-})();    </script>
   </body>
-
 </html>
-

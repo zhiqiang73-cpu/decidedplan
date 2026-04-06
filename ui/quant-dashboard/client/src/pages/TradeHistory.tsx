@@ -4,6 +4,7 @@ import { trpc } from "@/lib/trpc";
 import { Download } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { formatDateTimeUTC8 } from "@/lib/time";
+import { formatDirection, formatTradeStatus } from "@/lib/labels";
 
 export default function TradeHistory() {
   const [statusFilter, setStatusFilter] = useState<"" | "open" | "closed" | "cancelled">("");
@@ -35,8 +36,8 @@ export default function TradeHistory() {
     const rows = filteredTrades.map((t) => [
       t.tradeId,
       t.symbol,
-      t.direction,
-      t.status,
+      formatDirection(t.direction),
+      formatTradeStatus(t.status),
       t.strategyId ?? "",
       t.entryPrice ?? "",
       t.exitPrice ?? "",
@@ -128,7 +129,7 @@ export default function TradeHistory() {
                 border: "1px solid #2b3139",
               }}
             >
-              {d === "" ? "多空" : d}
+              {d === "" ? "全部方向" : formatDirection(d)}
             </button>
           ))}
 
@@ -154,10 +155,10 @@ export default function TradeHistory() {
                       <td className="px-4 py-3 text-sm" style={{ color: "#eaecef" }}>{t.symbol}</td>
                       <td className="px-4 py-3">
                         <span className={`text-xs px-2 py-0.5 rounded ${t.direction === "LONG" ? "text-profit bg-profit-subtle" : "text-loss bg-loss-subtle"}`}>
-                          {t.direction}
+                          {formatDirection(t.direction)}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-xs" style={{ color: "#848e9c" }}>{t.status}</td>
+                      <td className="px-4 py-3 text-xs" style={{ color: "#848e9c" }}>{formatTradeStatus(t.status)}</td>
                       <td className="px-4 py-3 text-xs" style={{ color: "#848e9c" }}>{t.strategyId}</td>
                       <td className="px-4 py-3 text-sm font-num" style={{ color: "#eaecef" }}>{t.entryPrice}</td>
                       <td className="px-4 py-3 text-sm font-num" style={{ color: "#eaecef" }}>{t.exitPrice ?? "-"}</td>

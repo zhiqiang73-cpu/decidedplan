@@ -4,6 +4,7 @@ import { trpc } from "@/lib/trpc";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { Activity, AlertCircle, BarChart2, DollarSign, Target, Wifi, WifiOff } from "lucide-react";
 import { formatDateTimeUTC8 } from "@/lib/time";
+import { formatDirection, formatForceCategory, formatRegime } from "@/lib/labels";
 
 export default function Dashboard() {
   const { connected } = useWebSocket();
@@ -28,14 +29,6 @@ export default function Dashboard() {
 
   const totalNotional = positions.reduce((sum, p) => sum + (p.entryPrice ?? 0) * (p.quantity ?? 0), 0);
 
-  const REGIME_LABEL: Record<string, string> = {
-    QUIET_TREND: "安静趋势",
-    VOLATILE_TREND: "波动趋势",
-    RANGE_BOUND: "区间震荡",
-    VOL_EXPANSION: "波动扩张",
-    CRISIS: "危机",
-    UNKNOWN: "未知",
-  };
   const REGIME_COLOR: Record<string, string> = {
     QUIET_TREND: "#0ecb81",
     VOLATILE_TREND: "#f0b90b",
@@ -46,7 +39,7 @@ export default function Dashboard() {
   };
   const currentRegime = regimeData?.regime ?? "UNKNOWN";
   const regimeColor = REGIME_COLOR[currentRegime] ?? "#848e9c";
-  const regimeLabel = REGIME_LABEL[currentRegime] ?? currentRegime;
+  const regimeLabel = formatRegime(currentRegime);
 
   return (
     <QuantLayout>
@@ -125,7 +118,7 @@ export default function Dashboard() {
                           : "#848e9c",
               }}
             >
-              {regimeData?.regime ?? "—"}
+              {regimeLabel}
             </span>
           </div>
 
@@ -169,8 +162,8 @@ export default function Dashboard() {
                       border: `1px solid ${Number(value) >= 2 ? "#f0b90b" : "#2b3139"}`,
                     }}
                   >
-                    {key.split("_").slice(-1)[0]}: {Number(value)}
-                    {Number(value) >= 2 ? " ⚠" : ""}
+                    {formatForceCategory(key)}: {Number(value)}
+                    
                   </span>
                 ))}
             </div>
@@ -181,7 +174,7 @@ export default function Dashboard() {
         <div className="card-q p-4">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>策略验证正确率（白名单准入）</h3>
-            <span className="text-xs" style={{ color: "#848e9c" }}>OOS walk-forward</span>
+            <span className="text-xs" style={{ color: "#848e9c" }}>样本外滚动验证</span>
           </div>
           {(!winRates || winRates.length === 0) ? (
             <div className="text-xs" style={{ color: "#848e9c" }}>暂无数据</div>
@@ -237,7 +230,7 @@ export default function Dashboard() {
               {(strategies ?? []).slice(0, 6).map((s) => (
                 <div key={s.strategyId} className="py-2 px-2 rounded" style={{ backgroundColor: "#161a1e" }}>
                   <div className="text-xs font-medium" style={{ color: "#eaecef" }}>{s.name}</div>
-                  <div className="text-xs" style={{ color: "#848e9c" }}>{s.symbol} · {s.direction}</div>
+                  <div className="text-xs" style={{ color: "#848e9c" }}>{s.symbol} / {formatDirection(s.direction)}</div>
                 </div>
               ))}
             </div>
@@ -251,9 +244,9 @@ export default function Dashboard() {
               <div className="space-y-1">
                 {Object.entries(forceData.concentration).map(([category, count]) => (
                   <div key={category} className="flex items-center justify-between text-xs">
-                    <span style={{ color: "#848e9c" }}>{category}</span>
+                    <span style={{ color: "#848e9c" }}>{formatForceCategory(category)}</span>
                     <span className="font-num font-medium" style={{ color: (count as number) >= 2 ? "#f6465d" : "#eaecef" }}>
-                      {count as number} 仓{(count as number) >= 2 ? " ⚠" : ""}
+                      {count as number} 仓
                     </span>
                   </div>
                 ))}
@@ -282,7 +275,7 @@ export default function Dashboard() {
                   return (
                     <div key={p.positionId} className="flex items-center justify-between py-2 px-2 rounded" style={{ backgroundColor: "#161a1e" }}>
                       <div>
-                        <div className="text-xs font-medium" style={{ color: "#eaecef" }}>{p.symbol} · {p.direction}</div>
+                        <div className="text-xs font-medium" style={{ color: "#eaecef" }}>{p.symbol} / {formatDirection(p.direction)}</div>
                         <div className="text-xs font-num" style={{ color: "#848e9c" }}>@{entryP.toLocaleString()}</div>
                       </div>
                       <div className={`text-sm font-num font-medium ${pnlPct >= 0 ? "text-profit" : "text-loss"}`}>

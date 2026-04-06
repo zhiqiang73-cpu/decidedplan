@@ -1,10 +1,14 @@
-﻿"""Watchdog entrypoint for the live BTC system."""
+"""Watchdog entrypoint for the live BTC system."""
 
 from __future__ import annotations
 
 import argparse
+import atexit
+import json
 import logging
+import msvcrt
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -18,6 +22,8 @@ from diagnostics.doctor import format_report, run_preflight_checks
 
 logger = logging.getLogger("watchdog")
 ROOT = Path(__file__).resolve().parent
+_LOCK_PATH = ROOT / "monitor" / "output" / "watchdog.lock"
+_LOCK_HANDLE = None
 
 
 def _resolve_project_path(value: str | Path) -> Path:
@@ -29,6 +35,70 @@ def _resolve_project_path(value: str | Path) -> Path:
 
 def _clean_path_arg(value: str) -> str:
     return value.strip().strip('"').strip("'")
+
+
+def _release_lock(lock_path: Path, owner_pid: int) -> None:
+    global _LOCK_HANDLE
+    handle = _LOCK_HANDLE
+    _LOCK_HANDLE = None
+    if handle is None:
+        return
+    try:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    try:
+        handle.close()
+    except OSError:
+        pass
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    if int(payload.get("pid") or -1) == owner_pid:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _acquire_lock(lock_path: Path) -> None:
+    global _LOCK_HANDLE
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+", encoding="utf-8")
+    try:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        handle.close()
+        raise RuntimeError("watchdog already running; stop the existing instance first")
+    _LOCK_HANDLE = handle
+    handle.seek(0)
+    handle.truncate()
+    handle.write(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "started_at": time.time(),
+                "cwd": str(ROOT),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    handle.flush()
+    try:
+        os.fsync(handle.fileno())
+    except OSError:
+        pass
+    atexit.register(_release_lock, lock_path, os.getpid())
+
+
+def _port_is_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, port)) == 0
 
 
 def setup_logging(log_dir: str) -> None:
@@ -57,7 +127,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-discovery", action="store_true", help="Do not start live discovery")
     parser.add_argument("--no-data-sync", action="store_true", help="Do not start websocket data collection")
     parser.add_argument("--discovery-interval", type=float, default=6.0, help="Discovery interval in hours")
-    parser.add_argument("--data-days", type=int, default=30, help="Lookback window for discovery")
+    parser.add_argument(
+        "--discovery-start-delay",
+        type=int,
+        default=300,
+        help="Delay discovery startup in seconds so the live chain can stabilize first",
+    )
+    parser.add_argument("--data-days", type=int, default=90, help="Lookback window for discovery")
     parser.add_argument("--eth-discovery", action="store_true", help="Also start ETHUSDT live discovery")
     parser.add_argument("--skip-preflight", action="store_true", help="Skip run_doctor-style preflight checks")
     parser.add_argument("--no-ui", action="store_true", help="Do not start the dashboard UI server")
@@ -161,6 +237,11 @@ def main() -> None:
     args = parse_args()
     args.log_dir = _clean_path_arg(args.log_dir)
     setup_logging(args.log_dir)
+    try:
+        _acquire_lock(_LOCK_PATH)
+    except RuntimeError as exc:
+        logger.error(str(exc))
+        raise SystemExit(1)
     project_root = ROOT
 
     if not args.skip_preflight:
@@ -207,6 +288,7 @@ def main() -> None:
     ]
     ui_cmd = ["node", "dist/index.js"] if ui_enabled else []
     sync_cmd = [sys.executable, "run_ws.py", "--storage-path", "data/storage", "--flush-interval", "60"]
+    discovery_start_delay = max(0, int(args.discovery_start_delay))
 
     logger.info("=" * 60)
     logger.info("live watchdog starting")
@@ -214,6 +296,10 @@ def main() -> None:
     if not args.no_discovery:
         logger.info("discovery: %s", " ".join(discovery_cmd))
         logger.info("discovery interval: %.1f hours", args.discovery_interval)
+        if discovery_start_delay > 0:
+            logger.info("discovery start delay: %ss (live chain first, alpha backfill later)", discovery_start_delay)
+        else:
+            logger.info("discovery start delay: disabled (start immediately)")
     else:
         logger.info("discovery: disabled")
     if not args.no_data_sync:
@@ -238,7 +324,8 @@ def main() -> None:
     monitor_guard.start()
 
     discovery_guard: ProcessGuard | None = None
-    if not args.no_discovery:
+    discovery_due_ts: float | None = None
+    if not args.no_discovery and discovery_start_delay <= 0:
         discovery_guard = ProcessGuard(
             "discovery-btc",
             discovery_cmd,
@@ -248,9 +335,16 @@ def main() -> None:
             cwd=project_root,
         )
         discovery_guard.start()
+    elif not args.no_discovery:
+        discovery_due_ts = time.time() + discovery_start_delay
+        logger.info(
+            "[discovery-btc] delayed start scheduled for %s",
+            time.strftime("%H:%M:%S", time.localtime(discovery_due_ts)),
+        )
 
     discovery_eth_guard: ProcessGuard | None = None
-    if not args.no_discovery and args.eth_discovery:
+    discovery_eth_due_ts: float | None = None
+    if not args.no_discovery and args.eth_discovery and discovery_start_delay <= 0:
         discovery_eth_guard = ProcessGuard(
             "discovery-eth",
             discovery_eth_cmd,
@@ -260,25 +354,33 @@ def main() -> None:
             cwd=project_root,
         )
         discovery_eth_guard.start()
+    elif not args.no_discovery and args.eth_discovery:
+        discovery_eth_due_ts = time.time() + discovery_start_delay
+        logger.info(
+            "[discovery-eth] delayed start scheduled for %s",
+            time.strftime("%H:%M:%S", time.localtime(discovery_eth_due_ts)),
+        )
 
     ui_guard: ProcessGuard | None = None
     if ui_enabled:
-        ui_guard = ProcessGuard(
-            "ui",
-            ui_cmd,
-            args.max_restarts,
-            args.delay,
-            args.log_dir,
-            cwd=ui_dir,
-            env_overrides={"NODE_ENV": "production", "PORT": "8050"},
-            hide_window=True,
-        )
-        try:
-            ui_guard.start()
-        except FileNotFoundError as exc:
-            logger.warning("[ui] failed to start dashboard: %s; dashboard disabled", exc)
-            ui_guard = None
-
+        if _port_is_in_use(8050):
+            logger.warning("[ui] port 8050 already in use; reusing existing dashboard instance")
+        else:
+            ui_guard = ProcessGuard(
+                "ui",
+                ui_cmd,
+                args.max_restarts,
+                args.delay,
+                args.log_dir,
+                cwd=ui_dir,
+                env_overrides={"NODE_ENV": "production", "PORT": "8050"},
+                hide_window=True,
+            )
+            try:
+                ui_guard.start()
+            except FileNotFoundError as exc:
+                logger.warning("[ui] failed to start dashboard: %s; dashboard disabled", exc)
+                ui_guard = None
     sync_guard: ProcessGuard | None = None
     if not args.no_data_sync:
         sync_guard = ProcessGuard(
@@ -294,9 +396,32 @@ def main() -> None:
     try:
         while True:
             time.sleep(5)
+            now = time.time()
             if not monitor_guard.check_and_restart():
                 logger.error("monitor could not be recovered; shutting down")
                 break
+            if discovery_due_ts is not None and discovery_guard is None and now >= discovery_due_ts:
+                discovery_guard = ProcessGuard(
+                    "discovery-btc",
+                    discovery_cmd,
+                    args.max_restarts,
+                    args.delay,
+                    args.log_dir,
+                    cwd=project_root,
+                )
+                discovery_guard.start()
+                discovery_due_ts = None
+            if discovery_eth_due_ts is not None and discovery_eth_guard is None and now >= discovery_eth_due_ts:
+                discovery_eth_guard = ProcessGuard(
+                    "discovery-eth",
+                    discovery_eth_cmd,
+                    args.max_restarts,
+                    args.delay,
+                    args.log_dir,
+                    cwd=project_root,
+                )
+                discovery_eth_guard.start()
+                discovery_eth_due_ts = None
             if discovery_guard is not None and not discovery_guard.check_and_restart():
                 logger.warning("discovery-btc could not be recovered; leaving discovery disabled")
                 discovery_guard = None
@@ -326,7 +451,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
 

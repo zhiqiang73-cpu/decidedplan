@@ -132,7 +132,10 @@ class OrderManager:
     ) -> dict[str, Any]:
         """Try to close with a LIMIT order at best price for maker fee."""
         side = self._close_side(direction)
-        norm_qty = self._normalize_qty(qty)
+        # Round UP for closes to avoid leaving dust remnants on exchange
+        norm_qty = self._quantize_up_to_step(Decimal(str(qty)), self.filters.step_size)
+        if norm_qty < self.filters.min_qty:
+            norm_qty = self.filters.min_qty
 
         # For closing LONG (sell): place at ask - 1 tick (maker)
         # For closing SHORT (buy): place at bid + 1 tick (maker)
@@ -193,7 +196,10 @@ class OrderManager:
     def _close_position_market(self, direction: str, qty: float) -> dict[str, Any]:
         """Fallback: close with MARKET order (taker fee)."""
         side = self._close_side(direction)
-        norm_qty = self._normalize_qty(qty)
+        # Round UP for closes to avoid leaving dust remnants on exchange
+        norm_qty = self._quantize_up_to_step(Decimal(str(qty)), self.filters.step_size)
+        if norm_qty < self.filters.min_qty:
+            norm_qty = self.filters.min_qty
         params = {
             "symbol": self.symbol,
             "side": side,

@@ -53,7 +53,7 @@ export default function ApiConfig() {
       <div className="p-4 lg:p-6 space-y-5 max-w-4xl">
         <div>
           <h1 className="text-xl font-bold" style={{ color: "#eaecef" }}>API 配置</h1>
-          <p className="text-sm mt-0.5" style={{ color: "#848e9c" }}>配置币安实盘API密钥，连接真实交易账户</p>
+          <p className="text-sm mt-0.5" style={{ color: "#848e9c" }}>配置币安实盘接口密钥，连接真实交易账户</p>
         </div>
 
         {/* Connection Status Banner */}
@@ -62,7 +62,7 @@ export default function ApiConfig() {
           {config?.isActive ? (
             <><CheckCircle size={20} className="text-profit flex-shrink-0" />
               <div>
-                <div className="text-sm font-medium text-profit">已连接 · 实盘API</div>
+                <div className="text-sm font-medium text-profit">已连接 · 实盘接口</div>
                 <div className="text-xs" style={{ color: "#848e9c" }}>
                   最后测试: {config.lastTestedAt ? new Date(config.lastTestedAt).toUTCString() : "从未"} UTC
                   {config.isTestnet && " · 测试网"}
@@ -72,9 +72,9 @@ export default function ApiConfig() {
             <><AlertCircle size={20} className="text-warning-q flex-shrink-0" />
               <div>
                 <div className="text-sm font-medium text-warning-q">
-                  {config ? "连接未验证" : "未配置API"}
+                  {config ? "连接未验证" : "未配置接口"}
                 </div>
-                <div className="text-xs" style={{ color: "#848e9c" }}>请配置并测试API连接以启用实盘交易</div>
+                <div className="text-xs" style={{ color: "#848e9c" }}>请先配置并测试接口连接，再启用实盘交易</div>
               </div></>
           )}
         </div>
@@ -84,7 +84,7 @@ export default function ApiConfig() {
           <div className="card-q p-5 space-y-4">
             <div className="flex items-center gap-2 mb-1">
               <Shield size={16} style={{ color: "#f0b90b" }} />
-              <h2 className="text-sm font-semibold" style={{ color: "#eaecef" }}>API 密钥配置</h2>
+              <h2 className="text-sm font-semibold" style={{ color: "#eaecef" }}>接口密钥配置</h2>
             </div>
 
             <div>
@@ -92,7 +92,7 @@ export default function ApiConfig() {
               <Input
                 value={apiKey}
                 onChange={e => setApiKey(e.target.value)}
-                placeholder={config?.apiKey ? "已配置 (输入新值以更新)" : "输入 Binance API Key"}
+                placeholder={config?.apiKey ? "已配置（输入新值可更新）" : "输入币安 API Key"}
                 className="font-mono text-sm"
                 style={{ backgroundColor: "#161a1e", borderColor: "#2b3139", color: "#eaecef" }}
               />
@@ -105,7 +105,7 @@ export default function ApiConfig() {
                   type={showSecret ? "text" : "password"}
                   value={apiSecret}
                   onChange={e => setApiSecret(e.target.value)}
-                  placeholder={config?.apiSecret ? "已配置 (输入新值以更新)" : "输入 Binance API Secret"}
+                  placeholder={config?.apiSecret ? "已配置（输入新值可更新）" : "输入币安 API Secret"}
                   className="font-mono text-sm pr-10"
                   style={{ backgroundColor: "#161a1e", borderColor: "#2b3139", color: "#eaecef" }}
                 />
@@ -122,7 +122,7 @@ export default function ApiConfig() {
             <div className="flex items-center justify-between py-2 px-3 rounded-lg" style={{ backgroundColor: "#161a1e" }}>
               <div>
                 <div className="text-sm" style={{ color: "#eaecef" }}>使用测试网</div>
-                <div className="text-xs" style={{ color: "#848e9c" }}>Binance Testnet (模拟交易)</div>
+                <div className="text-xs" style={{ color: "#848e9c" }}>币安测试网（模拟交易）</div>
               </div>
               <Switch checked={isTestnet} onCheckedChange={setIsTestnet} />
             </div>

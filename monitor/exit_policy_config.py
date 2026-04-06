@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict
 
 
 CORE_EXIT_FAMILIES = (
@@ -58,8 +58,80 @@ class ExitParams:
     mfe_ratchet_threshold: float = 0.15
     mfe_ratchet_ratio: float = 0.4
 
-    def to_dict(self) -> Dict[str, float | int]:
+    def to_dict(self) -> Dict[str, object]:
         return asdict(self)
+
+
+def _coerce_float(value: object, default: float) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_int(value: object, default: int) -> int:
+    try:
+        if value is None:
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_multiplier_map(
+    payload: object,
+    *,
+    base: dict,
+    int_keys: bool = False,
+) -> dict:
+    if not isinstance(payload, dict):
+        return dict(base)
+
+    normalized: dict = {}
+    for raw_key, raw_value in payload.items():
+        try:
+            key = int(float(raw_key)) if int_keys else str(raw_key)
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        normalized[key] = value
+    return normalized or dict(base)
+
+
+def build_exit_params(payload: Any, base: ExitParams | None = None) -> ExitParams | None:
+    if not isinstance(payload, dict):
+        return None
+
+    base = base or ExitParams()
+    try:
+        return ExitParams(
+            take_profit_pct=_coerce_float(payload.get("take_profit_pct"), base.take_profit_pct),
+            stop_pct=_coerce_float(payload.get("stop_pct"), base.stop_pct),
+            protect_start_pct=_coerce_float(payload.get("protect_start_pct"), base.protect_start_pct),
+            protect_gap_ratio=_coerce_float(payload.get("protect_gap_ratio"), base.protect_gap_ratio),
+            protect_floor_pct=_coerce_float(payload.get("protect_floor_pct"), base.protect_floor_pct),
+            min_hold_bars=_coerce_int(payload.get("min_hold_bars"), base.min_hold_bars),
+            max_hold_factor=_coerce_int(payload.get("max_hold_factor"), base.max_hold_factor),
+            exit_confirm_bars=_coerce_int(payload.get("exit_confirm_bars"), base.exit_confirm_bars),
+            decay_exit_threshold=_coerce_float(payload.get("decay_exit_threshold"), base.decay_exit_threshold),
+            decay_tighten_threshold=_coerce_float(payload.get("decay_tighten_threshold"), base.decay_tighten_threshold),
+            tighten_gap_ratio=_coerce_float(payload.get("tighten_gap_ratio"), base.tighten_gap_ratio),
+            confidence_stop_multipliers=_coerce_multiplier_map(
+                payload.get("confidence_stop_multipliers"),
+                base=base.confidence_stop_multipliers,
+                int_keys=True,
+            ),
+            regime_stop_multipliers=_coerce_multiplier_map(
+                payload.get("regime_stop_multipliers"),
+                base=base.regime_stop_multipliers,
+            ),
+            mfe_ratchet_threshold=_coerce_float(payload.get("mfe_ratchet_threshold"), base.mfe_ratchet_threshold),
+            mfe_ratchet_ratio=_coerce_float(payload.get("mfe_ratchet_ratio"), base.mfe_ratchet_ratio),
+        )
+    except Exception:
+        return None
 
 
 DEFAULT_EXIT_PARAMS: Dict[str, ExitParams] = {
@@ -89,25 +161,9 @@ def load_best_exit_params() -> Dict[str, ExitParams]:
 
     result = dict(DEFAULT_EXIT_PARAMS)
     for key, payload in raw.items():
-        if not isinstance(payload, dict):
-            continue
-        try:
-            base = result.get(key, ExitParams())
-            result[key] = ExitParams(
-                take_profit_pct=float(payload.get("take_profit_pct", base.take_profit_pct)),
-                stop_pct=float(payload.get("stop_pct", base.stop_pct)),
-                protect_start_pct=float(payload.get("protect_start_pct", base.protect_start_pct)),
-                protect_gap_ratio=float(payload.get("protect_gap_ratio", base.protect_gap_ratio)),
-                protect_floor_pct=float(payload.get("protect_floor_pct", base.protect_floor_pct)),
-                min_hold_bars=int(payload.get("min_hold_bars", base.min_hold_bars)),
-                max_hold_factor=int(payload.get("max_hold_factor", base.max_hold_factor)),
-                exit_confirm_bars=int(payload.get("exit_confirm_bars", base.exit_confirm_bars)),
-                decay_exit_threshold=float(payload.get("decay_exit_threshold", base.decay_exit_threshold)),
-                decay_tighten_threshold=float(payload.get("decay_tighten_threshold", base.decay_tighten_threshold)),
-                tighten_gap_ratio=float(payload.get("tighten_gap_ratio", base.tighten_gap_ratio)),
-            )
-        except Exception:
-            continue
+        params = build_exit_params(payload, base=result.get(key, ExitParams()))
+        if params is not None:
+            result[key] = params
     return result
 
 

@@ -1,6 +1,7 @@
 ﻿import QuantLayout from "@/components/QuantLayout";
 import { trpc } from "@/lib/trpc";
 import { Activity, Clock } from "lucide-react";
+import { formatDirection } from "@/lib/labels";
 
 export default function Positions() {
   const { data: liveSnapshot } = trpc.execution.getLiveSnapshot.useQuery(undefined, { refetchInterval: 5000 });
@@ -73,7 +74,7 @@ export default function Positions() {
                         <td className="px-4 py-3 text-sm font-medium" style={{ color: "#eaecef" }}>{p.symbol}</td>
                         <td className="px-4 py-3">
                           <span className={`text-xs px-2 py-0.5 rounded ${p.direction === "LONG" ? "text-profit bg-profit-subtle" : "text-loss bg-loss-subtle"}`}>
-                            {p.direction}
+                            {formatDirection(p.direction)}
                           </span>
                         </td>
                         <td className="px-4 py-3 text-xs" style={{ color: "#848e9c" }}>{p.strategyFamily}</td>
