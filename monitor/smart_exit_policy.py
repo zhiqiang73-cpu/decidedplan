@@ -212,6 +212,9 @@ def build_entry_snapshot(alert: Dict, features: Optional[pd.Series]) -> Dict[str
             alert.get("horizon"),
         ),
     }
+    raw_signal_name = str(alert.get("raw_name") or "").strip()
+    if raw_signal_name:
+        snapshot["raw_signal_name"] = raw_signal_name
     mechanism_type = str(alert.get("mechanism_type") or "").strip()
     if mechanism_type:
         snapshot["mechanism_type"] = mechanism_type
@@ -490,6 +493,15 @@ def _eval_p1_10(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> D
       C2: position_in_range_4h_vs_entry > 0.492069 AND vwap_deviation_vs_entry > 0.003512
       C3: C1 AND C2 combined
     Stop: -1.00%
+
+    SHORT exit (taker exhaustion at top, Variant D):
+      Entry thesis: VWAP deviation high (>0.020) + taker ratio delta dropping (<-1.09)
+                    = buyers exhausted at top -> reversal.
+      Exit when: VWAP deviation normalizes (drops from entry),
+                 OR taker ratio reverses (buyers return).
+      C1: vwap_deviation_vs_entry < -0.008 (VWAP normalizing)
+      C2: position_in_range_4h < 0.50 (price left high zone)
+    Stop: -0.50%
     """
     direction = position.get("direction", "").lower()
 
@@ -507,6 +519,19 @@ def _eval_p1_10(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> D
             return {"action": "exit", "reason": "logic_complete", "health": 1.0}
         return {"action": "hold", "reason": "hold", "health": 0.0}
 
+    if direction == "short":
+        vwap_vs_entry = _vs_entry_val(row, snapshot, "vwap_deviation")
+        r4h = _safe_get(row, "position_in_range_4h")
+
+        # C1: VWAP deviation dropped from entry (price reverting to mean)
+        c1 = vwap_vs_entry is not None and vwap_vs_entry < -0.008
+        # C2: price left the high zone
+        c2 = r4h is not None and r4h < 0.50
+
+        if c1 or c2:
+            return {"action": "exit", "reason": "logic_complete", "health": 1.0}
+        return {"action": "hold", "reason": "hold", "health": 0.0}
+
     return _eval_generic(position, row, snapshot, ret)
 
 
@@ -519,6 +544,14 @@ def _eval_p1_9(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Di
       C3: taker_buy_sell_ratio_vs_entry > 0.004978 AND kyle_lambda > 0.004060 AND volume_autocorr_lag5 > 0.004775
     Earliest: C1 (contained in C2 and C3)
     Stop: -0.30%
+
+    SHORT exit (compression release at top):
+      Entry thesis: price at 24h high (>0.93) + compressed 80+ min -> downward release.
+      Exit when: position drops from extreme high (compression resolved),
+                 OR amplitude spikes (energy released).
+      C1: position_in_range_24h < 0.70 (price left high zone)
+      C2: amplitude_1m > 0.50 (single-bar energy release)
+    Stop: -0.50%
     """
     direction = position.get("direction", "").lower()
 
@@ -528,6 +561,19 @@ def _eval_p1_9(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Di
 
         if (taker_ratio_vs_entry is not None and taker_ratio_vs_entry > 0.004978
                 and vol_autocorr is not None and vol_autocorr > 0.004775):
+            return {"action": "exit", "reason": "logic_complete", "health": 1.0}
+        return {"action": "hold", "reason": "hold", "health": 0.0}
+
+    if direction == "short":
+        r24h = _safe_get(row, "position_in_range_24h")
+        amp_1m = _safe_get(row, "amplitude_1m")
+
+        # C1: price left the high zone (compression resolved)
+        c1 = r24h is not None and r24h < 0.70
+        # C2: amplitude spike (energy released from compression)
+        c2 = amp_1m is not None and amp_1m > 0.50
+
+        if c1 or c2:
             return {"action": "exit", "reason": "logic_complete", "health": 1.0}
         return {"action": "hold", "reason": "hold", "health": 0.0}
 

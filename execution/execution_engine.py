@@ -134,7 +134,8 @@ class ExecutionEngine:
         self._current_trend: str = "TREND_NEUTRAL"
         self._signal_health: Any | None = None
         self._signal_runner: Any | None = None
-        # A2 family 1-bar entry confirmation: key="{family}|{direction}" 闂?first_seen_ts
+        self._decision_logger: Any | None = None
+        # A2 family 1-bar entry confirmation: key="{family}|{direction}"
         self._entry_confirm_pending: dict[str, float] = {}
 
         # Persist open positions across restarts
@@ -160,6 +161,30 @@ class ExecutionEngine:
         """Inject signal runner for adaptive cooldown feedback."""
         self._signal_runner = runner
 
+    def set_decision_logger(self, decision_logger: Any) -> None:
+        """Inject decision logger for signal audit trail."""
+        self._decision_logger = decision_logger
+
+    def _log_blocked(self, signal: str, family: str, direction: str,
+                     blocked_by: str, confidence: int, reason: str) -> None:
+        if self._decision_logger is not None:
+            self._decision_logger.log_blocked(
+                signal=signal, family=family, direction=direction,
+                blocked_by=blocked_by, confidence=confidence,
+                regime=self._current_regime, trend=self._current_trend,
+                flow=self._current_flow, reason=reason,
+            )
+
+    def _log_executed(self, signal: str, family: str, direction: str,
+                      confidence: int, reason: str) -> None:
+        if self._decision_logger is not None:
+            self._decision_logger.log_executed(
+                signal=signal, family=family, direction=direction,
+                confidence=confidence,
+                regime=self._current_regime, trend=self._current_trend,
+                flow=self._current_flow, reason=reason,
+            )
+
     def update_market_state(
         self,
         regime: str,
@@ -181,12 +206,14 @@ class ExecutionEngine:
 
         confidence = self._safe_int(alert.get("confidence"), 1)
         if confidence < self.min_confidence:
+            signal_name = str(alert.get("name", ""))
+            family = self._resolve_signal_family(alert)
             logger.debug(
                 "[EXEC] Skip low-confidence %s conf=%s < %s",
-                alert.get("name"),
-                confidence,
-                self.min_confidence,
+                signal_name, confidence, self.min_confidence,
             )
+            self._log_blocked(signal_name, family, direction, "confidence_gate",
+                              confidence, f"conf={confidence} < min={self.min_confidence}")
             return
 
         signal_name = str(alert.get("name", ""))
@@ -199,6 +226,8 @@ class ExecutionEngine:
             logger.info(
                 "[EXEC] Skip %s: LONG blocked during LIQUIDATION flow", signal_name
             )
+            self._log_blocked(signal_name, family, direction, "liquidation_flow",
+                              confidence, "LONG blocked during LIQUIDATION flow")
             return
 
         # Block weak SHORT entries in uptrend -- don't swim upstream.
@@ -214,10 +243,14 @@ class ExecutionEngine:
                     "[EXEC] Skip %s: alpha SHORT suppressed in TREND_UP (conf=%d, confirms=%d)",
                     signal_name, confidence, len(physical_confirms),
                 )
+                self._log_blocked(signal_name, family, direction, "trend_filter",
+                                  confidence, f"alpha SHORT in TREND_UP (conf={confidence}, confirms={len(physical_confirms)})")
                 return
 
         if not is_alpha and (family, direction) not in EXECUTION_WHITELIST:
             logger.debug("[EXEC] Rejected %s %s: not in whitelist", family, direction)
+            self._log_blocked(signal_name, family, direction, "whitelist",
+                              confidence, f"{family}|{direction} not in EXECUTION_WHITELIST")
             return
 
         cooldown_key = f"{family}|{direction}"
@@ -226,6 +259,8 @@ class ExecutionEngine:
         if now_ts < cooldown_until:
             remaining = int(cooldown_until - now_ts)
             logger.info("[EXEC] Skip %s: execution cooldown (%ss remaining)", signal_name, remaining)
+            self._log_blocked(signal_name, family, direction, "execution_cooldown",
+                              confidence, f"cooldown {remaining}s remaining")
             return
 
         # A2 family: signal persistence filter.
@@ -392,11 +427,15 @@ class ExecutionEngine:
                 # 11 of 12 losses in the 15h audit occurred in QUIET_TREND;
                 # same stop % 闂?smaller notional = smaller dollar loss per trade.
                 _QUIET_POSITION_PCT = 0.05
+                _COUNTER_TREND_PCT = 0.04  # half position for counter-trend shorts
                 effective_pct = (
                     _QUIET_POSITION_PCT
                     if self._current_regime == "QUIET_TREND"
                     else self.position_pct
                 )
+                # Cap counter-trend SHORT positions: uptrend shorts get half position
+                if direction == "short" and self._current_trend == "TREND_UP":
+                    effective_pct = min(effective_pct, _COUNTER_TREND_PCT)
                 if effective_pct != self.position_pct:
                     logger.debug(
                         "[EXEC] %s regime=%s: position_pct %.0f%% 闂?%.0f%%",
@@ -423,6 +462,9 @@ class ExecutionEngine:
             if result.get("status") != "placed":
                 logger.warning("[EXEC] Entry rejected %s: %s", signal_name, result)
                 return
+
+            self._log_executed(signal_name, family, direction, confidence,
+                               f"entry placed at {attempt_plan.price:.2f}")
 
             pending = PendingEntry(
                 order_id=str(result.get("order_id", "")),

@@ -53,7 +53,12 @@ from execution.execution_engine import ExecutionEngine
 from execution.order_manager import OrderManager
 from execution.trade_logger import TradeLogger
 from monitor.live_engine import LiveFeatureEngine
-from monitor.live_catalog import build_strategy_status_rows, LIVE_STRATEGIES
+from monitor.live_catalog import (
+    LIVE_STRATEGIES,
+    build_strategy_status_rows,
+    canonical_signal_name,
+    resolve_strategy_id_from_signal_name,
+)
 from monitor.signal_runner import SignalRunner
 from monitor.signal_health import SignalHealth
 from monitor.alert_handler import AlertHandler
@@ -101,16 +106,15 @@ def _count_today_trades() -> dict:
                 if today not in entry_time:
                     continue
                 sig = row.get("signal_name", "unknown")
-                parts = sig.split("_")
-                family = parts[0] if parts else sig
-                if family not in stats:
-                    stats[family] = {
+                strategy_id = resolve_strategy_id_from_signal_name(sig)
+                if strategy_id not in stats:
+                    stats[strategy_id] = {
                         "triggers": 0,
                         "wins": 0,
                         "not_filled": 0,
                         "errors": 0,
                     }
-                stats[family]["triggers"] += 1
+                stats[strategy_id]["triggers"] += 1
                 reason = row.get("exit_reason", "") or ""
                 net_str = row.get("net_return_pct", "0") or "0"
                 try:
@@ -118,11 +122,11 @@ def _count_today_trades() -> dict:
                 except ValueError:
                     net = 0.0
                 if reason == "not_filled":
-                    stats[family]["not_filled"] += 1
+                    stats[strategy_id]["not_filled"] += 1
                 elif reason == "error":
-                    stats[family]["errors"] += 1
+                    stats[strategy_id]["errors"] += 1
                 elif net > 0:
-                    stats[family]["wins"] += 1
+                    stats[strategy_id]["wins"] += 1
     except Exception:
         pass
     return stats
@@ -146,8 +150,12 @@ def _build_strategy_payload(
         _spec = _LIVE_SPEC_BY_FAMILY.get(family)
         strategies.append(
             {
+                "strategy_id": family,
                 "family": family,
                 "name": info.get("name", family),
+                "phase": row.get("phase", ""),
+                "label": row.get("label", ""),
+                "canonical_signal_name": row.get("canonical_signal_name", canonical_signal_name(family)),
                 "direction": info.get("direction", "unknown"),
                 "status": default_status or row.get("status", "unknown"),
                 "entry_conditions": info.get("entry_zh", ""),
@@ -210,14 +218,27 @@ def _write_system_state(
         try:
             with execution_engine._lock:
                 for pos in execution_engine._open_positions.values():
+                    # Compute unrealized P&L
+                    unrealized_pnl_pct = 0.0
+                    if pos.entry_price and pos.entry_price > 0 and close > 0:
+                        raw_pnl = (close - pos.entry_price) / pos.entry_price * 100
+                        unrealized_pnl_pct = -raw_pnl if pos.direction == "short" else raw_pnl
+                    # Extract MFE/MAE and bars_held from runtime_state
+                    rs = pos.runtime_state or {}
                     positions.append(
                         {
+                            "strategy_id": pos.family,
                             "signal_name": pos.signal_name,
+                            "raw_signal_name": str((pos.entry_snapshot or {}).get("raw_signal_name", "") or ""),
                             "family": pos.family,
                             "direction": pos.direction,
                             "qty": pos.qty,
                             "entry_price": pos.entry_price,
                             "confidence": pos.confidence,
+                            "unrealized_pnl_pct": round(unrealized_pnl_pct, 4),
+                            "bars_held": rs.get("bars_held", 0),
+                            "mfe_pct": round(float(rs.get("mfe_pct", 0)), 4),
+                            "mae_pct": round(float(rs.get("mae_pct", 0)), 4),
                             "entry_time": pos.entry_time.isoformat()
                             if pos.entry_time
                             else None,
@@ -232,7 +253,9 @@ def _write_system_state(
                     pending_orders.append(
                         {
                             "order_id": pend.order_id,
+                            "strategy_id": pend.family,
                             "signal_name": pend.signal_name,
+                            "raw_signal_name": str((pend.entry_snapshot or {}).get("raw_signal_name", "") or ""),
                             "family": pend.family,
                             "direction": pend.direction,
                             "qty": pend.qty,
@@ -263,6 +286,15 @@ def _write_system_state(
             default_status=default_strategy_status,
         )
 
+        # Signal pipeline stats from decision logger (injected into execution_engine)
+        pipeline_stats = {}
+        try:
+            dl = getattr(execution_engine, "_decision_logger", None)
+            if dl is not None:
+                pipeline_stats = dl.get_stats()
+        except Exception:
+            pass
+
         state = {
             "timestamp": heartbeat_ts_utc,
             "market_timestamp": market_ts_utc,
@@ -277,6 +309,7 @@ def _write_system_state(
             "pending_orders": pending_orders,
             "strategies": strategies,
             "daily_totals": daily_totals,
+            "signal_pipeline": pipeline_stats,
         }
 
         write_json_atomic(_STATE_PATH, state, ensure_ascii=False, indent=2)
@@ -464,14 +497,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--p2-group-cooldown-min",
         type=int,
-        default=10,
-        help="Minimum cooldown minutes per P2 composite group",
+        default=5,
+        help="Minimum cooldown minutes per P2 composite group (was 10; AdaptiveCooldown handles throttling)",
     )
     parser.add_argument(
         "--p2-max-groups-per-bar",
         type=int,
-        default=2,
-        help="Max number of P2 composite groups allowed per closed bar",
+        default=3,
+        help="Max number of P2 composite groups allowed per closed bar (was 2; force concentration in exec is the real limit)",
     )
     parser.add_argument("--log-dir", default="monitor/output", help="Directory for monitor logs")
     return parser.parse_args()
@@ -535,7 +568,7 @@ async def _fetch_json(url: str, params: dict | None = None) -> dict:
 
 async def poll_side_data(
     engine: LiveFeatureEngine,
-    interval_oi: int = 300,
+    interval_oi: int = 60,  # was 300; 4/6 alpha rules depend on OI freshness
     interval_fr: int = 28800,
 ) -> None:
     """
@@ -880,7 +913,12 @@ async def main():
     runner.set_signal_health(signal_health)
     execution_engine.set_signal_health(signal_health)
     execution_engine.set_signal_runner(runner)
-    logger.info("[INIT] SignalHealth + AdaptiveCooldown wired to runner and execution engine")
+
+    # Wire decision audit logger for full signal pipeline transparency
+    from monitor.decision_logger import DecisionLogger
+    decision_logger = DecisionLogger(log_dir=args.log_dir)
+    execution_engine.set_decision_logger(decision_logger)
+    logger.info("[INIT] SignalHealth + AdaptiveCooldown + DecisionLogger wired")
 
     runtime_state: dict[str, float | int | bool | None] = {
         "price": _last_price or 0.0,

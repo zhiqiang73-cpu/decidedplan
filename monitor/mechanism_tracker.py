@@ -964,8 +964,9 @@ MECHANISM_CATALOG: dict[str, MechanismConfig] = {
         primary=DecayCondition(
             feature="oi_change_rate_1h",
             op=">",
-            threshold=-0.003,
-            description="去杠杆压力消失：1小时OI降速放缓，聪明钱退出减速",
+            threshold=0.005,
+            description="OI 重新正增长 (>0.5%/h)：新资金流入，去杠杆/停滞论点失效",
+            # was -0.003; that fires instantly for A4-PIR (enters at ~0.00007)
         ),
         confirms=[
             DecayCondition(

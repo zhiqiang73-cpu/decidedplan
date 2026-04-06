@@ -11,6 +11,7 @@ from monitor.alpha_rules import AlphaRuleChecker
 from monitor.exit_policy_config import has_explicit_exit_params
 from monitor.live_catalog import (
     build_strategy_status_rows,
+    resolve_logged_signal_name,
 )
 from monitor.flow_classifier import FlowClassifier
 from monitor.regime_detector import RegimeDetector
@@ -111,7 +112,7 @@ class SignalRunner:
         ]
 
         self._new_signal_cooldown: dict[str, int] = {}
-        self._new_signal_cooldown_ms = 3 * 60 * 1000
+        self._new_signal_cooldown_ms = 90 * 1000  # 90s (was 180s); exec layer has its own 5-15min cooldown
 
         self._shared_cooldown_groups: dict[tuple[str, str], str] = {
             ("P1-8_vwap_vol_drought", "long"): "vwap_bottom_long",
@@ -153,10 +154,13 @@ class SignalRunner:
 
         p2_raw: List[dict] = []
         for alert in alpha_alerts:
+            raw_name = str(alert["name"])
+            family = str(alert.get("family") or "").strip()
             p2_raw.append(
                 {
                     "phase": "P2",
-                    "name": alert["name"],
+                    "name": resolve_logged_signal_name(raw_name, family),
+                    "raw_name": raw_name,
                     "direction": alert["direction"],
                     "horizon": alert["horizon"],
                     "timestamp_ms": latest_ts,
@@ -178,7 +182,7 @@ class SignalRunner:
                     else None,
                     "stop_pct": alert.get("stop_pct"),
                     "rule_str": alert.get("rule_str", ""),
-                    "card_id": alert.get("card_id", alert["name"]),
+                    "card_id": family or alert.get("card_id", raw_name),
                     "trade_ready": bool(alert.get("trade_ready")),
                 }
             )
@@ -209,6 +213,15 @@ class SignalRunner:
 
             if alert is None:
                 continue
+
+            raw_name = str(alert.get("name", detector.name))
+            alert = dict(alert)
+            alert["raw_name"] = raw_name
+            alert["name"] = resolve_logged_signal_name(
+                raw_name,
+                str(alert.get("family") or ""),
+            )
+            alert["card_id"] = str(alert.get("family") or alert.get("card_id") or alert["name"])
 
             if detector is self._vwap_twap and not oi_ready:
                 continue
