@@ -167,11 +167,15 @@ class SignalRunner:
                     "op": alert["op"],
                     "group": alert.get("group", ""),
                     "family": alert.get("family"),
+                    "mechanism_type": alert.get("mechanism_type"),
                     "confidence": alert.get("confidence", 1),
                     "confidence_label": alert.get("confidence_label", "LOW"),
                     "physical_confirms": alert.get("physical_confirms", []),
                     "alpha_exit_conditions": list(alert.get("alpha_exit_conditions", [])),
                     "alpha_exit_combos": list(alert.get("alpha_exit_combos", [])),
+                    "alpha_exit_params": dict(alert.get("alpha_exit_params", {}))
+                    if isinstance(alert.get("alpha_exit_params"), dict)
+                    else None,
                     "stop_pct": alert.get("stop_pct"),
                     "rule_str": alert.get("rule_str", ""),
                     "card_id": alert.get("card_id", alert["name"]),
@@ -251,16 +255,25 @@ class SignalRunner:
         composite_alerts = list(p1_alerts)
         composite_alerts.extend(self._aggregate_p2_by_group(p2_raw, latest_ts))
 
+        # BUG-4 fix: auto-set card_id for P1 alerts (detectors don't set it)
+        # so that _filter_by_health can track their lifecycle.
+        for alert in composite_alerts:
+            if not alert.get("card_id") and not alert.get("card_ids"):
+                alert["card_id"] = alert.get("name", "")
+
+        # BUG-6 fix: force logic FIRST, then health filter LAST.
+        # Health degradation is the final verdict — must not be undone by
+        # force reinforcement boosting confidence back up.
+        composite_alerts = self._apply_force_logic(composite_alerts)
+        composite_alerts = self._regime_detector.filter_alerts(
+            composite_alerts, regime, trend_direction=trend_dir,
+        )
+
         if self._signal_health is not None:
             _pre_count = len(composite_alerts)
             composite_alerts = self._filter_by_health(composite_alerts)
             if len(composite_alerts) < _pre_count:
                 logger.info("[HEALTH] Filtered %d alerts by signal health", _pre_count - len(composite_alerts))
-
-        composite_alerts = self._regime_detector.filter_alerts(
-            composite_alerts, regime, trend_direction=trend_dir,
-        )
-        composite_alerts = self._apply_force_logic(composite_alerts)
         # attach flow_type and regime labels
         for alert in composite_alerts:
             alert["flow_type"] = flow_type
@@ -312,6 +325,7 @@ class SignalRunner:
             first = members[0]
             names = " | ".join(alert["name"] for alert in members)
             family = str(first.get("family") or f"ALPHA::{group}::{direction}::{horizon}")
+            mechanism_type = str(first.get("mechanism_type") or get_mechanism_for_family(family))
 
             confidence = max(alert["confidence"] for alert in members)
             if confidence >= 3:
@@ -327,6 +341,8 @@ class SignalRunner:
             seen_exit_keys: set[tuple[str, str, float]] = set()
             stop_values: list[float] = []
             card_ids: list[str] = []
+            seen_card_ids: set[str] = set()
+            alpha_exit_params: dict | None = None
             for alert in members:
                 all_confirms.update(alert.get("physical_confirms", []))
                 # Collect Top-3 exit combos (preferred)
@@ -363,13 +379,18 @@ class SignalRunner:
                 except (TypeError, ValueError):
                     pass
                 card_id = str(alert.get("card_id", "")).strip()
-                if card_id:
+                if card_id and card_id not in seen_card_ids:
+                    seen_card_ids.add(card_id)
                     card_ids.append(card_id)
+                params = alert.get("alpha_exit_params")
+                if alpha_exit_params is None and isinstance(params, dict):
+                    alpha_exit_params = dict(params)
 
             composite = {
                 "phase": "P2",
                 "name": names,
                 "family": family,
+                "mechanism_type": mechanism_type,
                 "direction": direction,
                 "horizon": horizon,
                 "timestamp_ms": first["timestamp_ms"],
@@ -384,6 +405,7 @@ class SignalRunner:
                 "physical_confirms": list(all_confirms),
                 "alpha_exit_conditions": exit_conditions,
                 "alpha_exit_combos": exit_combos,
+                "alpha_exit_params": alpha_exit_params,
                 "stop_pct": min(stop_values) if stop_values else None,
                 "card_ids": card_ids,
                 "trade_ready": bool(exit_combos or exit_conditions),
@@ -460,7 +482,7 @@ class SignalRunner:
         for alert in alerts:
             a = dict(alert)
             family = str(a.get("family") or "")
-            mech = get_mechanism_for_family(family)
+            mech = str(a.get("mechanism_type") or get_mechanism_for_family(family))
             a["mechanism_type"] = mech
             a["force_category"] = get_force_category(mech)
             a.setdefault("force_reinforced_by", [])

@@ -17,7 +17,12 @@ from execution.order_manager import OrderManager, OrderManagerError
 from execution.trade_logger import TradeLogger
 from monitor.mechanism_tracker import MechanismTracker, resolve_mechanism_type, get_mechanism_for_family, get_force_category
 from monitor.live_catalog import EXECUTION_WHITELIST
-from monitor.exit_policy_config import ExitParams, get_exit_params_for_signal, has_explicit_exit_params
+from monitor.exit_policy_config import (
+    ExitParams,
+    build_exit_params,
+    get_exit_params_for_signal,
+    has_explicit_exit_params,
+)
 from monitor.smart_exit_policy import (
     build_entry_snapshot,
     build_runtime_state,
@@ -44,6 +49,7 @@ class PendingEntry:
     order_id: str
     signal_name: str
     family: str
+    mechanism_type: str
     direction: str
     qty: float
     requested_price: float
@@ -115,6 +121,9 @@ class ExecutionEngine:
         self._pending_entries: dict[str, PendingEntry] = {}
         self._open_positions: dict[str, OpenPosition] = {}
         self._signal_cooldown: dict[str, float] = {}
+        self._last_ext_sync_ts: float = 0.0
+        self._external_sync_future = None
+        self._external_sync_keys: set[str] = set()
         self._thread_pool = ThreadPoolExecutor(
             max_workers=max_positions,
             thread_name_prefix="entry-monitor",
@@ -125,7 +134,7 @@ class ExecutionEngine:
         self._current_trend: str = "TREND_NEUTRAL"
         self._signal_health: Any | None = None
         self._signal_runner: Any | None = None
-        # A2 family 1-bar entry confirmation: key="{family}|{direction}" 閳?first_seen_ts
+        # A2 family 1-bar entry confirmation: key="{family}|{direction}" 闂?first_seen_ts
         self._entry_confirm_pending: dict[str, float] = {}
 
         # Persist open positions across restarts
@@ -254,6 +263,11 @@ class ExecutionEngine:
         horizon_min = max(1, self._safe_int(alert.get("horizon"), 1))
         signal_time = self._extract_alert_time(alert)
         entry_snapshot = build_entry_snapshot(alert, latest_features)
+        mechanism_type = str(
+            alert.get("mechanism_type")
+            or entry_snapshot.get("mechanism_type")
+            or get_mechanism_for_family(family)
+        )
         if latest_features is None:
             logger.warning(
                 "[EXEC] %s: no live features; dynamic exit may fall back to stop/time only",
@@ -289,11 +303,51 @@ class ExecutionEngine:
                 return
 
             # --- Force concentration gate (inside lock to prevent TOCTOU) ---
-            alert_mechanism = get_mechanism_for_family(family)
+            alert_mechanism = mechanism_type
             alert_force_cat = get_force_category(alert_mechanism)
+
+            # Rule 1: same force category + same direction → max 1 position
+            # Check BOTH open positions AND pending entries (limit orders not yet filled)
+            same_dir_force_count = sum(
+                1 for pos in self._open_positions.values()
+                if get_force_category(get_mechanism_for_family(pos.family)) == alert_force_cat
+                and pos.direction == direction
+            ) + sum(
+                1 for p in self._pending_entries.values()
+                if get_force_category(p.mechanism_type) == alert_force_cat
+                and p.direction == direction
+            )
+            if same_dir_force_count >= 1:
+                logger.info(
+                    "REJECT %s: same-direction force concentration %s|%s=%d >= 1",
+                    signal_name, alert_force_cat, direction, same_dir_force_count,
+                )
+                return
+
+            # Rule 2: same force category has a losing position → don't add
+            close_price = self._extract_close(latest_features)
+            if close_price is not None:
+                for pos in self._open_positions.values():
+                    if get_force_category(get_mechanism_for_family(pos.family)) != alert_force_cat:
+                        continue
+                    if pos.direction == "long":
+                        unrealised_pct = (close_price - pos.entry_price) / pos.entry_price * 100
+                    else:
+                        unrealised_pct = (pos.entry_price - close_price) / pos.entry_price * 100
+                    if unrealised_pct < 0:
+                        logger.info(
+                            "REJECT %s: same-force %s has losing position %s (%.3f%%)",
+                            signal_name, alert_force_cat, pos.signal_name, unrealised_pct,
+                        )
+                        return
+
+            # Rule 3: total across all directions per force category → max 2
             force_count = sum(
                 1 for pos in self._open_positions.values()
                 if get_force_category(get_mechanism_for_family(pos.family)) == alert_force_cat
+            ) + sum(
+                1 for p in self._pending_entries.values()
+                if get_force_category(p.mechanism_type) == alert_force_cat
             )
             if force_count >= 2:
                 logger.info(
@@ -336,7 +390,7 @@ class ExecutionEngine:
                 attempt_plan = self._build_entry_attempt(direction, attempt=1)
                 # QUIET_TREND uses a smaller position (5% vs 8% default).
                 # 11 of 12 losses in the 15h audit occurred in QUIET_TREND;
-                # same stop % 鑴?smaller notional = smaller dollar loss per trade.
+                # same stop % 闂?smaller notional = smaller dollar loss per trade.
                 _QUIET_POSITION_PCT = 0.05
                 effective_pct = (
                     _QUIET_POSITION_PCT
@@ -345,7 +399,7 @@ class ExecutionEngine:
                 )
                 if effective_pct != self.position_pct:
                     logger.debug(
-                        "[EXEC] %s regime=%s: position_pct %.0f%% 閳?%.0f%%",
+                        "[EXEC] %s regime=%s: position_pct %.0f%% 闂?%.0f%%",
                         signal_name, self._current_regime,
                         self.position_pct * 100, effective_pct * 100,
                     )
@@ -374,6 +428,7 @@ class ExecutionEngine:
                 order_id=str(result.get("order_id", "")),
                 signal_name=signal_name,
                 family=family,
+                mechanism_type=mechanism_type,
                 direction=direction,
                 qty=float(result.get("qty", qty)),
                 requested_price=float(result.get("price", attempt_plan.price)),
@@ -489,21 +544,7 @@ class ExecutionEngine:
 
     @staticmethod
     def _exit_params_from_dict(payload: Any) -> ExitParams | None:
-        if not isinstance(payload, dict):
-            return None
-        try:
-            return ExitParams(
-                take_profit_pct=float(payload.get("take_profit_pct", 0.0)),
-                stop_pct=float(payload.get("stop_pct", 0.70)),
-                protect_start_pct=float(payload.get("protect_start_pct", 0.12)),
-                protect_gap_ratio=float(payload.get("protect_gap_ratio", 0.50)),
-                protect_floor_pct=float(payload.get("protect_floor_pct", 0.03)),
-                min_hold_bars=int(payload.get("min_hold_bars", 1)),
-                max_hold_factor=int(payload.get("max_hold_factor", 4)),
-                exit_confirm_bars=int(payload.get("exit_confirm_bars", 1)),
-            )
-        except (TypeError, ValueError):
-            return None
+        return build_exit_params(payload)
 
     def _resolve_alert_exit_plan(
         self,
@@ -517,16 +558,16 @@ class ExecutionEngine:
         if self._is_alpha_alert(alert, family):
             exit_conditions = entry_snapshot.get("alpha_exit_conditions") or []
             exit_combos = entry_snapshot.get("alpha_exit_combos") or []
-            if not exit_conditions and not exit_combos:
+            card_params = self._exit_params_from_dict(entry_snapshot.get("alpha_exit_params"))
+            if card_params is None:
+                card_params = self._exit_params_from_dict(alert.get("alpha_exit_params"))
+            if not exit_conditions and not exit_combos and card_params is None and not has_explicit_exit_params(family, direction):
                 return False, None
 
             stop_pct = self._safe_float(
                 alert.get("stop_pct"),
                 default=self._safe_float(entry_snapshot.get("alpha_stop_pct"), None),
             )
-            card_params = self._exit_params_from_dict(entry_snapshot.get("alpha_exit_params"))
-            if card_params is None:
-                card_params = self._exit_params_from_dict(alert.get("alpha_exit_params"))
 
             if card_params is not None:
                 base = card_params
@@ -555,6 +596,10 @@ class ExecutionEngine:
                 decay_exit_threshold=base.decay_exit_threshold,
                 decay_tighten_threshold=base.decay_tighten_threshold,
                 tighten_gap_ratio=base.tighten_gap_ratio,
+                confidence_stop_multipliers=dict(base.confidence_stop_multipliers),
+                regime_stop_multipliers=dict(base.regime_stop_multipliers),
+                mfe_ratchet_threshold=base.mfe_ratchet_threshold,
+                mfe_ratchet_ratio=base.mfe_ratchet_ratio,
             )
             entry_snapshot["alpha_exit_params"] = params.to_dict()
             return True, params
@@ -755,6 +800,7 @@ class ExecutionEngine:
                 order_id=new_order_id,
                 signal_name=pending.signal_name,
                 family=pending.family,
+                mechanism_type=pending.mechanism_type,
                 direction=pending.direction,
                 qty=float(result.get("qty", pending.qty)),
                 requested_price=float(result.get("price", attempt_plan.price)),
@@ -845,7 +891,10 @@ class ExecutionEngine:
                 entry_fee_type=pending.entry_fee_type,
                 entry_regime=self._current_regime,
                 entry_flow_type=self._current_flow,
-                mechanism_type=resolve_mechanism_type(pending.signal_name, pending.direction, family=pending.family),
+                mechanism_type=(
+                    pending.mechanism_type
+                    or resolve_mechanism_type(pending.signal_name, pending.direction, family=pending.family)
+                ),
             )
             del self._pending_entries[order_id]
             self._signal_cooldown.pop(pos_key, None)
@@ -878,6 +927,20 @@ class ExecutionEngine:
         if result.get("status") != "closed":
             logger.warning("[EXEC] Close rejected %s: %s", position.signal_name, result)
             return
+
+        # Verify no dust remnant left on exchange after close
+        executed_qty = float(result.get("qty", 0.0) or 0.0)
+        remnant = position.qty - executed_qty
+        if remnant > 1e-6:
+            logger.warning(
+                "[EXEC] Dust remnant detected: %.6f BTC left after closing %s, sweeping...",
+                remnant, position.signal_name,
+            )
+            try:
+                self.order_manager.close_position(position.direction, remnant)
+                logger.info("[EXEC] Dust remnant swept successfully")
+            except Exception as exc:
+                logger.warning("[EXEC] Dust sweep failed: %s (will be cleaned by external sync)", exc)
 
         exit_time_ms = self._safe_int(result.get("update_time"), 0)
         exit_time = (
@@ -914,13 +977,18 @@ class ExecutionEngine:
                     gross_ret = -gross_ret
                 net_ret = gross_ret - total_fee_rate * 100
                 card_id = position.signal_name
-                self._signal_health.record_outcome(
-                    card_id=card_id,
-                    direction=position.direction,
-                    net_return_pct=net_ret,
-                    flow_type=position.entry_flow_type,
-                    regime=position.entry_regime,
-                )
+                # Composite signals (e.g. "A2-26 | A2-29"): record outcome
+                # for each sub-card so health lifecycle tracks them individually.
+                sub_ids = [s.strip() for s in card_id.split(" | ")] if " | " in card_id else [card_id]
+                for sid in sub_ids:
+                    if sid:
+                        self._signal_health.record_outcome(
+                            card_id=sid,
+                            direction=position.direction,
+                            net_return_pct=net_ret,
+                            flow_type=position.entry_flow_type,
+                            regime=position.entry_regime,
+                        )
             except Exception as exc:
                 logger.warning("[EXEC] Signal health record failed: %s", exc)
 
@@ -944,19 +1012,19 @@ class ExecutionEngine:
             pos_key = f"{position.family}|{position.direction}"
             self._open_positions.pop(pos_key, None)
 
-        # Extended cooldown after adverse exits on alpha cards.
+        # Extended cooldown after adverse exits (hard_stop or ANY mechanism decay).
         # Prevents loss-loops where a "sticky" condition keeps re-entering.
-        _LOSS_EXIT_REASONS = {"hard_stop", "mechanism_decay_generic_alpha"}
-        _ALPHA_LOSS_COOLDOWN_S = 600  # 10 minutes
-        if (
-            exit_reason in _LOSS_EXIT_REASONS
-            and position.family.startswith("A2")
-        ):
+        _HARD_STOP_REASONS = {"hard_stop"}
+        _MECHANISM_DECAY_PREFIX = "mechanism_decay_"
+        _ALPHA_LOSS_COOLDOWN_S = 600  # 10 minutes (alpha cards)
+        _DECAY_COOLDOWN_S = 180       # 3 minutes (P1 signals)
+        if exit_reason in _HARD_STOP_REASONS or exit_reason.startswith(_MECHANISM_DECAY_PREFIX):
             cooldown_key = f"{position.family}|{position.direction}"
-            self._signal_cooldown[cooldown_key] = time.time() + _ALPHA_LOSS_COOLDOWN_S
+            cooldown_s = _ALPHA_LOSS_COOLDOWN_S if position.family.startswith("A") else _DECAY_COOLDOWN_S
+            self._signal_cooldown[cooldown_key] = time.time() + cooldown_s
             logger.info(
-                "[EXEC] Alpha loss cooldown: %s blocked for %dmin after %s",
-                cooldown_key, _ALPHA_LOSS_COOLDOWN_S // 60, exit_reason,
+                "[EXEC] Loss/decay cooldown: %s blocked for %ds after %s",
+                cooldown_key, cooldown_s, exit_reason,
             )
 
         # After time_cap on A2 cards, apply 30-min cooldown.
@@ -978,17 +1046,40 @@ class ExecutionEngine:
             float(exit_price) if exit_price is not None else 0.0,
         )
         self._save_positions_state()
-
     def _sync_external_position_locked(self) -> None:
+        future = self._external_sync_future
+        tracked_keys = self._external_sync_keys
+        if future is not None and future.done():
+            self._external_sync_future = None
+            self._external_sync_keys = set()
+            try:
+                positions = future.result()
+            except Exception as exc:
+                logger.warning("[EXEC] Sync external positions failed: %s", exc)
+            else:
+                self._apply_external_positions_locked(positions, tracked_keys)
+
         if self.order_manager is None or self._pending_entries:
             return
-
-        try:
-            positions = self.order_manager.get_open_positions()
-        except OrderManagerError as exc:
-            logger.warning("[EXEC] Sync external positions failed: %s", exc)
+        if self._external_sync_future is not None:
             return
 
+        now = time.time()
+        if now - self._last_ext_sync_ts < 5:
+            return
+        self._last_ext_sync_ts = now
+        self._external_sync_keys = {
+            key for key, position in self._open_positions.items() if not position.external
+        }
+        self._external_sync_future = self._thread_pool.submit(
+            self.order_manager.get_open_positions
+        )
+
+    def _apply_external_positions_locked(
+        self,
+        positions: list[dict[str, Any]],
+        tracked_keys: set[str],
+    ) -> None:
         ext_key = "external|any"
         system_qty: dict[str, float] = {"long": 0.0, "short": 0.0}
         for position in self._open_positions.values():
@@ -1001,26 +1092,45 @@ class ExecutionEngine:
             if direction in exchange_qty:
                 exchange_qty[direction] += float(payload.get("qty", 0.0))
 
+        exchange_entry_price: dict[str, float] = {"long": 0.0, "short": 0.0}
+        for payload in positions:
+            direction = str(payload.get("direction", "")).lower()
+            if direction in exchange_entry_price:
+                ep = float(payload.get("entry_price", 0.0) or 0.0)
+                if ep > 0:
+                    exchange_entry_price[direction] = ep
+
         has_external = any(
             exchange_qty[direction] > system_qty[direction] + 1e-6
             for direction in ("long", "short")
         )
 
-        if has_external and ext_key not in self._open_positions:
-            ext_dir = "long"
-            ext_qty = 0.0
+        ext_dir = "long"
+        ext_qty = 0.0
+        if has_external:
             for direction in ("long", "short"):
                 surplus = exchange_qty[direction] - system_qty[direction]
                 if surplus > 1e-6:
                     ext_dir = direction
                     ext_qty = surplus
                     break
+
+            _DUST_THRESHOLD_BTC = 0.01
+            if ext_qty < _DUST_THRESHOLD_BTC:
+                logger.warning(
+                    "[EXEC] Dust external position detected (%s %.6f BTC), ignoring for sync gate",
+                    ext_dir,
+                    ext_qty,
+                )
+                has_external = False
+
+        if has_external and ext_key not in self._open_positions:
             self._open_positions[ext_key] = OpenPosition(
                 signal_name="external_position",
                 family="external",
                 direction=ext_dir,
                 qty=ext_qty,
-                entry_price=0.0,
+                entry_price=exchange_entry_price.get(ext_dir, 0.0),
                 confidence=0,
                 horizon_min=0,
                 entry_time=datetime.now(timezone.utc),
@@ -1040,14 +1150,13 @@ class ExecutionEngine:
             logger.info("[EXEC] External position cleared")
             del self._open_positions[ext_key]
 
-        # Detect system-tracked positions that vanished from exchange
-        # (user manually closed on Binance, or liquidation, etc.)
         if not self._pending_entries:
             stale_keys: list[str] = []
             for pos_key, pos in self._open_positions.items():
                 if pos.external:
                     continue
-                # System position exists but exchange has zero or less qty in this direction
+                if pos_key not in tracked_keys:
+                    continue
                 if exchange_qty.get(pos.direction, 0.0) < 1e-6:
                     stale_keys.append(pos_key)
 
@@ -1056,12 +1165,16 @@ class ExecutionEngine:
                 logger.warning(
                     "[EXEC] Position %s vanished from exchange (manual close?), removed from tracking. "
                     "entry=%.2f qty=%.6f held=%s bars",
-                    pos_key, pos.entry_price, pos.qty,
+                    pos_key,
+                    pos.entry_price,
+                    pos.qty,
                     (datetime.now(timezone.utc) - pos.entry_time).seconds // 60
                     if pos.entry_time else "?",
                 )
             if stale_keys:
                 self._save_positions_state()
+
+
 
     @staticmethod
     def _extract_alert_time(alert: dict[str, Any]) -> datetime:

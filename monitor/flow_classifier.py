@@ -67,6 +67,19 @@ class FlowClassifier:
                     self._current_flow = LIQUIDATION
                 return self._current_flow
 
+            # LIQUIDATION exit: 1 bar is enough (cascades are sharp, brief events).
+            # Waiting 3 bars blocks bottom-entry LONGs (P1-10, P1-6) that fire
+            # in the 1-2 bars right after a cascade ends.
+            if self._current_flow == LIQUIDATION and raw != LIQUIDATION:
+                logger.info(
+                    "[FLOW] %s -> %s (LIQUIDATION exit, 1-bar)",
+                    self._current_flow,
+                    raw,
+                )
+                self._current_flow = raw
+                return self._current_flow
+
+            # Other flow transitions: require CONFIRM_BARS consecutive bars
             if len(self._flow_history) == CONFIRM_BARS:
                 if all(flow == raw for flow in self._flow_history):
                     if raw != self._current_flow:
