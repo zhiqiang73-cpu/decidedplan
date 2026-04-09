@@ -42,6 +42,9 @@ class FeatureEngine:
         start_date: str,
         end_date: str,
         eth_df: Optional[pd.DataFrame] = None,
+        side_endpoints: Optional[list[str]] = None,
+        include_heavy: bool = True,
+        feature_dims: Optional[list[str]] = None,
     ) -> pd.DataFrame:
         """Load endpoint data for a date range and compute all features."""
         start_ts, end_ts = self._parse_date_range(start_date, end_date)
@@ -60,29 +63,59 @@ class FeatureEngine:
             df["timestamp"].iloc[-1],
         )
 
-        for endpoint in ["funding_rate", "open_interest", "long_short_ratio", "taker_ratio"]:
+        if side_endpoints is None:
+            side_endpoints = ["funding_rate", "open_interest", "long_short_ratio", "taker_ratio"]
+        for endpoint in side_endpoints:
             df = self._merge_side_data(df, endpoint, start_ts, end_ts)
 
         if "taker_buy_sell_ratio" in df.columns:
             df = df.rename(columns={"taker_buy_sell_ratio": "taker_ratio_api"})
 
         # -- 新维度数据源聚合合并
-        df = self._merge_liquidation_data(df, start_ts, end_ts)
-        df = self._merge_book_ticker_data(df, start_ts, end_ts)
-        df = self._merge_agg_trades_data(df, start_ts, end_ts)
-        df = self._merge_mark_price_data(df, start_ts, end_ts)
+        if include_heavy:
+            df = self._merge_liquidation_data(df, start_ts, end_ts)
+            df = self._merge_book_ticker_data(df, start_ts, end_ts)
+            df = self._merge_agg_trades_data(df, start_ts, end_ts)
+            df = self._merge_mark_price_data(df, start_ts, end_ts)
+        else:
+            logger.info("Skipping heavy merges: liquidations, book_ticker, agg_trades, mark_price")
 
-        logger.info("Computing feature dimensions...")
-        df = compute_time_features(df)
-        df = compute_price_features(df)
-        df = compute_trade_flow_features(df)
-        df = compute_liquidity_features(df)
-        df = compute_positioning_features(df)
-        df = compute_cross_market_features(df, eth_df=eth_df)
-        df = compute_liquidation_features(df)
-        df = compute_microstructure_features(df)
-        df = compute_order_flow_features(df)
-        df = compute_mark_price_features(df)
+        if feature_dims is None:
+            feature_dims = [
+                "TIME",
+                "PRICE",
+                "TRADE_FLOW",
+                "LIQUIDITY",
+                "POSITIONING",
+                "CROSS_MARKET",
+                "LIQUIDATION",
+                "MICROSTRUCTURE",
+                "ORDER_FLOW",
+                "MARK_PRICE",
+            ]
+        dims = {d.upper() for d in feature_dims}
+
+        logger.info("Computing feature dimensions: %s", ", ".join(sorted(dims)))
+        if "TIME" in dims:
+            df = compute_time_features(df)
+        if "PRICE" in dims:
+            df = compute_price_features(df)
+        if "TRADE_FLOW" in dims:
+            df = compute_trade_flow_features(df)
+        if "LIQUIDITY" in dims:
+            df = compute_liquidity_features(df)
+        if "POSITIONING" in dims:
+            df = compute_positioning_features(df)
+        if "CROSS_MARKET" in dims:
+            df = compute_cross_market_features(df, eth_df=eth_df)
+        if "LIQUIDATION" in dims:
+            df = compute_liquidation_features(df)
+        if "MICROSTRUCTURE" in dims:
+            df = compute_microstructure_features(df)
+        if "ORDER_FLOW" in dims:
+            df = compute_order_flow_features(df)
+        if "MARK_PRICE" in dims:
+            df = compute_mark_price_features(df)
 
         logger.info("Feature computation complete: %s cols, %s rows", len(df.columns), f"{len(df):,}")
         return df

@@ -78,6 +78,11 @@ FEATURE_DIM = {
     "sell_notional_share_1m": "ORDER_FLOW",
     "trade_burst_index": "ORDER_FLOW",
     "direction_autocorr": "ORDER_FLOW",
+    # MARK_PRICE
+    "rt_funding_rate": "MARK_PRICE",
+    "mark_basis": "MARK_PRICE",
+    "mark_basis_ma10": "MARK_PRICE",
+    "funding_countdown_m": "MARK_PRICE",
 }
 
 
@@ -238,7 +243,18 @@ class FeatureScanner:
         按维度分组打印 IC 扫描排名，每个维度展示 top_per_dim 条。
         同时按 signal_dir 区分潜在 long / short 信号。
         """
-        dims = ["TIME", "PRICE", "TRADE_FLOW", "LIQUIDITY", "POSITIONING", "OTHER"]
+        dims = [
+            "TIME",
+            "PRICE",
+            "TRADE_FLOW",
+            "LIQUIDITY",
+            "POSITIONING",
+            "LIQUIDATION",
+            "MICROSTRUCTURE",
+            "ORDER_FLOW",
+            "MARK_PRICE",
+            "OTHER",
+        ]
         header = (
             f"{'特征':<32} {'周期':>5} {'方向':>6} "
             f"{'IC':>8} {'ICIR':>8} {'t':>7} {'IC正%':>7} {'天数':>5}"

@@ -10,10 +10,11 @@ import * as binance from "./binanceTestnet";
 import { spawn, type ChildProcess } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
 
 // --- Alpha discovery process handle ---
 let _discoveryProcess: ChildProcess | null = null;
-const PROJECT_ROOT = path.resolve(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1"), "../../..");
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const SYSTEM_STATE_PATH = path.join(PROJECT_ROOT, "monitor/output/system_state.json");
 
 function _patchDiscoveryAlive(alive: boolean) {
@@ -54,6 +55,153 @@ const LIVE_ACTIVE_STRATEGY_STATUSES = new Set([
   "enabled",
   "live",
 ]);
+type StorageCadence = "realtime" | "historical";
+type StorageHealth = "healthy" | "stale" | "missing";
+
+type DataStorageDataset = {
+  key: string;
+  label: string;
+  description: string;
+  path: string;
+  fileCount: number;
+  totalBytes: number;
+  latestModifiedAt: Date | null;
+  health: StorageHealth;
+  cadence: StorageCadence;
+};
+
+type DataStorageOverview = {
+  symbol: string;
+  rootPath: string;
+  healthyDatasets: number;
+  totalDatasets: number;
+  totalFiles: number;
+  totalBytes: number;
+  approxKlines: number;
+  lastUpdatedAt: Date | null;
+  datasets: DataStorageDataset[];
+};
+
+const DATA_STORAGE_ROOT = path.join(PROJECT_ROOT, "data/storage");
+const DATA_STORAGE_CACHE_TTL_MS = 15_000;
+
+const DATASET_DEFINITIONS: Array<{
+  key: string;
+  label: string;
+  description: string;
+  cadence: StorageCadence;
+  approxRowsPerFile?: number;
+}> = [
+  { key: "klines", label: "\u4e00\u5206 K\u7ebf", description: "1m K\u7ebf\u5386\u53f2\u4e3b\u6570\u636e", cadence: "historical", approxRowsPerFile: 1440 },
+  { key: "agg_trades", label: "\u9010\u7b14\u6210\u4ea4", description: "\u6210\u4ea4\u5fae\u89c2\u7ed3\u6784\u4e0e\u4e3b\u52a8\u6027\u7279\u5f81", cadence: "realtime" },
+  { key: "book_ticker", label: "\u76d8\u53e3", description: "\u4e70\u4e00\u5356\u4e00\u4e0e\u6df1\u5ea6\u5fae\u7ed3\u6784", cadence: "realtime" },
+  { key: "mark_price", label: "\u6807\u8bb0\u4ef7", description: "\u8d44\u91d1\u8d39\u7387\u3001basis \u4e0e\u5012\u8ba1\u65f6", cadence: "realtime" },
+  { key: "liquidations", label: "\u7206\u4ed3", description: "\u5f3a\u5e73\u538b\u529b\u4e0e\u7206\u4ed3\u5bc6\u5ea6", cadence: "realtime" },
+  { key: "funding_rate", label: "\u8d44\u91d1\u8d39\u7387", description: "\u5386\u53f2 funding rate \u5e8f\u5217", cadence: "historical" },
+  { key: "long_short_ratio", label: "\u591a\u7a7a\u6bd4", description: "\u8d26\u6237\u4fa7 long/short ratio", cadence: "historical" },
+  { key: "open_interest", label: "\u6301\u4ed3\u91cf", description: "\u5386\u53f2 OI \u66f2\u7ebf", cadence: "historical" },
+  { key: "taker_ratio", label: "taker \u6bd4\u7387", description: "\u4e3b\u52a8\u4e70\u5356\u529b\u6bd4\u7387", cadence: "historical" },
+];
+
+let dataStorageOverviewCache:
+  | { expiresAt: number; value: DataStorageOverview }
+  | null = null;
+
+function toProjectRelativePath(targetPath: string) {
+  return path.relative(PROJECT_ROOT, targetPath).split(path.sep).join("/") || ".";
+}
+
+function scanStorageTree(rootPath: string) {
+  if (!fs.existsSync(rootPath)) {
+    return { fileCount: 0, totalBytes: 0, latestModifiedAt: null as Date | null };
+  }
+
+  const stack = [rootPath];
+  let fileCount = 0;
+  let totalBytes = 0;
+  let latestModifiedAt: Date | null = null;
+
+  while (stack.length > 0) {
+    const currentPath = stack.pop()!;
+    for (const entry of fs.readdirSync(currentPath, { withFileTypes: true })) {
+      const fullPath = path.join(currentPath, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const stats = fs.statSync(fullPath);
+      fileCount += 1;
+      totalBytes += stats.size;
+      if (!latestModifiedAt || stats.mtime > latestModifiedAt) {
+        latestModifiedAt = stats.mtime;
+      }
+    }
+  }
+
+  return { fileCount, totalBytes, latestModifiedAt };
+}
+
+function classifyStorageHealth(cadence: StorageCadence, latestModifiedAt: Date | null, fileCount: number): StorageHealth {
+  if (fileCount === 0 || !latestModifiedAt) return "missing";
+  const ageMs = Date.now() - latestModifiedAt.getTime();
+  const healthyThresholdMs = cadence === "realtime" ? 30 * 60 * 1000 : 48 * 60 * 60 * 1000;
+  return ageMs <= healthyThresholdMs ? "healthy" : "stale";
+}
+
+function buildDataStorageOverview(): DataStorageOverview {
+  if (dataStorageOverviewCache && dataStorageOverviewCache.expiresAt > Date.now()) {
+    return dataStorageOverviewCache.value;
+  }
+
+  const datasets: DataStorageDataset[] = DATASET_DEFINITIONS.map((dataset) => {
+    const datasetPath = path.join(DATA_STORAGE_ROOT, dataset.key);
+    const stats = scanStorageTree(datasetPath);
+    return {
+      key: dataset.key,
+      label: dataset.label,
+      description: dataset.description,
+      path: toProjectRelativePath(datasetPath),
+      fileCount: stats.fileCount,
+      totalBytes: stats.totalBytes,
+      latestModifiedAt: stats.latestModifiedAt,
+      health: classifyStorageHealth(dataset.cadence, stats.latestModifiedAt, stats.fileCount),
+      cadence: dataset.cadence,
+    };
+  });
+
+  const totalFiles = datasets.reduce((sum, dataset) => sum + dataset.fileCount, 0);
+  const totalBytes = datasets.reduce((sum, dataset) => sum + dataset.totalBytes, 0);
+  const klinesDef = DATASET_DEFINITIONS.find((dataset) => dataset.key === "klines");
+  const approxKlines = datasets
+    .filter((dataset) => dataset.key === "klines")
+    .reduce((sum, dataset) => sum + dataset.fileCount * (klinesDef?.approxRowsPerFile ?? 0), 0);
+  const healthyDatasets = datasets.filter((dataset) => dataset.health === "healthy").length;
+  const lastUpdatedAt = datasets.reduce<Date | null>((latest, dataset) => {
+    if (!dataset.latestModifiedAt) return latest;
+    if (!latest || dataset.latestModifiedAt > latest) return dataset.latestModifiedAt;
+    return latest;
+  }, null);
+
+  const overview: DataStorageOverview = {
+    symbol: bridge.getSystemState()?.symbol ?? "BTCUSDT",
+    rootPath: toProjectRelativePath(DATA_STORAGE_ROOT),
+    healthyDatasets,
+    totalDatasets: datasets.length,
+    totalFiles,
+    totalBytes,
+    approxKlines,
+    lastUpdatedAt,
+    datasets,
+  };
+
+  dataStorageOverviewCache = {
+    expiresAt: Date.now() + DATA_STORAGE_CACHE_TTL_MS,
+    value: overview,
+  };
+
+  return overview;
+}
 
 // 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷?App Router 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮?
 export const appRouter = router({
@@ -93,7 +241,7 @@ export const appRouter = router({
     }),
     testConnection: publicProcedure.mutation(async () => {
       const cfg = bridge.getEnvConfig();
-      if (!cfg.hasConfig) return { success: false, message: "闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾妤犵偞鐗犻、鏇㈡晜閽樺缃曟繝鐢靛Т閿曘倗鈧凹鍣ｉ妴鍛村矗婢跺牅绨婚棅顐㈡处閹哥偓鏅堕弴銏＄厱閻忕偠顕ф慨鍌炴煛鐏炵偓绀嬬€规洜鍘ч埞鎴﹀炊瑜忛悰鈺冪磽娓氣偓缁犳牜绮婚弽顐や笉闁哄稁鍘奸拑鐔兼煥濠靛棭妲归柡鍜佸墴閺屾盯寮撮悙鍏哥驳濡炪倕楠告稉?Key", latency: 0 };
+      if (!cfg.hasConfig) return { success: false, message: "\u8bf7\u5148\u914d\u7f6e Binance API Key \u548c Secret", latency: 0 };
       const result = await binance.testConnection(cfg.apiKey, cfg.apiSecret);
       return result;
     }),
@@ -181,7 +329,6 @@ export const appRouter = router({
             }));
           }
         }
-
         if (pendingOrders.length === 0) {
           const exOrders = await binance.getOpenOrders(state.symbol, cfg.apiKey, cfg.apiSecret);
           if (exOrders.length > 0) {
@@ -234,14 +381,21 @@ export const appRouter = router({
       };
     }),
     add: publicProcedure.input(z.object({ symbol: z.string() })).mutation(({ input }) => {
-      return { success: false, symbol: input.symbol, message: "闂傚倸鍊峰ù鍥х暦閻㈢绐楅柟閭﹀枛閸ㄦ繈骞栧ǎ顒€鐏繛鍛У娣囧﹪濡堕崨顔兼缂備胶濮抽崡鎶藉蓟濞戞ǚ妲堟慨妤€鐗婇弫鎯р攽閻愬弶鍣藉┑鐐╁亾闂佸搫鐭夌徊浠嬶綖濠婂牆鐒垫い鎺嗗亾妞ゎ厼娲╅ˇ鎾煃瑜滈崜娆撴倶濮樿埖鍋傞柨鐔哄Т閽冪喖鏌曢崼婵囶棡闁告瑥绻橀弻鐔兼焽閿曗偓閸樻挳鏌涚€ｎ偅灏摶鏍煕濞戝崬骞楁俊宸墴濮婅櫣绱掑鍡欏姼濡炪們鍎卞Λ婊堝Φ閹版澘绠抽柟鎯у帠濮规姊绘担鍛婂暈闁荤喆鍎佃棟妞ゆ牗鍩冮弸宥夋煏閸繍妲归柍閿嬪灴瀵爼鎮欓弶鎴闁荤姵鍔掗崡鎶藉蓟濞戙垺鏅查煫鍥ㄦ礈琚﹂梻?BTCUSDT" };
+      return {
+        success: false,
+        symbol: input.symbol,
+        message: "\u5f53\u524d\u6267\u884c\u4e3b\u94fe\u4ec5\u652f\u6301 BTCUSDT\uff0c\u4ea4\u6613\u5bf9\u7ef4\u62a4\u5165\u53e3\u672a\u63a5\u5165 live \u4e3b\u94fe\u3002",
+      };
     }),
     updateStatus: publicProcedure.input(z.object({
       symbol: z.string(),
       dataDownloadProgress: z.number().optional(),
       alphaEngineStatus: z.string().optional(),
       dataCollectionStatus: z.string().optional(),
-    })).mutation(() => ({ success: true })),
+    })).mutation(() => ({
+      success: false,
+      message: "\u5f53\u524d\u9875\u9762\u4e3a\u53ea\u8bfb\u5c55\u793a\uff0c\u72b6\u6001\u7531\u4e3b\u94fe\u8fdb\u7a0b\u81ea\u52a8\u7ef4\u62a4\u3002",
+    })),
   }),
 
   // 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷?Strategies 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷?
@@ -256,24 +410,27 @@ export const appRouter = router({
       const trades = bridge.getTrades({ limit: 2000 });
 
       // Build win rate per signal family from trades
-      const familyStats: Record<string, { wins: number; total: number; pnl7d: number }> = {};
+      const familyStats: Record<string, { wins: number; total: number; pnl7d: number; netReturnPctSum: number }> = {};
       const cutoff7d = Date.now() - 7 * 86400000;
       for (const t of trades) {
         if (t.status !== "closed") continue;
         const f = t.strategyId.split("_")[0] ?? t.strategyId;
-        if (!familyStats[f]) familyStats[f] = { wins: 0, total: 0, pnl7d: 0 };
+        if (!familyStats[f]) familyStats[f] = { wins: 0, total: 0, pnl7d: 0, netReturnPctSum: 0 };
         familyStats[f].total++;
         if (parseFloat(t.pnl ?? "0") > 0) familyStats[f].wins++;
+        familyStats[f].netReturnPctSum += parseFloat(t.pnlPercent ?? "0") || 0;
         if (t.exitAt && t.exitAt.getTime() > cutoff7d) {
           familyStats[f].pnl7d += parseFloat(t.pnl ?? "0");
         }
       }
 
       // Map strategies from system_state.json
-      const p1strategies = (state?.strategies ?? []).map((s, i) => {
+      const p1strategies = (state?.strategies ?? []).map((s: any, i) => {
         const typePrefix = s.family.startsWith("P0") ? "P1" : s.family.startsWith("C") ? "P1" : "P1";
-        const stats = familyStats[s.family] ?? { wins: 0, total: 0, pnl7d: 0 };
+        const stats = familyStats[s.family] ?? { wins: 0, total: 0, pnl7d: 0, netReturnPctSum: 0 };
         const liveWR = stats.total > 0 ? (stats.wins / stats.total) * 100 : null;
+        const liveAvgReturnPct = stats.total > 0 ? stats.netReturnPctSum / stats.total : null;
+        const validationWR = s.oos_win_rate ?? null;
         const override = strategyStatusOverrides[s.family];
         const rawLiveStatus = (s.status ?? "").toLowerCase();
         const status = override ?? (LIVE_ACTIVE_STRATEGY_STATUSES.has(rawLiveStatus) ? "active" : "paused");
@@ -285,10 +442,14 @@ export const appRouter = router({
           symbol:       "BTCUSDT",
           entryCondition: s.entry_conditions,
           exitConditionTop3: [{ label: s.exit_conditions }] as Array<{ label: string }>,
-          oosWinRate:   liveWR ?? null,
+          liveWinRate:  liveWR,
+          validationWinRate: validationWR,
+          liveAvgReturnPct,
+          closedSampleSize: stats.total,
+          oosWinRate:   validationWR,
           oosAvgReturn: null,
           mechanismType: null,
-          oosSampleSize: stats.total,
+          oosSampleSize: 0,
           confidenceScore: s.status === "trade_ready" ? 0.8 : 0.5,
           overfitScore:  0.2,
           featureDiversityScore: 0.7,
@@ -315,16 +476,24 @@ export const appRouter = router({
       }
 
       const alphaStrategies = approved.filter(r => r.status === "approved").map(r => {
-        const override = strategyStatusOverrides[`ALPHA-${r.id}`];
-        const alphaFamily = (r as any).family ?? "";
+        const alphaFamily = String((r as any).family ?? "").trim();
+        const strategyId = `ALPHA-${r.id}`;
+        const stats = familyStats[strategyId] ?? familyStats[alphaFamily] ?? { wins: 0, total: 0, pnl7d: 0, netReturnPctSum: 0 };
+        const liveWR = stats.total > 0 ? (stats.wins / stats.total) * 100 : null;
+        const liveAvgReturnPct = stats.total > 0 ? stats.netReturnPctSum / stats.total : null;
+        const override = strategyStatusOverrides[strategyId];
         return {
-          strategyId:   `ALPHA-${r.id}`,
+          strategyId,
           name:         zhNameMap[alphaFamily] ?? r.group ?? r.rule_str ?? r.id,
           type:         "ALPHA" as const,
           direction:    (r.entry.direction.toUpperCase() as "LONG" | "SHORT"),
           symbol:       "BTCUSDT",
           entryCondition: r.rule_str ?? "",
           exitConditionTop3: Object.entries(r.exit ?? {}).map(([key, value]) => ({ label: `${key}: ${String(value)}` })),
+          liveWinRate:  liveWR,
+          validationWinRate: r.stats.oos_win_rate,
+          liveAvgReturnPct,
+          closedSampleSize: stats.total,
           oosWinRate:   r.stats.oos_win_rate,
           oosAvgReturn: r.stats.oos_avg_ret,
           mechanismType: (r as any).mechanism_type ?? null,
@@ -336,7 +505,7 @@ export const appRouter = router({
           todayTriggers: 0,
           todayWins:    0,
           notFilled:    0,
-          pnl7d:        "0.0000",
+          pnl7d:        stats.pnl7d.toFixed(4),
           backtestStatus: "idle",
           backtestResult: null as { equity_curve: number[]; sharpe?: number | null; max_drawdown?: number | null } | null,
           lastBacktestAt: null,
@@ -346,7 +515,17 @@ export const appRouter = router({
         };
       });
 
-      let all = [...p1strategies, ...alphaStrategies];
+      // Deduplicate: if an alpha card's family already exists in p1strategies,
+      // skip it to avoid showing the same strategy twice.
+      const p1Families = new Set(p1strategies.map(s => s.strategyId));
+      const dedupedAlpha = alphaStrategies.filter(a => {
+        const alphaFamily = String((a as any).strategyId ?? "").replace(/^ALPHA-.*/, "");
+        // Check if family from approved_rules.json already appeared in system_state strategies
+        const fam = approved.find(r => `ALPHA-${r.id}` === a.strategyId);
+        const family = fam ? String((fam as any).family ?? "").trim() : "";
+        return !family || !p1Families.has(family);
+      });
+      let all = [...p1strategies, ...dedupedAlpha];
 
       // Filters
       const symbol = input?.symbol?.toUpperCase();
@@ -369,7 +548,8 @@ export const appRouter = router({
       return {
         strategyId: s.family, name: s.name, type: "P1", direction: s.direction.toUpperCase(),
         symbol: "BTCUSDT", entryCondition: s.entry_conditions, exitConditionTop3: [{ label: s.exit_conditions }] as Array<{ label: string }>,
-        oosWinRate: null, oosAvgReturn: null, oosSampleSize: 0, confidenceScore: 0.7,
+        liveWinRate: null, validationWinRate: (s as any).oos_win_rate ?? null, liveAvgReturnPct: null, closedSampleSize: 0,
+        oosWinRate: (s as any).oos_win_rate ?? null, oosAvgReturn: null, oosSampleSize: 0, confidenceScore: 0.7,
         overfitScore: 0.2, featureDiversityScore: 0.7,
         status: strategyStatusOverrides[s.family] ?? "active",
         backtestStatus: "idle", backtestResult: null as { equity_curve: number[]; sharpe?: number | null; max_drawdown?: number | null } | null, lastBacktestAt: null,
@@ -393,7 +573,10 @@ export const appRouter = router({
     updateParams: publicProcedure.input(z.object({
       strategyId: z.string(),
       params: z.record(z.string(), z.unknown()),
-    })).mutation(() => ({ success: true })),
+    })).mutation(() => ({
+      success: false,
+      message: "\u53c2\u6570\u7f16\u8f91\u5c1a\u672a\u63a5\u5165 live \u4e3b\u94fe\uff0c\u76ee\u524d\u4ec5\u4fdd\u7559\u53ea\u8bfb\u89c6\u56fe\u3002",
+    })),
   }),
 
   // 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷?Alpha Engine 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂?
@@ -519,6 +702,21 @@ export const appRouter = router({
           ? Math.floor((Date.now() - globalEngineState.startedAt.getTime()) / 1000)
           : 0,
       };
+    }),
+
+    getDiscoveryLog: publicProcedure.input(z.object({
+      lines: z.number().default(50),
+    }).nullish()).query(({ input }) => {
+      const logPath = path.join(PROJECT_ROOT, "alpha/output/discovery.log");
+      try {
+        if (!fs.existsSync(logPath)) return [];
+        const raw = fs.readFileSync(logPath, "utf8");
+        const allLines = raw.trim().split("\n").filter(Boolean);
+        const n = input?.lines ?? 50;
+        return allLines.slice(-n);
+      } catch {
+        return [];
+      }
     }),
 
     startGlobal: publicProcedure.input(z.object({
@@ -703,7 +901,7 @@ export const appRouter = router({
         symbol:      "BTCUSDT",
         severity:    "info" as const,
         title:       `[${a.phase}] ${a.signalName} ${a.direction}`,
-        message:     a.description || `${a.signalName} 闂?${a.direction} ${a.bars}`,
+        message:     a.description || `${a.signalName} \u89e6\u53d1 ${a.direction === "LONG" ? "\u505a\u591a" : "\u505a\u7a7a"}\uff0c\u6301\u7eed ${a.bars}`,
         strategyId:  a.signalName,
         metadata:    { bars: a.bars, phase: a.phase },
         occurredAt:  new Date(a.timestamp.replace(" UTC", "Z")),
@@ -712,6 +910,12 @@ export const appRouter = router({
   }),
 
   // 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷?Dev Progress (real tasks from data/dev_tasks.json) 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷?
+
+  dataStorage: router({
+    getOverview: publicProcedure.query(() => buildDataStorageOverview()),
+    list: publicProcedure.query(() => buildDataStorageOverview().datasets),
+  }),
+
   devProgress: router({
     getTasks: publicProcedure.query(() => bridge.getDevTasks()),
     updateStatus: publicProcedure.input(z.object({

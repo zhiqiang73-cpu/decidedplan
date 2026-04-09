@@ -1,4 +1,4 @@
-export const REGIME_LABELS: Record<string, string> = {
+﻿export const REGIME_LABELS: Record<string, string> = {
   QUIET_TREND: "安静趋势",
   VOLATILE_TREND: "波动趋势",
   RANGE_BOUND: "区间震荡",
@@ -27,43 +27,67 @@ const STRATEGY_STATUS_LABELS: Record<string, string> = {
   active: "活跃",
   paused: "暂停",
   degraded: "降级",
-  retired: "退役",
+  retired: "退市",
 };
 
 const FORCE_CATEGORY_LABELS: Record<string, string> = {
   leverage_cost_imbalance: "杠杆成本失衡",
   liquidity_vacuum: "流动性真空",
   unilateral_exhaustion: "单边力量耗尽",
-  algorithmic_trace: "算法痕迹",
+  algorithmic_trace: "算法执行痕迹",
   potential_energy_release: "势能释放",
-  distribution_pattern: "高位分发",
+  distribution_pattern: "派发结构",
   open_interest_divergence: "持仓量背离",
   inventory_rebalance: "库存再平衡",
   regime_change: "状态切换",
   generic: "通用规则",
 };
 
+const EXIT_REASON_LABELS: Record<string, string> = {
+  hard_stop: "硬止损",
+  logic_complete: "机制完成",
+  time_cap: "时间到期",
+  take_profit: "止盈",
+  not_filled: "未成交",
+  trailing_stop: "追踪止损",
+  mfe_ratchet: "盈利保护",
+  counter_signal: "反向信号",
+  regime_shift: "制度切换",
+  profit_protect: "盈利保护",
+};
+
+function fallback(value?: string | null): string {
+  return value && value.trim() ? value : "未配置";
+}
+
 export function formatDirection(value?: string | null): string {
   if (!value) return "未配置";
-  return DIRECTION_LABELS[value] ?? value;
+  return DIRECTION_LABELS[value] ?? fallback(value);
 }
 
 export function formatTradeStatus(value?: string | null): string {
   if (!value) return "未配置";
-  return TRADE_STATUS_LABELS[value] ?? value;
+  return TRADE_STATUS_LABELS[value] ?? fallback(value);
 }
 
 export function formatStrategyStatus(value?: string | null): string {
   if (!value) return "未配置";
-  return STRATEGY_STATUS_LABELS[value] ?? value;
+  return STRATEGY_STATUS_LABELS[value] ?? fallback(value);
 }
 
 export function formatRegime(value?: string | null): string {
   if (!value) return REGIME_LABELS.UNKNOWN;
-  return REGIME_LABELS[value] ?? value;
+  return REGIME_LABELS[value] ?? fallback(value);
 }
 
 export function formatForceCategory(value?: string | null): string {
-  if (!value) return "通用规则";
-  return FORCE_CATEGORY_LABELS[value] ?? value;
+  if (!value) return FORCE_CATEGORY_LABELS.generic;
+  return FORCE_CATEGORY_LABELS[value] ?? fallback(value);
+}
+
+export function formatExitReason(value?: string | null): string {
+  if (!value) return "-";
+  // mechanism_decay_* → "机制衰竭"
+  if (value.startsWith("mechanism_decay")) return "机制衰竭";
+  return EXIT_REASON_LABELS[value] ?? value;
 }

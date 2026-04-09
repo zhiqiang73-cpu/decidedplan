@@ -104,14 +104,16 @@ def _port_is_in_use(port: int, host: str = "127.0.0.1") -> bool:
 def setup_logging(log_dir: str) -> None:
     log_dir_path = _resolve_project_path(log_dir)
     log_dir_path.mkdir(parents=True, exist_ok=True)
+    handlers: list[logging.Handler] = [
+        logging.FileHandler(log_dir_path / "watchdog.log", encoding="utf-8"),
+    ]
+    if getattr(sys.stdout, "write", None):
+        handlers.insert(0, logging.StreamHandler(sys.stdout))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_dir_path / "watchdog.log", encoding="utf-8"),
-        ],
+        handlers=handlers,
         force=True,
     )
 
@@ -320,6 +322,7 @@ def main() -> None:
         args.delay,
         args.log_dir,
         cwd=project_root,
+        hide_window=True,
     )
     monitor_guard.start()
 
@@ -333,6 +336,7 @@ def main() -> None:
             args.delay,
             args.log_dir,
             cwd=project_root,
+            hide_window=True,
         )
         discovery_guard.start()
     elif not args.no_discovery:
@@ -352,6 +356,7 @@ def main() -> None:
             args.delay,
             args.log_dir,
             cwd=project_root,
+            hide_window=True,
         )
         discovery_eth_guard.start()
     elif not args.no_discovery and args.eth_discovery:
@@ -390,6 +395,7 @@ def main() -> None:
             args.delay,
             args.log_dir,
             cwd=project_root,
+            hide_window=True,
         )
         sync_guard.start()
 
@@ -408,6 +414,7 @@ def main() -> None:
                     args.delay,
                     args.log_dir,
                     cwd=project_root,
+                    hide_window=True,
                 )
                 discovery_guard.start()
                 discovery_due_ts = None
@@ -419,6 +426,7 @@ def main() -> None:
                     args.delay,
                     args.log_dir,
                     cwd=project_root,
+                    hide_window=True,
                 )
                 discovery_eth_guard.start()
                 discovery_eth_due_ts = None

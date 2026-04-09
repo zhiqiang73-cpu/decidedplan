@@ -226,9 +226,10 @@ tick();
 """
 
 CMDS = {
-    "monitor": [PYTHON, "run_monitor.py"],
-    "downloader": [PYTHON, "run_downloader.py"],
+    "watchdog": [PYTHON, "watchdog.py"],
 }
+# watchdog.py 统一管理: monitor + ws + discovery + UI(8050)
+# 关掉 watchdog 时全部子进程一起关
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

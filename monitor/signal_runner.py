@@ -34,6 +34,17 @@ from monitor.mechanism_tracker import (
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_get(row, col, default=None):
+    """Safely read a feature value from a pd.Series row; treats NaN as missing."""
+    if col not in row.index:
+        return default
+    val = row[col]
+    if pd.isna(val):
+        return default
+    return float(val)
+
+
 _PHASE1_TAIL = 300
 
 
@@ -122,6 +133,7 @@ class SignalRunner:
 
         self._bar_count = 0
         self._last_bar_ts = 0
+        self._oa1_last_ts: int = 0
         self._p2_startup_grace_bars = max(0, int(p2_startup_grace_bars))
         self._p2_group_cooldown_ms = max(0, int(p2_group_cooldown_min) * 60 * 1000)
         self._p2_max_groups_per_bar = max(1, int(p2_max_groups_per_bar))
@@ -177,6 +189,7 @@ class SignalRunner:
                     "physical_confirms": alert.get("physical_confirms", []),
                     "alpha_exit_conditions": list(alert.get("alpha_exit_conditions", [])),
                     "alpha_exit_combos": list(alert.get("alpha_exit_combos", [])),
+                    "alpha_invalidation_combos": list(alert.get("alpha_invalidation_combos", [])),
                     "alpha_exit_params": dict(alert.get("alpha_exit_params", {}))
                     if isinstance(alert.get("alpha_exit_params"), dict)
                     else None,
@@ -264,6 +277,9 @@ class SignalRunner:
         flow_type = self._flow_classifier.classify(latest_row)
         logger.debug("[FLOW] current flow: %s", flow_type)
 
+        context_signals = self._generate_context_signals(latest_row, trend_dir, flow_type, latest_ts)
+        raw_alerts.extend(context_signals)
+
         p1_alerts = [alert for alert in raw_alerts if alert.get("phase") == "P1"]
         composite_alerts = list(p1_alerts)
         composite_alerts.extend(self._aggregate_p2_by_group(p2_raw, latest_ts))
@@ -309,6 +325,90 @@ class SignalRunner:
     def strategy_status_rows(self) -> list[dict]:
         return build_strategy_status_rows(has_explicit_exit_params)
 
+    # OA-1 context-signal cooldown key -> last fired timestamp_ms
+    _OA1_COOLDOWN_MS = 300_000  # 5 minutes
+
+    def _generate_context_signals(
+        self,
+        latest_row: "pd.Series",
+        trend_dir: str,
+        flow_type: str,
+        latest_ts: int,
+    ) -> List[dict]:
+        """Generate OA-1 (OI accumulation LONG) context-driven signals.
+
+        Entry conditions (all backtest-validated):
+          - TREND_UP confirmed by regime detector
+          - oi_change_rate_5m > 0.003  (OI growing at meaningful rate)
+          - taker_buy_sell_ratio > 0.95 (buyers dominant)
+          - volume_vs_ma20 > 1.2        (above-average volume = conviction)
+          - flow_type != LIQUIDATION    (no forced-sell environment)
+
+        Confidence: 2 (MEDIUM); boosted to 3 if direction_autocorr > 0.15.
+        Cooldown: 300s (5 min).
+        """
+        signals: List[dict] = []
+
+        if trend_dir != "TREND_UP":
+            return signals
+
+        if flow_type == "LIQUIDATION":
+            return signals
+
+        oi_rate = _safe_get(latest_row, "oi_change_rate_5m")
+        taker_ratio = _safe_get(latest_row, "taker_buy_sell_ratio")
+        vol_ratio = _safe_get(latest_row, "volume_vs_ma20")
+
+        if oi_rate is None or taker_ratio is None or vol_ratio is None:
+            return signals
+
+        if oi_rate <= 0.003:
+            return signals
+        if taker_ratio <= 0.95:
+            return signals
+        if vol_ratio <= 1.2:
+            return signals
+
+        # Cooldown check
+        last_ts = getattr(self, "_oa1_last_ts", 0)
+        if latest_ts - last_ts < self._OA1_COOLDOWN_MS:
+            return signals
+
+        # Confidence: start at MEDIUM, boost if directional persistence confirmed
+        confidence = 2
+        dir_autocorr = _safe_get(latest_row, "direction_autocorr")
+        if dir_autocorr is not None and dir_autocorr > 0.15:
+            confidence = 3
+
+        self._oa1_last_ts = latest_ts
+
+        conf_label = "HIGH" if confidence >= 3 else "MEDIUM"
+        logger.info(
+            "[OA-1] OI accumulation LONG signal: oi_rate=%.5f taker=%.3f vol=%.2f conf=%d (%s)",
+            oi_rate, taker_ratio, vol_ratio, confidence, conf_label,
+        )
+
+        signals.append({
+            "phase": "P1",
+            "name": "OA-1_oi_accumulation_long",
+            "family": "OA-1",
+            "direction": "long",
+            "horizon": 30,
+            "timestamp_ms": latest_ts,
+            "desc": f"[P1 {conf_label}] OI accumulation LONG: oi_rate={oi_rate:.5f} taker={taker_ratio:.3f} vol={vol_ratio:.2f}",
+            "feature": "oi_change_rate_5m",
+            "feature_value": oi_rate,
+            "threshold": 0.003,
+            "op": ">",
+            "confidence": confidence,
+            "confidence_label": conf_label,
+            "mechanism_type": "oi_accumulation_long",
+            "card_id": "OA-1",
+            "physical_confirms": ["taker_buy_sell_ratio", "volume_vs_ma20"],
+            "trade_ready": True,
+        })
+        return signals
+
     def _aggregate_p2_by_group(self, p2_alerts: List[dict], latest_ts: int) -> List[dict]:
         if not p2_alerts:
             return []
@@ -351,6 +451,7 @@ class SignalRunner:
             all_confirms = set()
             exit_conditions: list[dict] = []
             exit_combos: list[list[dict]] = []
+            invalidation_combos: list[list[dict]] = []
             seen_exit_keys: set[tuple[str, str, float]] = set()
             stop_values: list[float] = []
             card_ids: list[str] = []
@@ -362,6 +463,9 @@ class SignalRunner:
                 for combo in alert.get("alpha_exit_combos", []):
                     if isinstance(combo, list) and combo:
                         exit_combos.append(combo)
+                for combo in alert.get("alpha_invalidation_combos", []):
+                    if isinstance(combo, list) and combo:
+                        invalidation_combos.append(combo)
                 # Also collect flat exit conditions (backward compat)
                 for exit_cond in alert.get("alpha_exit_conditions", []):
                     if not isinstance(exit_cond, dict):
@@ -418,6 +522,7 @@ class SignalRunner:
                 "physical_confirms": list(all_confirms),
                 "alpha_exit_conditions": exit_conditions,
                 "alpha_exit_combos": exit_combos,
+                "alpha_invalidation_combos": invalidation_combos,
                 "alpha_exit_params": alpha_exit_params,
                 "stop_pct": min(stop_values) if stop_values else None,
                 "card_ids": card_ids,

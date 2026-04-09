@@ -85,6 +85,42 @@ MIN_WR_IMPROVEMENT = 3.0   # 百分点
 # Walk-Forward 切分比例
 TRAIN_FRAC = 0.67
 
+# Override the legacy confirm pool with a wider physics-first universe.
+# We still exclude time features such as funding countdown because those are
+# schedule descriptors, not force creation/decay descriptors.
+CONFIRM_FEATURES = [
+    # Trade flow
+    "taker_buy_sell_ratio",
+    "volume_vs_ma20",
+    "volume_acceleration",
+    "avg_trade_size",
+    # Liquidity
+    "kyle_lambda",
+    "spread_vs_ma20",
+    # Positioning
+    "oi_change_rate_5m",
+    "oi_change_rate_1h",
+    "ls_ratio_change_5m",
+    # Microstructure
+    "quote_imbalance",
+    "bid_depth_ratio",
+    "spread_anomaly",
+    # Order flow
+    "large_trade_buy_ratio",
+    "direction_net_1m",
+    "sell_notional_share_1m",
+    "trade_burst_index",
+    "direction_autocorr",
+    # Liquidation pressure
+    "btc_liq_net_pressure",
+    "total_liq_usd_5m",
+    "liq_size_p90_5m",
+    # Basis / funding state
+    "rt_funding_rate",
+    "mark_basis",
+    "mark_basis_ma10",
+]
+
 
 class ComboScanner:
     """

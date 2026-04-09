@@ -50,6 +50,13 @@ class LLMValidationResult:
     rejection_reason: str = ""             # 若 is_valid=False 的原因
     raw_response: str = ""                 # 原始 LLM 输出（调试用）
     llm_model: str = ""
+    # 6 个物理机制评估字段（新增）
+    force_description: str = ""            # 信号捕捉的"力"的描述和物理来源
+    force_duration: str = ""               # 力的持续时长和消失原因
+    confirm_directional: bool = True       # 确认因子是否有方向偏见（false=无效）
+    daily_frequency: str = ""              # 每天重复出现频率估计
+    trend_safe: bool = True                # 在单边趋势中是否不会反复误触发（false=无效）
+    exit_captures_decay: bool = True       # vs_entry 出场是否能捕捉力的消失
 
     def to_dict(self) -> dict:
         return {
@@ -71,7 +78,15 @@ class LLMValidationResult:
             "confirms": self.confirms,
             "rejection_reason": self.rejection_reason,
             "llm_model": self.llm_model,
+            # 6 个物理机制评估字段
+            "force_description": self.force_description,
+            "force_duration": self.force_duration,
+            "confirm_directional": self.confirm_directional,
+            "daily_frequency": self.daily_frequency,
+            "trend_safe": self.trend_safe,
+            "exit_captures_decay": self.exit_captures_decay,
         }
+
 
 
 # ── 力库摘要（从 MECHANISM_CATALOG 动态提取） ─────────────────────────────────
@@ -107,36 +122,36 @@ def _build_catalog_summary() -> str:
 # ── System Prompt ─────────────────────────────────────────────────────────────
 
 
-_SYSTEM_PROMPT_TEMPLATE = """你是一个专业的量化交易机制分析师。你的任务是对自动发现的 BTC 永续合约交易规则进行物理因果验证。
+_SYSTEM_PROMPT_TEMPLATE = """你是 BTC 永续合约微结构分析师。请按以下框架评估候选策略，用 JSON 格式回答。
 
 ## 核心哲学
-**入场 = 捕捉一股力**
+**入场 = 捕捉一股力（微观结构失衡）**
 **出场 = 判断这股力用完了**
 
-不是固定时间平仓，而是追踪"推动价格的那股结构性力量是否还存在"。
-
-## 力的来源（必须从以下之一选择）
-力必须来自计算机交易程序的微结构迹象：
-1. 杠杆成本不平衡 (leverage_cost_imbalance): 资金费率使一方持续付出成本
-2. 流动性真空 (liquidity_vacuum): 某方向订单簿厚度骤降，价格轻易穿越
-3. 单边耗竭 (unilateral_exhaustion): 买方或卖方的弹药耗尽
-4. 算法执行痕迹 (algorithmic_trace): TWAP/VWAP 分批算法的规律性流量
-5. 势能释放 (potential_energy_release): 长期压缩后的方向性突破
-6. 分发/吸筹形态 (distribution_pattern): 主力在高位/低位的大单行为
-7. OI 背离 (open_interest_divergence): 价格与持仓量的反向信号
-8. 做市商库存再平衡 (inventory_rebalance): MM 的被动对冲导致的方向性流量
-9. 体制转换 (regime_change): 市场结构从一种状态切换到另一种状态
-10. 通用统计 (generic): 不能明确归因（较低优先级）
+力的来源必须是微观结构失衡（资金费率/持仓量/流动性/成交流），不是纯价格模式。
 
 ## 已验证的力库（参考背景）
 {catalog_summary}
 
-## 验证标准
-你需要判断：
-1. 这个规则是否捕捉了一股真实的物理力？（不是纯统计噪音）
-2. 这股力是否短暂的？（有明确的存在窗口和消退条件）
-3. 这股力的优势来源是什么？（为什么会产生可预测的价格变动）
-4. 这股力对应的主因衰竭条件是什么？（何时应该平仓）
+## 评估框架（6 个核心问题）
+你必须在 JSON 中回答以下 6 个问题：
+
+1. force_description: 这个信号捕捉的是什么"力"？力的物理来源？
+2. force_duration: 这股力是暂时的吗？预计持续多少分钟？为什么会消失？
+3. confirm_directional: 确认因子是否有方向偏见？
+   - 如果确认因子涨跌都会触发（如价差扩大、成交量放大），回答 false
+   - 只有在特定方向才会出现才回答 true
+4. daily_frequency: 这个力在一天中会重复出现几次（大约）？
+5. trend_safe: 在单边趋势中，这个信号会不会反复误触发？
+   - 如果在连续上涨/下跌中会频繁触发（如价格持续高于VWAP），回答 false
+6. exit_captures_decay: vs_entry 出场条件能否捕捉到力的消失？
+
+## 关键判断规则
+- confirm_directional=false 或 trend_safe=false 直接导致 is_valid=false，拒绝
+- 力的来源必须是微观结构失衡，不是纯价格模式
+- confidence >= 0.92: 物理机制清晰，因果链完整 → 自动批准
+- 0.70 <= confidence < 0.92: 机制可信但有不确定性 → 进入人工审查队列
+- confidence < 0.70: 纯统计噪音、方向错误、机制不成立 → 自动拒绝
 
 ## 输出格式
 必须返回严格的 JSON，不要有多余文字：
@@ -147,7 +162,13 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个专业的量化交易机制分析师。
   "confidence": 0.00-1.00,
   "mechanism_type": "机制ID（从力库中选或提出新的）",
   "mechanism_display_name": "简短的中文名称",
-  "physics_essence": "一句话：这股力的本质是什么（要具体，不要空洞）",
+  "force_description": "这个信号捕捉的是什么力？力的物理来源是什么？",
+  "force_duration": "这股力预计持续多少分钟？为什么会消失？",
+  "confirm_directional": true/false,
+  "daily_frequency": "每天大约出现几次？",
+  "trend_safe": true/false,
+  "exit_captures_decay": true/false,
+  "physics_essence": "一句话：这股力的本质是什么（具体，不要空洞）",
   "physics_why_temporary": "为什么这股力会在N根K线内消退",
   "physics_edge_source": "交易优势从哪里来（具体的结构性原因）",
   "primary_decay_feature": "主因衰竭应该看哪个特征",
@@ -155,14 +176,9 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个专业的量化交易机制分析师。
   "decay_narrative": "完整的衰竭叙事：当...发生时，意味着那股力消退了",
   "entry_narrative": "入场叙事：为什么此刻入场捕捉到的是这股力",
   "confirms": ["次级确认特征1", "次级确认特征2"],
-  "rejection_reason": "如果 is_valid=false，解释原因"
+  "rejection_reason": "如果 is_valid=false，解释原因（confirm_directional=false 或 trend_safe=false 时必填）"
 }}
 ```
-
-## 判断原则
-- confidence ≥ 0.92: 物理机制清晰，因果链完整，力的存在有充分理由 → 自动批准
-- 0.70 ≤ confidence < 0.92: 机制可信但有不确定性 → 进入人工审查队列
-- confidence < 0.70: 纯统计噪音、方向错误、或物理机制不成立 → 自动拒绝
 
 **重要**: 高胜率/高盈亏比本身不是批准理由。必须有清晰的物理因果解释。
 """
@@ -425,8 +441,24 @@ class LLMMechanismValidator:
                 llm_model=self._model,
             )
 
+        # 提取 6 个物理机制评估字段
+        confirm_directional = bool(data.get("confirm_directional", True))
+        trend_safe = bool(data.get("trend_safe", True))
+
+        # 关键判断规则：confirm_directional=false 或 trend_safe=false → is_valid=false
+        is_valid_raw = bool(data.get("is_valid", False))
+        rejection_reason_raw = str(data.get("rejection_reason", ""))
+        if not confirm_directional:
+            is_valid_raw = False
+            if not rejection_reason_raw:
+                rejection_reason_raw = "confirm_directional=false: 确认因子无方向偏见，涨跌都会触发"
+        if not trend_safe:
+            is_valid_raw = False
+            if not rejection_reason_raw:
+                rejection_reason_raw = "trend_safe=false: 在单边趋势中会反复误触发"
+
         return LLMValidationResult(
-            is_valid=bool(data.get("is_valid", False)),
+            is_valid=is_valid_raw,
             confidence=float(data.get("confidence", 0.0)),
             mechanism_type=str(data.get("mechanism_type", candidate.get("mechanism_type", "generic"))),
             mechanism_display_name=str(data.get("mechanism_display_name", "")),
@@ -438,7 +470,13 @@ class LLMMechanismValidator:
             decay_narrative=str(data.get("decay_narrative", "")),
             entry_narrative=str(data.get("entry_narrative", "")),
             confirms=list(data.get("confirms", [])),
-            rejection_reason=str(data.get("rejection_reason", "")),
+            rejection_reason=rejection_reason_raw,
             raw_response=raw[:2000],
             llm_model=self._model,
+            force_description=str(data.get("force_description", "")),
+            force_duration=str(data.get("force_duration", "")),
+            confirm_directional=confirm_directional,
+            daily_frequency=str(data.get("daily_frequency", "")),
+            trend_safe=trend_safe,
+            exit_captures_decay=bool(data.get("exit_captures_decay", True)),
         )

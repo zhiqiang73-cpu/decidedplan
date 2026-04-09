@@ -136,6 +136,7 @@ class ExecutionEngine:
         self._signal_health: Any | None = None
         self._signal_runner: Any | None = None
         self._decision_logger: Any | None = None
+        self._conviction_engine: Any | None = None
         # A2 family 1-bar entry confirmation: key="{family}|{direction}"
         self._entry_confirm_pending: dict[str, float] = {}
 
@@ -165,6 +166,10 @@ class ExecutionEngine:
     def set_decision_logger(self, decision_logger: Any) -> None:
         """Inject decision logger for signal audit trail."""
         self._decision_logger = decision_logger
+
+    def set_conviction_engine(self, brain: Any) -> None:
+        """Inject conviction engine (adaptive brain) for shadow scoring."""
+        self._conviction_engine = brain
 
     def _log_blocked(self, signal: str, family: str, direction: str,
                      blocked_by: str, confidence: int, reason: str) -> None:
@@ -231,33 +236,57 @@ class ExecutionEngine:
                               confidence, "LONG blocked during LIQUIDATION flow")
             return
 
-        # Block ALL weak SHORT in uptrend / weak LONG in downtrend.
-        # Only HIGH confidence (3+) signals can fight the trend.
-        # Data: 2026-04-06 all 6 SHORT losses were conf<=2 in TREND_UP.
+        # Block SHORT in uptrend: P2 alpha SHORTs are completely blocked
+        # (distribution thesis is structurally invalid when price is rising).
+        # P1 SHORTs require at least conf>=3 (HIGH) to pass -- symmetric with LONG in TREND_DOWN.
         if (
             direction == "short"
             and self._current_trend == "TREND_UP"
-            and confidence < 3
         ):
-            logger.info(
-                "[EXEC] Skip %s: SHORT blocked in TREND_UP (conf=%d < 3)",
-                signal_name, confidence,
-            )
-            self._log_blocked(signal_name, family, direction, "trend_filter",
-                              confidence, f"SHORT in TREND_UP needs HIGH conf (got {confidence})")
-            return
+            if is_alpha:
+                logger.info(
+                    "[EXEC] Skip %s: P2 SHORT blocked in TREND_UP "
+                    "(distribution thesis invalid in uptrend)",
+                    signal_name,
+                )
+                self._log_blocked(signal_name, family, direction, "trend_filter",
+                                  confidence, "P2 SHORT completely blocked in TREND_UP")
+                confirm_key = f"{family}|{direction}"
+                if confirm_key in self._entry_confirm_pending:
+                    logger.info(
+                        "[EXEC] A2 deferred entry cancelled for %s: TREND_UP invalidates setup",
+                        signal_name,
+                    )
+                    self._entry_confirm_pending.pop(confirm_key, None)
+                return
+            elif confidence < 3:
+                logger.info(
+                    "[EXEC] Skip %s: P1 SHORT blocked in TREND_UP (conf=%d < 3)",
+                    signal_name, confidence,
+                )
+                self._log_blocked(signal_name, family, direction, "trend_filter",
+                                  confidence, f"P1 SHORT in TREND_UP needs HIGH conf (got {confidence})")
+                return
 
         if (
             direction == "long"
             and self._current_trend == "TREND_DOWN"
-            and confidence < 3
+            and confidence < 2
         ):
             logger.info(
-                "[EXEC] Skip %s: LONG blocked in TREND_DOWN (conf=%d < 3)",
+                "[EXEC] Skip %s: LONG blocked in TREND_DOWN (conf=%d < 2)",
                 signal_name, confidence,
             )
             self._log_blocked(signal_name, family, direction, "trend_filter",
-                              confidence, f"LONG in TREND_DOWN needs HIGH conf (got {confidence})")
+                              confidence, f"LONG in TREND_DOWN needs MEDIUM+ conf (got {confidence})")
+            # Cancel any pending deferred entry: TREND_DOWN invalidates the A2 setup.
+            confirm_key = f"{family}|{direction}"
+            if confirm_key in self._entry_confirm_pending:
+                logger.info(
+                    "[EXEC] A2 deferred entry cancelled for %s: TREND_DOWN invalidates setup",
+                    signal_name,
+                )
+                self._entry_confirm_pending.pop(confirm_key, None)
             return
 
         if not is_alpha and (family, direction) not in EXECUTION_WHITELIST:
@@ -431,11 +460,44 @@ class ExecutionEngine:
             except OrderManagerError as exc:
                 logger.warning("[EXEC] get_open_positions failed: %s", exc)
 
+            # ── Conviction Engine: entry scoring (shadow mode) ──
+            if self._conviction_engine is not None:
+                try:
+                    _fv = float(alert.get("feature_value") or 0.0)
+                    _th = float(alert.get("threshold") or 0.0)
+                    _op = str(alert.get("op") or ">")
+                    _confirms = alert.get("physical_confirms") or []
+                    entry_conv = self._conviction_engine.entry_score(
+                        feature_value=_fv,
+                        threshold=_th,
+                        direction=direction,
+                        trend=self._current_trend,
+                        family=family,
+                        regime=self._current_regime,
+                        physical_confirms=_confirms,
+                        op=_op,
+                    )
+                    entry_snapshot["entry_conviction"] = round(entry_conv, 4)
+                    entry_snapshot["trend_direction"] = self._current_trend
+                    entry_snapshot["entry_op"] = _op
+                    entry_snapshot["entry_conviction_features"] = (
+                        self._conviction_engine._entry_features(
+                            _fv, _th, direction, self._current_trend,
+                            family, self._current_regime, _confirms, _op,
+                        )
+                    )
+                    logger.info(
+                        "[BRAIN] %s entry_conviction=%.3f (shadow)",
+                        signal_name, entry_conv,
+                    )
+                except Exception as exc:
+                    logger.debug("[BRAIN] entry_score error: %s", exc)
+
             try:
                 attempt_plan = self._build_entry_attempt(direction, attempt=1)
                 # QUIET_TREND uses a smaller position (5% vs 8% default).
                 # 11 of 12 losses in the 15h audit occurred in QUIET_TREND;
-                # same stop % 闂?smaller notional = smaller dollar loss per trade.
+                # same stop % → smaller notional = smaller dollar loss per trade.
                 _QUIET_POSITION_PCT = 0.05
                 _COUNTER_TREND_PCT = 0.04  # half position for counter-trend shorts
                 effective_pct = (
@@ -448,7 +510,7 @@ class ExecutionEngine:
                     effective_pct = min(effective_pct, _COUNTER_TREND_PCT)
                 if effective_pct != self.position_pct:
                     logger.debug(
-                        "[EXEC] %s regime=%s: position_pct %.0f%% 闂?%.0f%%",
+                        "[EXEC] %s regime=%s: position_pct %.0f%% → %.0f%%",
                         signal_name, self._current_regime,
                         self.position_pct * 100, effective_pct * 100,
                     )
@@ -707,6 +769,74 @@ class ExecutionEngine:
                 # Adaptive stop context
                 runtime_state["confidence"] = position.confidence
                 runtime_state["entry_regime"] = position.entry_regime
+
+                # ── Conviction Engine: per-bar hold scoring (shadow mode) ──
+                if self._conviction_engine is not None:
+                    try:
+                        entry_snap = position.entry_snapshot or {}
+                        entry_fv = float(entry_snap.get("feature_value") or 0.0)
+                        entry_feature_name = str(entry_snap.get("feature") or "")
+                        current_fv = entry_fv  # fallback
+                        if entry_feature_name and latest_features is not None:
+                            try:
+                                current_fv = float(latest_features[entry_feature_name])
+                            except (KeyError, TypeError, ValueError):
+                                pass
+                        bars_held = int(runtime_state.get("bars_held", 0) or 0)
+                        # Compute current return directly (decision not yet created)
+                        if position.direction == "short":
+                            current_return = (position.entry_price - close_price) / position.entry_price * 100
+                        else:
+                            current_return = (close_price - position.entry_price) / position.entry_price * 100
+                        adverse_pct = float(runtime_state.get("mae_pct", 0.0) or 0.0)
+                        stop_pct = float(self._resolve_position_exit_params(position).stop_pct)
+                        entry_trend = str(entry_snap.get("trend_direction") or "TREND_NEUTRAL")
+                        entry_op = str(entry_snap.get("entry_op") or ">")
+                        prev_returns = runtime_state.get("conviction_prev_returns") or []
+                        hold_features = self._conviction_engine.compute_hold_features(
+                            entry_feature_value=entry_fv,
+                            current_feature_value=current_fv,
+                            direction=position.direction,
+                            current_return=current_return,
+                            bars_held=bars_held,
+                            max_hold=position.horizon_min,
+                            adverse_pct=adverse_pct,
+                            stop_pct=stop_pct,
+                            entry_trend=entry_trend,
+                            current_trend=self._current_trend,
+                            prev_returns=prev_returns,
+                            op=entry_op,
+                        )
+                        hold_conv = self._conviction_engine.hold_score(
+                            entry_feature_value=entry_fv,
+                            current_feature_value=current_fv,
+                            direction=position.direction,
+                            current_return=current_return,
+                            bars_held=bars_held,
+                            max_hold=position.horizon_min,
+                            adverse_pct=adverse_pct,
+                            stop_pct=stop_pct,
+                            entry_trend=entry_trend,
+                            current_trend=self._current_trend,
+                            prev_returns=prev_returns,
+                            op=entry_op,
+                        )
+                        pos_key = f"{position.family}|{position.direction}"
+                        self._conviction_engine.record_bar(pos_key, hold_features, current_return)
+                        runtime_state["hold_conviction"] = round(hold_conv, 4)
+                        # Track recent returns for pnl_velocity (stable 5-bar window)
+                        prev_returns.append(current_return)
+                        if len(prev_returns) > 5:
+                            prev_returns[:] = prev_returns[-5:]
+                        runtime_state["conviction_prev_returns"] = prev_returns
+                        if bars_held % 5 == 0 or hold_conv < 0.25:
+                            logger.info(
+                                "[BRAIN] %s hold_conviction=%.3f bar=%d ret=%.3f%%",
+                                position.signal_name, hold_conv, bars_held, current_return,
+                            )
+                    except Exception as exc:
+                        logger.debug("[BRAIN] hold_score error for %s: %s", position.signal_name, exc)
+
                 decision = evaluate_exit_action(
                     position={
                         "rule": position.signal_name,
@@ -896,6 +1026,8 @@ class ExecutionEngine:
             qty=pending.qty,
             confidence=pending.confidence,
             horizon_min=pending.horizon_min,
+            strategy_id=pending.family,
+            raw_signal_name=str((pending.entry_snapshot or {}).get("raw_signal_name") or pending.signal_name),
         )
         cooldown_key = f"{pending.family}|{pending.direction}"
         self._signal_cooldown[cooldown_key] = time.time() + 300
@@ -1018,6 +1150,8 @@ class ExecutionEngine:
             total_fee_rate=total_fee_rate,
             flow_type=position.entry_flow_type,
             regime=position.entry_regime,
+            strategy_id=position.family,
+            raw_signal_name=str((position.entry_snapshot or {}).get("raw_signal_name") or position.signal_name),
         )
 
         # Record outcome for signal health tracking
@@ -1060,26 +1194,62 @@ class ExecutionEngine:
             except Exception as exc:
                 logger.warning("[EXEC] Adaptive cooldown feedback failed: %s", exc)
 
+        # ── Conviction Engine: learn from closed trade ──
+        # Use GROSS return (same as bar snapshots) to avoid net/gross mismatch.
+        # Bar snapshots record gross unrealized P&L; final label must match.
+        if self._conviction_engine is not None:
+            try:
+                ep = float(exit_price) if exit_price is not None else position.entry_price
+                gross_ret = ((ep - position.entry_price) / position.entry_price) * 100
+                if position.direction == "short":
+                    gross_ret = -gross_ret
+                pos_key_brain = f"{position.family}|{position.direction}"
+                entry_snap = position.entry_snapshot or {}
+                entry_features = entry_snap.get("entry_conviction_features") or [0.0] * 5
+                self._conviction_engine.learn_from_trade(
+                    pos_key=pos_key_brain,
+                    entry_features=entry_features,
+                    final_return_pct=gross_ret,
+                    family=position.family,
+                    regime=position.entry_regime,
+                )
+            except Exception as exc:
+                logger.warning("[BRAIN] learn_from_trade failed: %s", exc)
+
         with self._lock:
             pos_key = f"{position.family}|{position.direction}"
             self._open_positions.pop(pos_key, None)
 
         # Extended cooldown after adverse exits (hard_stop or ANY mechanism decay).
         # Prevents loss-loops where a "sticky" condition keeps re-entering.
+        # Only applies to actual losses — profitable hard_stop exits (MFE ratchet)
+        # should not waste cooldown time since the trade was managed correctly.
         _HARD_STOP_REASONS = {"hard_stop"}
         _MECHANISM_DECAY_PREFIX = "mechanism_decay_"
         _ALPHA_LOSS_COOLDOWN_S = 600  # 10 minutes (alpha cards)
         _DECAY_COOLDOWN_S = 180       # 3 minutes (P1 signals)
+        _LOSS_THRESHOLD = -0.0002     # -0.02% gross, below which we count as a real loss
         if exit_reason in _HARD_STOP_REASONS or exit_reason.startswith(_MECHANISM_DECAY_PREFIX):
-            cooldown_key = f"{position.family}|{position.direction}"
-            cooldown_s = _ALPHA_LOSS_COOLDOWN_S if position.family.startswith("A") else _DECAY_COOLDOWN_S
-            self._signal_cooldown[cooldown_key] = time.time() + cooldown_s
-            logger.info(
-                "[EXEC] Loss/decay cooldown: %s blocked for %ds after %s",
-                cooldown_key, cooldown_s, exit_reason,
-            )
+            ep = float(exit_price) if exit_price is not None else position.entry_price
+            gross_ret = ((ep - position.entry_price) / position.entry_price)
+            if position.direction == "short":
+                gross_ret = -gross_ret
+            is_actual_loss = gross_ret < _LOSS_THRESHOLD
+            if is_actual_loss:
+                cooldown_key = f"{position.family}|{position.direction}"
+                cooldown_s = _ALPHA_LOSS_COOLDOWN_S if position.family.startswith("A") else _DECAY_COOLDOWN_S
+                self._signal_cooldown[cooldown_key] = time.time() + cooldown_s
+                logger.info(
+                    "[EXEC] Loss/decay cooldown: %s blocked for %ds after %s (gross=%.4f%%)",
+                    cooldown_key, cooldown_s, exit_reason, gross_ret * 100,
+                )
+            else:
+                logger.info(
+                    "[EXEC] %s exit reason=%s but gross=%.4f%% >= threshold, skipping cooldown",
+                    position.signal_name, exit_reason, gross_ret * 100,
+                )
 
-        # After time_cap on A2 cards, apply 30-min cooldown.
+        # After time_cap on A2 cards, apply 15-min cooldown.
         # If 60 bars elapsed without the trend materialising the setup is
         # structurally exhausted; immediate re-entry risks the same dead market.
         _TIMECAP_COOLDOWN_S = 900  # 15 minutes
@@ -1087,7 +1257,7 @@ class ExecutionEngine:
             cooldown_key = f"{position.family}|{position.direction}"
             self._signal_cooldown[cooldown_key] = time.time() + _TIMECAP_COOLDOWN_S
             logger.info(
-                "[EXEC] A2 time_cap cooldown: %s blocked for 30min",
+                "[EXEC] A2 time_cap cooldown: %s blocked for 15min",
                 cooldown_key,
             )
 

@@ -165,7 +165,7 @@ class WalkForwardValidator:
         计算一个原子在 IS / OOS 上的完整对比报告。
 
         Returns:
-            dict 包含 IS/OOS 指标、degradation 比率、is_robust 标签。
+            dict 包含 IS/OOS 指标、degradation 比率、is_robust 标签、mfe_coverage_rate。
         """
         is_metrics  = self._eval_atom(atom, train_df)
         oos_metrics = self._eval_atom(atom, test_df)
@@ -178,11 +178,16 @@ class WalkForwardValidator:
         else:
             degradation = oos_icir / is_icir
 
+        # MFE 覆盖率：在 OOS 数据上，每个触发点持有 horizon bars 内的最大有利偏移
+        # 统计 MFE > 0.04%（Maker 往返费用）的比例
+        mfe_coverage_rate = self._compute_mfe_coverage(atom, test_df)
+
         # 稳健判断（全部基于费后指标）：
         #   1. OOS 保留 IS 性能的 50% 以上（ICIR 衰减）
         #   2. OOS ICIR 绝对值 > 0.3
         #   3. OOS 盈亏比（费后）> 1.0 — 这是最关键的可交易性门槛
         #   4. OOS 平均收益（费后）> 0 — 不允许费后为负
+        #   5. MFE 覆盖率 >= 75% — 至少 75% 的触发点有足够的正向空间覆盖费用
         oos_pf      = oos_metrics.get("profit_factor") or 0.0   # 已是费后
         oos_avg_ret = oos_metrics.get("avg_return_pct") or 0.0  # 已是费后
         min_icir    = 0.3 if abs(is_icir) > 0.5 else 0.1
@@ -190,16 +195,19 @@ class WalkForwardValidator:
             degradation > 0.5
             and abs(oos_icir or 0) > min_icir
             and oos_pf > 1.0
-            and oos_avg_ret > 0.0    # 费后平均收益必须为正
+            and oos_avg_ret > 0.0          # 费后平均收益必须为正
+            and mfe_coverage_rate >= 0.75  # MFE 覆盖率不低于 75%
         )
 
         return {
-            "rule":        atom.rule_str(),
-            "IS":          is_metrics,
-            "OOS":         oos_metrics,
-            "degradation": round(degradation, 3),
-            "is_robust":   is_robust,
+            "rule":               atom.rule_str(),
+            "IS":                 is_metrics,
+            "OOS":                oos_metrics,
+            "degradation":        round(degradation, 3),
+            "is_robust":          is_robust,
+            "mfe_coverage_rate":  round(mfe_coverage_rate, 4),
         }
+
 
     # ── 批量验证 ────────────────────────────────────────────────────────────
     def validate_all(
@@ -221,11 +229,13 @@ class WalkForwardValidator:
             reports.append(report)
             oos_icir = report["OOS"].get("ICIR", 0) or 0
             status = "ROBUST" if report["is_robust"] else "OVERFIT"
+            is_icir = report["IS"].get("ICIR") or 0
+            decay_val = report.get("degradation") or 0
             logger.info(
                 f"[{status}] {report['rule']} | "
-                f"IS ICIR={report['IS'].get('ICIR','?'):.3f} "
+                f"IS ICIR={is_icir:.3f} "
                 f"OOS ICIR={oos_icir:.3f} "
-                f"decay={report['degradation']:.2f}"
+                f"decay={decay_val:.2f}"
             )
 
         # 按 OOS ICIR 降序
@@ -238,6 +248,75 @@ class WalkForwardValidator:
             reports = [r for r in reports if r["is_robust"]]
 
         return reports
+
+    # ── MFE 覆盖率辅助 ──────────────────────────────────────────────────────
+    @staticmethod
+    def _compute_mfe_coverage(
+        atom: "CausalAtom",
+        df: pd.DataFrame,
+        fee_threshold_pct: float = 0.04,
+    ) -> float:
+        """
+        计算 OOS 数据上的 MFE 覆盖率。
+
+        对每个信号触发点，检查持有 horizon bars 内的最大有利偏移（MFE）
+        是否超过 fee_threshold_pct（默认 0.04%，Maker 往返费用）。
+        返回 MFE > fee_threshold_pct 的触发点比例。
+
+        Args:
+            atom:              CausalAtom（含 feature, operator, threshold, horizon, direction）
+            df:                数据切片（OOS 部分）
+            fee_threshold_pct: MFE 最低门槛（%），默认 0.04%（Maker 往返费）
+
+        Returns:
+            mfe_coverage_rate: float，范围 [0.0, 1.0]；若无触发点则返回 0.0
+        """
+        if "close" not in df.columns:
+            return 0.0
+
+        col = df[atom.feature]
+        if atom.operator == ">":
+            mask = col > atom.threshold
+        else:
+            mask = col < atom.threshold
+
+        triggered = mask & col.notna()
+        trigger_indices = df.index[triggered].tolist()
+        if not trigger_indices:
+            return 0.0
+
+        close_arr = df["close"].values
+        idx_arr = np.array(range(len(df)))
+        horizon = max(1, int(atom.horizon))
+        sign = -1.0 if atom.direction == "short" else 1.0
+        n_total = len(df)
+
+        mfe_above_fee = 0
+        n_valid = 0
+
+        for pos in trigger_indices:
+            # 找到该 index 在 df 中的整数位置
+            loc = df.index.get_loc(pos)
+            if not isinstance(loc, int):
+                continue
+            entry_price = close_arr[loc]
+            if entry_price == 0 or np.isnan(entry_price):
+                continue
+
+            mfe = 0.0
+            end_loc = min(loc + horizon, n_total - 1)
+            for j in range(loc + 1, end_loc + 1):
+                current_ret = (close_arr[j] - entry_price) / entry_price * sign * 100.0
+                if current_ret > mfe:
+                    mfe = current_ret
+
+            n_valid += 1
+            if mfe > fee_threshold_pct:
+                mfe_above_fee += 1
+
+        if n_valid == 0:
+            return 0.0
+        return mfe_above_fee / n_valid
 
     # ── 日级 ICIR 辅助 ──────────────────────────────────────────────────────
     @staticmethod

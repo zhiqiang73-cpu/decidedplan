@@ -7,7 +7,7 @@ const __uiDir = pathDirname(pathDirname(fileURLToPath(import.meta.url)));  // di
 loadDotenv({ path: resolvePath(__uiDir, ".env"), override: false });
 loadDotenv({ path: resolvePath(process.cwd(), ".env"), override: false }); // also load root .env (Binance keys)
 
-// 鈹€鈹€鈹€ Global crash handlers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ──────────────────── Global crash handlers ────────────────────
 const _crashLog = resolvePath(process.cwd(), "monitor/output/processes/ui_crash.log");
 function _logCrash(type: string, err: unknown) {
   const msg = `[${new Date().toISOString()}] ${type}: ${err instanceof Error ? err.stack : String(err)}\n`;

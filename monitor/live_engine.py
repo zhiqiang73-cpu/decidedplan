@@ -315,6 +315,8 @@ class LiveFeatureEngine:
             df = compute_microstructure_features(df)
             df = compute_order_flow_features(df)
             df = compute_mark_price_features(df)
+            if "oi_change_rate_5m" in df.columns:
+                df["oi_change_rate_5m_ma5"] = df["oi_change_rate_5m"].rolling(5, min_periods=1).mean()
         except Exception as exc:
             logger.warning(f"Feature calculation error: {exc}")
 

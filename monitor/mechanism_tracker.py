@@ -177,6 +177,8 @@ SIGNAL_MECHANISM_MAP: dict[str, str] = {
     # ── 制度转换策略 ──────────────────────────────────────────────────────────
     "RT-1": "regime_transition",
     "RT-1_regime_transition_long": "regime_transition",
+    "OA-1": "oi_accumulation_long",
+    "OA-1_oi_accumulation_long": "oi_accumulation_long",
 }
 
 
@@ -706,6 +708,63 @@ MECHANISM_CATALOG: dict[str, MechanismConfig] = {
         },
     ),
 
+    # buyer_impulse: LONG mirror of seller_impulse.
+    # Physics: aggressive buyers flood the order book, eating through asks.
+    # When buying pressure fades (taker ratio drops, sell share rises), exit.
+    "buyer_impulse": MechanismConfig(
+        mechanism_type="buyer_impulse",
+        primary=DecayCondition(
+            feature="taker_buy_sell_ratio",
+            op="<",
+            threshold=1.0,
+            description="主动买压已消退，买卖比重新回到卖方一侧",
+        ),
+        confirms=[
+            DecayCondition(
+                feature="volume_vs_ma20",
+                op="<",
+                threshold=1.2,
+                description="放量买入开始退潮，成交回到常态附近",
+            ),
+            DecayCondition(
+                feature="spread_vs_ma20",
+                op="<",
+                threshold=1.2,
+                description="点差重新收敛，FOMO式追涨阶段结束",
+            ),
+            DecayCondition(
+                feature="direction_net_1m",
+                op="<",
+                threshold=0.0,
+                description="成交方向转为卖方主导，买压冲击结束",
+            ),
+        ],
+        description="主动买盘突然集中涌出，靠吃掉卖方挂单推动价格上涨；当买压收敛、点差回落，短线冲击也就走完",
+        category="unilateral_exhaustion",
+        display_name="主动买盘冲击",
+        physics={
+            "essence": (
+                "大量主动买单集中在短时间内涌出，通过吃掉卖方挂单强行推高价格。"
+                "点差扩大是做市商在保护自己：他们知道自己在被单边流量利用。"
+            ),
+            "why_temporary": (
+                "大规模主动买入是一次性事件：买方弹药有限，"
+                "当买压减弱、点差收窄，说明冲击完成，价格回调。"
+            ),
+            "edge_source": "FLOW_EXHAUSTION — 方向性吃单流量是直接可测的冲击强度",
+        },
+        entry_fingerprint=[
+            {"feature": "taker_buy_sell_ratio", "condition": "极端高值（> p90）", "why": "买方主导极端"},
+            {"feature": "spread_vs_ma20", "condition": "> 1.5", "why": "做市商扩价差保护，冲击激烈"},
+        ],
+        validated_by=[],
+        relations={
+            "reinforces": ["bottom_taker_exhaust"],  # both are LONG forces
+            "conflicts_with": ["seller_impulse", "top_buyer_exhaust"],  # opposing forces
+            "often_follows": ["bottom_taker_exhaust"],  # buyer impulse can follow seller exhaustion
+        },
+    ),
+
     # ══════════════════════════════════════════════════════════════════════════
     # 大类：algorithmic_trace — 算法执行痕迹
     # ══════════════════════════════════════════════════════════════════════════
@@ -1088,6 +1147,44 @@ MECHANISM_CATALOG: dict[str, MechanismConfig] = {
         validated_by=[],
         relations={},
     ),
+
+    # OA-1: OI accumulation LONG (mirror of A3-OI distribution SHORT)
+    "oi_accumulation_long": MechanismConfig(
+        mechanism_type="oi_accumulation_long",
+        primary=DecayCondition(
+            feature="oi_change_rate_5m",
+            op="revert_to_neutral",
+            threshold=None,
+            description="OI growth rate reverts to below 50pct of entry value (MA5 smoothed) = new-money inflow fading",
+        ),
+        confirms=[
+            DecayCondition(
+                feature="volume_vs_ma20",
+                op="<",
+                threshold=0.8,
+                description="Volume contraction = accumulation momentum fading",
+            ),
+        ],
+        description="TREND_UP with sustained OI growth = new long capital accumulating. Mirror of A3-OI distribution (SHORT).",
+        category="open_interest_divergence",
+        display_name="OI Accumulation LONG",
+        physics={
+            "essence": "In TREND_UP, rising OI means new long positions are being opened, not just existing longs holding. New capital inflow sustains the trend.",
+            "why_temporary": "OI accumulation fades when new buyers stop entering. MA5-smoothed revert-to-neutral detects this without reacting to single-bar noise.",
+            "edge_source": "OI_STRUCTURE -- sustained OI growth in uptrend is measurable new capital commitment",
+        },
+        entry_fingerprint=[
+            {"feature": "oi_change_rate_5m", "condition": "> 0.003", "why": "OI growing at meaningful rate"},
+            {"feature": "taker_buy_sell_ratio", "condition": "> 0.95", "why": "buyers dominant"},
+            {"feature": "volume_vs_ma20", "condition": "> 1.2", "why": "above-average volume confirms conviction"},
+        ],
+        validated_by=["OA-1"],
+        relations={
+            "reinforces": ["buyer_impulse"],
+            "conflicts_with": ["oi_divergence", "seller_impulse"],
+            "often_follows": [],
+        },
+    ),
 }
 
 
@@ -1109,6 +1206,7 @@ _FAMILY_TO_MECHANISM: dict[str, str] = {
     "A2-29": "near_high_distribution",
     "A3-OI": "oi_divergence",
     "A4-PIR": "oi_divergence",
+    "OA-1": "oi_accumulation_long",
 }
 
 
@@ -1305,6 +1403,16 @@ class MechanismTracker:
             low, high = threshold
             return float(low) <= current_value <= float(high)
 
+        if (
+            mechanism_type == "oi_accumulation_long"
+            and condition.op == "revert_to_neutral"
+        ):
+            return self._check_revert_to_neutral_smoothed(
+                feature=condition.feature,
+                entry_snapshot=entry_snapshot,
+                current_features=current_features,
+            )
+
         if condition.op == "revert_to_neutral":
             return self._check_revert_to_neutral(
                 feature=feature,
@@ -1429,6 +1537,36 @@ class MechanismTracker:
 
         current_distance = abs(current_value - neutral_value)
         return current_distance <= entry_distance * 0.5
+
+    def _check_revert_to_neutral_smoothed(
+        self,
+        feature: str,
+        entry_snapshot: dict,
+        current_features: pd.Series | dict,
+    ) -> bool:
+        """MA5 smoothed revert-to-neutral for slow-accumulation LONG mechanisms.
+
+        Uses the pre-computed {feature}_ma5 column if available, otherwise
+        falls back to the raw feature. Prevents single-bar oscillation from
+        triggering premature exits on slow OI accumulation moves.
+        """
+        ma5_key = f"{feature}_ma5"
+        current_ma5 = _safe_get(current_features, ma5_key)
+        if current_ma5 is None:
+            current_ma5 = _safe_get(current_features, feature)
+        if current_ma5 is None:
+            return False
+
+        entry_value = _safe_get(entry_snapshot, feature)
+        if entry_value is None:
+            return False
+
+        neutral = _neutral_value_for_feature(feature)
+        entry_dist = abs(entry_value - neutral)
+        if entry_dist <= 0:
+            return False
+        current_dist = abs(current_ma5 - neutral)
+        return current_dist <= entry_dist * 0.5
 
 
 # ─── Dynamic Mechanism Registration (LLM-discovered forces) ──────────

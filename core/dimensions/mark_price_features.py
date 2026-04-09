@@ -42,6 +42,13 @@ def compute_mark_price_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["rt_funding_rate"] = pd.Series(np.nan, index=df.index, dtype="float32")
 
+    if "funding_rate" in df.columns:
+        base_funding = pd.to_numeric(df["funding_rate"], errors="coerce")
+        realtime_funding = pd.to_numeric(df["rt_funding_rate"], errors="coerce")
+        df["funding_rate"] = realtime_funding.where(realtime_funding.notna(), base_funding).astype("float32")
+    else:
+        df["funding_rate"] = pd.to_numeric(df["rt_funding_rate"], errors="coerce").astype("float32")
+
     # ── 期货溢价 (标记价格 vs 指数价格) ──────────────────────────────────────
     has_basis = "mp_mark_price" in df.columns and "mp_index_price" in df.columns
     if has_basis:
@@ -59,7 +66,7 @@ def compute_mark_price_features(df: pd.DataFrame) -> pd.DataFrame:
     if "mp_next_funding_time" in df.columns and "timestamp" in df.columns:
         nft = df["mp_next_funding_time"].astype("float64")
         ts  = df["timestamp"].astype("float64")
-        countdown = ((nft - ts) / 60_000.0).clip(0.0, 481.0)
+        countdown = ((nft - ts) / 60_000.0).clip(0.0, 480.0)
         df["funding_countdown_m"] = countdown.astype("float32")
     else:
         df["funding_countdown_m"] = pd.Series(np.nan, index=df.index, dtype="float32")

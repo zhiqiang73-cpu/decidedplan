@@ -150,6 +150,35 @@ class TakerExhaustionLowDetector(SignalDetector):
                 prev_taker = float(df["taker_buy_sell_ratio"].iloc[-6])
                 delta5 = curr_taker - prev_taker
                 if not pd.isna(delta5) and delta5 < _TAKER_DELTA_THR_D:
+
+                    # ── 趋势感知守卫 ─────────────────────────────────────
+                    # 物理逻辑: "买方衰竭"在上升趋势中途只是喘息，不是反转。
+                    #   只有在价格停滞/回落时，买方衰竭才意味着真正的反转。
+                    #   用 close 的 20 根 K 线斜率判断：slope > 0 = 上升趋势
+                    #   额外要求 position_in_range_4h > 0.80 = 必须在极顶部
+                    _trend_ok = True
+                    if "close" in df.columns and len(df) >= 20:
+                        closes = df["close"].iloc[-20:].values
+                        try:
+                            import numpy as _np
+                            _slope = _np.polyfit(range(20), closes, 1)[0]
+                            # 如果斜率 > 0（上升趋势中途），降低信心
+                            if _slope > 0:
+                                r4h = _get("position_in_range_4h")
+                                # 上升趋势中必须在 4h range 极顶部 (>85%) 才允许
+                                if pd.isna(r4h) or r4h < 0.70:
+                                    _trend_ok = False
+                                    logger.info(
+                                        "[P1-10 D] SHORT blocked: uptrend slope=%.2f, "
+                                        "r4h=%.3f < 0.70 (not in upper zone)",
+                                        _slope, r4h if not pd.isna(r4h) else -1,
+                                    )
+                        except Exception:
+                            pass
+
+                    if not _trend_ok:
+                        return None
+
                     # vwap_dev > p98 升为 HIGH
                     conf = 3 if vwap_dev > 0.033000 else 2
                     label = "HIGH" if conf >= 3 else "MEDIUM"

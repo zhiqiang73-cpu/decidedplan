@@ -43,11 +43,28 @@ SNAPSHOT_COLUMNS = (
     "amplitude_ma20",
     "amplitude_1m",
     "kyle_lambda",
+    "quote_imbalance",
+    "bid_depth_ratio",
+    "spread_anomaly",
+    "large_trade_buy_ratio",
+    "direction_net_1m",
+    "sell_notional_share_1m",
+    "trade_burst_index",
+    "direction_autocorr",
+    "btc_liq_net_pressure",
+    "total_liq_usd_5m",
+    "liq_size_p90_5m",
+    "mark_basis",
+    "mark_basis_ma10",
+    "rt_funding_rate",
+    "avg_trade_size",
+    "ls_ratio_change_5m",
     "minute_in_hour",
 )
 
 _EXIT_REASON_SET = {"reverse_structure", "logic_failed", "logic_complete", "regime_shift"}
 LOGIC_COMPLETE_MIN_RETURN_PCT = 0.0
+VS_ENTRY_TAG = "_vs_entry"
 
 
 def _coerce_float(value: object) -> Optional[float]:
@@ -93,6 +110,35 @@ def _normalize_alpha_exit_conditions(payload: object) -> list[dict[str, float | 
                 condition[extra_key] = extra_value
         normalized.append(condition)
     return normalized
+
+
+def _collect_alpha_condition_columns(*payloads: object) -> set[str]:
+    columns: set[str] = set()
+    for payload in payloads:
+        if isinstance(payload, dict):
+            items = [payload]
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            conditions = item.get("conditions")
+            if isinstance(conditions, list):
+                candidates = conditions
+            else:
+                candidates = [item]
+            for cond in candidates:
+                if not isinstance(cond, dict):
+                    continue
+                feature = str(cond.get("feature", "")).strip()
+                if not feature:
+                    continue
+                if feature.endswith(VS_ENTRY_TAG):
+                    feature = feature[: -len(VS_ENTRY_TAG)]
+                columns.add(feature)
+    return columns
 
 
 def _normalize_float_dict(payload: object, *, int_keys: bool = False) -> dict[int | str, float] | None:
@@ -198,6 +244,7 @@ def build_entry_snapshot(alert: Dict, features: Optional[pd.Series]) -> Dict[str
     )
     # Top-3 combos from ExitConditionMiner (preferred over flat conditions)
     alpha_exit_combos = alert.get("alpha_exit_combos") or []
+    alpha_invalidation_combos = alert.get("alpha_invalidation_combos") or []
     alpha_exit_params = _normalize_alpha_exit_params(alert.get("alpha_exit_params"))
 
     stop_pct = _coerce_float(alert.get("stop_pct"))
@@ -222,6 +269,8 @@ def build_entry_snapshot(alert: Dict, features: Optional[pd.Series]) -> Dict[str
         snapshot["alpha_exit_conditions"] = alpha_exit_conditions
     if alpha_exit_combos:
         snapshot["alpha_exit_combos"] = alpha_exit_combos
+    if alpha_invalidation_combos:
+        snapshot["alpha_invalidation_combos"] = alpha_invalidation_combos
     if alpha_exit_params:
         snapshot["alpha_exit_params"] = alpha_exit_params
     if stop_pct is not None:
@@ -229,7 +278,19 @@ def build_entry_snapshot(alert: Dict, features: Optional[pd.Series]) -> Dict[str
     if features is None:
         return snapshot
 
-    for col in SNAPSHOT_COLUMNS:
+    snapshot_columns = set(SNAPSHOT_COLUMNS)
+    feature_name = str(alert.get("feature", "")).strip()
+    if feature_name:
+        snapshot_columns.add(feature_name)
+    snapshot_columns.update(
+        _collect_alpha_condition_columns(
+            alpha_exit_conditions,
+            alpha_exit_combos,
+            alpha_invalidation_combos,
+        )
+    )
+
+    for col in snapshot_columns:
         snapshot[col] = _safe_get(features, col)
     return snapshot
 
@@ -264,7 +325,11 @@ def evaluate_exit_state(
     current_return = _current_return(position, close)
     snapshot = position.get("entry_snapshot", {}) or {}
 
-    if snapshot.get("alpha_exit_combos") or _normalize_alpha_exit_conditions(snapshot.get("alpha_exit_conditions")):
+    if (
+        snapshot.get("alpha_exit_combos")
+        or snapshot.get("alpha_invalidation_combos")
+        or _normalize_alpha_exit_conditions(snapshot.get("alpha_exit_conditions"))
+    ):
         return _eval_alpha_card(position, features, snapshot, current_return)
 
     if family == "P1-8":
@@ -295,38 +360,33 @@ def _eval_alpha_card(position: Dict, row: pd.Series, snapshot: Dict, ret: float)
     Any combo fully matched = exit (OR between combos).
     Supports _vs_entry features by computing current - entry from snapshot.
     """
-    _VS_ENTRY_TAG = "_vs_entry"
-
-    # Prefer Top-3 combos; fall back to flat conditions
-    exit_combos = snapshot.get("alpha_exit_combos")
-    if isinstance(exit_combos, list) and exit_combos:
-        # Top-3 combo evaluation: AND within combo, OR between combos
-        for combo_idx, combo in enumerate(exit_combos):
+    def _match_combo_set(combo_payload: object, label_prefix: str) -> Optional[str]:
+        if not isinstance(combo_payload, list):
+            return None
+        for combo_idx, combo in enumerate(combo_payload):
             if not isinstance(combo, list) or not combo:
                 continue
-            all_conditions_met = True
             matched_parts: list[str] = []
             for condition in combo:
                 if not isinstance(condition, dict):
-                    all_conditions_met = False
+                    matched_parts = []
                     break
                 feature = str(condition.get("feature", "")).strip()
                 operator = str(condition.get("operator") or condition.get("op") or "").strip()
                 try:
                     threshold = float(condition.get("threshold"))
                 except (TypeError, ValueError):
-                    all_conditions_met = False
+                    matched_parts = []
                     break
 
-                # Resolve value: _vs_entry features need delta computation
-                if feature.endswith(_VS_ENTRY_TAG):
-                    base_col = feature[: -len(_VS_ENTRY_TAG)]
+                if feature.endswith(VS_ENTRY_TAG):
+                    base_col = feature[: -len(VS_ENTRY_TAG)]
                     value = _vs_entry_val(row, snapshot, base_col)
                 else:
                     value = _safe_get(row, feature)
 
                 if value is None:
-                    all_conditions_met = False
+                    matched_parts = []
                     break
 
                 is_match = (
@@ -334,18 +394,31 @@ def _eval_alpha_card(position: Dict, row: pd.Series, snapshot: Dict, ret: float)
                     or (operator == "<" and value < threshold)
                 )
                 if not is_match:
-                    all_conditions_met = False
+                    matched_parts = []
                     break
                 matched_parts.append(f"{feature} {operator} {threshold:.6f}")
 
-            if all_conditions_met and matched_parts:
-                return {
-                    "action": "exit",
-                    "reason": "logic_complete",
-                    "health": 1.0,
-                    "matched_exit": f"C{combo_idx + 1}: {' AND '.join(matched_parts)}",
-                }
-        return {"action": "hold", "reason": "hold", "health": 0.0}
+            if matched_parts:
+                return f"{label_prefix}{combo_idx + 1}: {' AND '.join(matched_parts)}"
+        return None
+
+    invalidation_match = _match_combo_set(snapshot.get("alpha_invalidation_combos"), "I")
+    if invalidation_match:
+        return {
+            "action": "exit",
+            "reason": "thesis_invalidated",
+            "health": -1.0,
+            "matched_exit": invalidation_match,
+        }
+
+    exit_match = _match_combo_set(snapshot.get("alpha_exit_combos"), "C")
+    if exit_match:
+        return {
+            "action": "exit",
+            "reason": "logic_complete",
+            "health": 1.0,
+            "matched_exit": exit_match,
+        }
 
     # Fallback: legacy flat conditions (each independent, OR logic)
     matched_conditions: list[str] = []
@@ -354,8 +427,8 @@ def _eval_alpha_card(position: Dict, row: pd.Series, snapshot: Dict, ret: float)
         operator = str(condition["operator"])
         threshold = float(condition["threshold"])
 
-        if feature.endswith(_VS_ENTRY_TAG):
-            base_col = feature[: -len(_VS_ENTRY_TAG)]
+        if feature.endswith(VS_ENTRY_TAG):
+            base_col = feature[: -len(VS_ENTRY_TAG)]
             value = _vs_entry_val(row, snapshot, base_col)
         else:
             value = _safe_get(row, feature)
@@ -417,12 +490,17 @@ def _eval_p1_8(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Di
         oi_5m = _safe_get(row, "oi_change_rate_5m")
         vol_autocorr = _safe_get(row, "volume_autocorr_lag5")
         oi_1h = _safe_get(row, "oi_change_rate_1h")
+        vwap_vs_entry = _vs_entry_val(row, snapshot, "vwap_deviation")
 
         c1 = (oi_5m is not None and oi_5m < 0.805410
               and vol_autocorr is not None and vol_autocorr < -0.013628)
         c3 = (oi_1h is not None and oi_1h < -0.066308)
+        # C_inv: 入场假设否定 (回测验证: thesis_inv=0.003, OOS +28%)
+        c_inv = vwap_vs_entry is not None and vwap_vs_entry > 0.003
         if c1 or c3:
             return {"action": "exit", "reason": "logic_complete", "health": 1.0}
+        if c_inv:
+            return {"action": "exit", "reason": "thesis_invalidated", "health": -1.0}
         return {"action": "hold", "reason": "hold", "health": 0.0}
 
 
@@ -442,6 +520,12 @@ def _eval_p1_11(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> D
     if (taker_pct_vs_entry is not None and taker_pct_vs_entry < -0.003398
             and vol_autocorr is not None and vol_autocorr < -0.013463):
         return {"action": "exit", "reason": "logic_complete", "health": 1.0}
+
+    # 入场假设否定 (回测验证: thesis_inv=0.003, OOS +41%, PF=1.10)
+    vwap_vs_entry = _vs_entry_val(row, snapshot, "vwap_deviation")
+    if vwap_vs_entry is not None and vwap_vs_entry > 0.003:
+        return {"action": "exit", "reason": "thesis_invalidated", "health": -1.0}
+
     return {"action": "hold", "reason": "hold", "health": 0.0}
 
 
@@ -527,9 +611,15 @@ def _eval_p1_10(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> D
         c1 = vwap_vs_entry is not None and vwap_vs_entry < -0.008
         # C2: price left the high zone
         c2 = r4h is not None and r4h < 0.50
+        # C3: 入场假设否定退出 (回测验证: thesis_inv=0.003, OOS +27%)
+        #   入场假设是"买方衰竭→回落"。如果入场后 VWAP 偏离扩大 0.3%，
+        #   说明力在增强不是消失，假设被否定 → 退出
+        c3 = vwap_vs_entry is not None and vwap_vs_entry > 0.003
 
         if c1 or c2:
             return {"action": "exit", "reason": "logic_complete", "health": 1.0}
+        if c3:
+            return {"action": "exit", "reason": "thesis_invalidated", "health": -1.0}
         return {"action": "hold", "reason": "hold", "health": 0.0}
 
     return _eval_generic(position, row, snapshot, ret)
@@ -633,6 +723,12 @@ def _eval_c1(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Dict
 
     if cond_a or cond_b or cond_c:
         return {"action": "exit", "reason": "logic_complete", "health": 1.0}
+
+    # 入场假设否定 (回测验证: thesis_inv=-0.003, OOS +1%)
+    vwap_vs_entry = _vs_entry_val(row, snapshot, "vwap_deviation")
+    if vwap_vs_entry is not None and vwap_vs_entry < -0.003:
+        return {"action": "exit", "reason": "thesis_invalidated", "health": -1.0}
+
     return {"action": "hold", "reason": "hold", "health": 0.0}
 
 
@@ -812,18 +908,26 @@ def evaluate_exit_action(
     current_return = _current_return(position, close)
     adverse = _adverse_pct(position, close)
 
-    # --- Adaptive hard stop ---
+    # --- Adaptive hard stop (direction-aware) ---
     base_stop = params.stop_pct
     _confidence = int(runtime_state.get("confidence", 2) or 2)
     _regime = str(runtime_state.get("entry_regime", "RANGE_BOUND") or "RANGE_BOUND")
     _mfe = float(runtime_state.get("mfe_pct", 0.0) or 0.0)
+    _direction = str(position.get("direction", "")).lower()
 
     _conf_mult = params.confidence_stop_multipliers.get(_confidence, 1.0)
-    _regime_mult = params.regime_stop_multipliers.get(_regime, 1.0)
+    # SHORT 用独立的 regime 乘数（做空面对的反弹特征不同于做多）
+    if _direction == "short" and hasattr(params, "regime_stop_multipliers_short"):
+        _regime_mult = params.regime_stop_multipliers_short.get(_regime, 1.0)
+    else:
+        _regime_mult = params.regime_stop_multipliers.get(_regime, 1.0)
     effective_stop = base_stop * _conf_mult * _regime_mult
 
+    # MFE 棘轮：仅在仓位已经有足够浮盈时才收紧止损
+    # 修复：MFE 必须超过阈值才触发，避免新仓位 MFE≈0 时把止损压到接近 0
     if _mfe > params.mfe_ratchet_threshold:
         ratcheted_stop = _mfe * params.mfe_ratchet_ratio
+        # 回测验证: floor_ratio=0.0 最优 — 棘轮仅在 MFE 超阈值时生效, 不设额外下限
         effective_stop = min(effective_stop, ratcheted_stop)
 
     if adverse >= effective_stop:

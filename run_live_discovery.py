@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--symbol", default="BTCUSDT", help="Trading symbol, default BTCUSDT")
     parser.add_argument("--interval", type=float, default=6.0, help="Watch mode interval in hours")
-    parser.add_argument("--data-days", type=int, default=90, help="Lookback window in days")
+    parser.add_argument("--data-days", type=int, default=365, help="Lookback window in days")
     parser.add_argument(
         "--skip-rest-sync",
         action="store_true",
@@ -80,6 +80,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--top-n", type=int, default=20, help="Top-N features for atom mining")
     parser.add_argument("--min-triggers", type=int, default=30, help="Minimum rule trigger count")
+    parser.add_argument(
+        "--direction",
+        choices=["long", "short", "both"],
+        default="both",
+        help="Discovery direction filter: long, short, or both (default: both)",
+    )
     return parser.parse_args()
 
 
@@ -191,6 +197,7 @@ def run_once(args: argparse.Namespace) -> int:
         symbol=symbol,
         top_n=args.top_n,
         min_triggers=args.min_triggers,
+        direction_filter=args.direction,
     )
     cards = engine.run_once(data_days=args.data_days)
     if cards:
@@ -215,6 +222,7 @@ def run_once(args: argparse.Namespace) -> int:
 
 
 _DISCOVERY_HEARTBEAT = ROOT / "monitor" / "output" / "discovery_heartbeat.json"
+_DISCOVERY_HEARTBEAT_INTERVAL_S = 60.0
 
 
 def _set_discovery_alive(alive: bool) -> None:
@@ -233,6 +241,16 @@ def _set_discovery_alive(alive: bool) -> None:
         tmp.replace(_DISCOVERY_HEARTBEAT)
     except Exception as exc:
         logger.warning("[DISCOVERY] Could not write discovery_heartbeat.json: %s", exc)
+
+
+def _sleep_with_heartbeat(total_seconds: float) -> None:
+    """Sleep in short chunks so runtime status can observe fresh discovery heartbeats."""
+    remaining = max(0.0, float(total_seconds))
+    while remaining > 0:
+        _set_discovery_alive(True)
+        chunk = min(_DISCOVERY_HEARTBEAT_INTERVAL_S, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
 
 
 def main() -> None:
@@ -279,7 +297,7 @@ def main() -> None:
             time.strftime("%H:%M:%S", time.localtime(next_run)),
             args.interval,
         )
-        time.sleep(interval_seconds)
+        _sleep_with_heartbeat(interval_seconds)
 
 
 if __name__ == "__main__":

@@ -122,10 +122,11 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         family="A2-29",
         label="high_proximity_wide_spread_short",
         directions=("short",),
-        execution_directions=("short",),
+        execution_directions=(),  # REMOVED: live WR=30% (OOS=66.7%), spread confirmation non-directional
         notes=(
-            "Approved alpha card: dist_to_24h_high > -0.009746 + "
-            "spread_vs_ma20 > 1.688, with card Top-3 exit combos."
+            "SUSPENDED 2026-04-10: 20 trades, WR=30%, net=-1.44%. "
+            "spread_vs_ma20 confirmation lacks directional edge. "
+            "Original: dist_to_24h_high > -0.009746 + spread_vs_ma20 > 1.688."
         ),
         uses_card_exit=True,
         oos_win_rate=72.0,
@@ -170,6 +171,16 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         notes="RANGE_BOUND->QUIET_TREND phase transition. Early trend entry.",
         oos_win_rate=None,
         mechanism_type="regime_transition",
+    ),
+    LiveStrategySpec(
+        phase="P1",
+        family="OA-1",
+        label="oi_accumulation_long",
+        directions=("long",),
+        execution_directions=("long",),
+        notes="OI accumulation LONG: TREND_UP + OI growth + buyer dominant. "
+              "OOS: WR=75% n=8 PF=8.91 (MA5 smoothed decay exit). A3-OI mirror.",
+        mechanism_type="oi_accumulation_long",
     ),
 )
 

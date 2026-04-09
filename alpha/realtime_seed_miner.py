@@ -22,6 +22,48 @@ _SELLER_IMPULSE_CONFIRM_FEATURES = [
     "direction_autocorr",
 ]
 
+# Mirror of seller_impulse for LONG direction.
+# Physics: buyers exhaust sellers → price rises → mechanism decays when
+# selling pressure returns (taker_buy_sell_ratio drops, sell_notional rises).
+_BUYER_IMPULSE_CONFIRM_FEATURES = [
+    "taker_buy_sell_ratio",      # high = buyers dominating (entry confirm)
+    "volume_vs_ma20",            # above-average volume = conviction behind buying
+    "volume_acceleration",       # positive = buying pressure still building
+    "spread_vs_ma20",            # wide spread = impact, makers retreating
+    "large_trade_buy_ratio",     # high = large orders are buying
+    "direction_net_1m",          # positive = net buyer flow
+    "sell_notional_share_1m",    # LOW = buyers dominating notional
+    "trade_burst_index",         # high burst + buyer flow = aggressive buying
+    "direction_autocorr",        # high = directional persistence (trend)
+]
+
+_MM_REBALANCE_CONFIRM_FEATURES = [
+    "spread_vs_ma20",
+    "kyle_lambda",
+    "quote_imbalance",
+    "bid_depth_ratio",
+    "spread_anomaly",
+    "direction_autocorr",
+]
+
+_LIQUIDATION_CONFIRM_FEATURES = [
+    "btc_liq_net_pressure",
+    "total_liq_usd_5m",
+    "liq_size_p90_5m",
+    "taker_buy_sell_ratio",
+    "direction_net_1m",
+    "direction_autocorr",
+]
+
+_FUNDING_DIVERGENCE_CONFIRM_FEATURES = [
+    "oi_change_rate_5m",
+    "oi_change_rate_1h",
+    "mark_basis",
+    "mark_basis_ma10",
+    "rt_funding_rate",
+    "ls_ratio_change_5m",
+]
+
 
 @dataclass(frozen=True)
 class SeedSpec:
@@ -29,18 +71,195 @@ class SeedSpec:
     operator: str
     direction: str
     quantiles: tuple[int, ...]
+    mechanism_type: str = "seller_impulse"
+    confirm_features: tuple[str, ...] = ()
+    group: str = ""
     cooldown: int = 60
     min_is_n: int = 15
     min_oos_n: int = 20
 
 
-_SELLER_IMPULSE_SPECS: tuple[SeedSpec, ...] = (
-    SeedSpec("direction_net_1m", "<", "short", (3, 5, 7, 10, 15, 20), cooldown=30),
-    SeedSpec("sell_notional_share_1m", ">", "short", (80, 85, 90, 93, 95), cooldown=30),
-    SeedSpec("large_trade_buy_ratio", "<", "short", (5, 10, 15, 20, 25), cooldown=30),
-    SeedSpec("taker_buy_sell_ratio", "<", "short", (5, 10, 15, 20, 25), cooldown=45),
-    SeedSpec("trade_burst_index", ">", "short", (75, 80, 85, 90, 95), cooldown=30),
-    SeedSpec("volume_vs_ma20", ">", "short", (75, 80, 85, 90, 95), cooldown=45),
+@dataclass(frozen=True)
+class MultiConditionSeedSpec:
+    """Multi-condition seed spec (max 3 conditions).
+
+    For signals that need multiple features + context simultaneously.
+    Bypasses single-feature atom -> combo_scanner pipeline.
+    """
+    conditions: tuple[tuple[str, str, tuple[int, ...]], ...]  # (feature, op, quantiles)
+    direction: str
+    mechanism_type: str
+    context: str = ""  # "TREND_UP" / "TREND_DOWN" / ""
+    confirm_features: tuple[str, ...] = ()
+    group: str = ""
+    cooldown: int = 60
+    min_is_n: int = 15
+    min_oos_n: int = 10
+
+
+_REALTIME_SEED_SPECS: tuple[SeedSpec, ...] = (
+    SeedSpec(
+        "direction_net_1m", "<", "short", (3, 5, 7, 10, 15, 20),
+        mechanism_type="seller_impulse",
+        confirm_features=tuple(_SELLER_IMPULSE_CONFIRM_FEATURES),
+        group="seller_impulse_flow",
+        cooldown=30,
+    ),
+    SeedSpec(
+        "sell_notional_share_1m", ">", "short", (80, 85, 90, 93, 95),
+        mechanism_type="seller_impulse",
+        confirm_features=tuple(_SELLER_IMPULSE_CONFIRM_FEATURES),
+        group="seller_impulse_flow",
+        cooldown=30,
+    ),
+    SeedSpec(
+        "large_trade_buy_ratio", "<", "short", (5, 10, 15, 20, 25),
+        mechanism_type="seller_impulse",
+        confirm_features=tuple(_SELLER_IMPULSE_CONFIRM_FEATURES),
+        group="seller_impulse_flow",
+        cooldown=30,
+    ),
+    SeedSpec(
+        "taker_buy_sell_ratio", "<", "short", (5, 10, 15, 20, 25),
+        mechanism_type="seller_impulse",
+        confirm_features=tuple(_SELLER_IMPULSE_CONFIRM_FEATURES),
+        group="seller_impulse_flow",
+        cooldown=45,
+    ),
+    SeedSpec(
+        "trade_burst_index", ">", "short", (75, 80, 85, 90, 95),
+        mechanism_type="seller_impulse",
+        confirm_features=tuple(_SELLER_IMPULSE_CONFIRM_FEATURES),
+        group="seller_impulse_flow",
+        cooldown=30,
+    ),
+    SeedSpec(
+        "volume_vs_ma20", ">", "short", (75, 80, 85, 90, 95),
+        mechanism_type="seller_impulse",
+        confirm_features=tuple(_SELLER_IMPULSE_CONFIRM_FEATURES),
+        group="seller_impulse_flow",
+        cooldown=45,
+    ),
+
+    # ── buyer_impulse: LONG mirrors of seller_impulse ────────────────────
+    # Physics: large active buy orders flood the book, eating through asks.
+    # Spread widens as market makers retreat. When buying pressure fades
+    # and taker_buy_sell_ratio drops, the impulse is spent → exit.
+    SeedSpec(
+        "direction_net_1m", ">", "long", (80, 85, 90, 93, 95, 97),
+        mechanism_type="buyer_impulse",
+        confirm_features=tuple(_BUYER_IMPULSE_CONFIRM_FEATURES),
+        group="buyer_impulse_flow",
+        cooldown=30,
+    ),
+    SeedSpec(
+        "sell_notional_share_1m", "<", "long", (3, 5, 7, 10, 15, 20),
+        mechanism_type="buyer_impulse",
+        confirm_features=tuple(_BUYER_IMPULSE_CONFIRM_FEATURES),
+        group="buyer_impulse_flow",
+        cooldown=30,
+    ),
+    SeedSpec(
+        "large_trade_buy_ratio", ">", "long", (75, 80, 85, 90, 95),
+        mechanism_type="buyer_impulse",
+        confirm_features=tuple(_BUYER_IMPULSE_CONFIRM_FEATURES),
+        group="buyer_impulse_flow",
+        cooldown=30,
+    ),
+    SeedSpec(
+        "taker_buy_sell_ratio", ">", "long", (75, 80, 85, 90, 95),
+        mechanism_type="buyer_impulse",
+        confirm_features=tuple(_BUYER_IMPULSE_CONFIRM_FEATURES),
+        group="buyer_impulse_flow",
+        cooldown=45,
+    ),
+    SeedSpec(
+        "trade_burst_index", ">", "long", (75, 80, 85, 90, 95),
+        mechanism_type="buyer_impulse",
+        confirm_features=tuple(_BUYER_IMPULSE_CONFIRM_FEATURES),
+        group="buyer_impulse_flow",
+        cooldown=30,
+    ),
+    SeedSpec(
+        "volume_vs_ma20", ">", "long", (75, 80, 85, 90, 95),
+        mechanism_type="buyer_impulse",
+        confirm_features=tuple(_BUYER_IMPULSE_CONFIRM_FEATURES),
+        group="buyer_impulse_flow",
+        cooldown=45,
+    ),
+
+    SeedSpec(
+        "quote_imbalance", ">", "long", (80, 85, 90, 93, 95),
+        mechanism_type="mm_rebalance",
+        confirm_features=tuple(_MM_REBALANCE_CONFIRM_FEATURES),
+        group="mm_rebalance_book",
+        cooldown=20,
+    ),
+    SeedSpec(
+        "quote_imbalance", "<", "short", (5, 10, 15, 20),
+        mechanism_type="mm_rebalance",
+        confirm_features=tuple(_MM_REBALANCE_CONFIRM_FEATURES),
+        group="mm_rebalance_book",
+        cooldown=20,
+    ),
+    SeedSpec(
+        "bid_depth_ratio", ">", "long", (80, 85, 90, 93, 95),
+        mechanism_type="mm_rebalance",
+        confirm_features=tuple(_MM_REBALANCE_CONFIRM_FEATURES),
+        group="mm_rebalance_book",
+        cooldown=20,
+    ),
+    SeedSpec(
+        "bid_depth_ratio", "<", "short", (5, 10, 15, 20),
+        mechanism_type="mm_rebalance",
+        confirm_features=tuple(_MM_REBALANCE_CONFIRM_FEATURES),
+        group="mm_rebalance_book",
+        cooldown=20,
+    ),
+    SeedSpec(
+        "btc_liq_net_pressure", ">", "short", (75, 80, 85, 90, 95),
+        mechanism_type="seller_impulse",
+        confirm_features=tuple(_LIQUIDATION_CONFIRM_FEATURES),
+        group="liq_pressure",
+        cooldown=25,
+    ),
+    SeedSpec(
+        "btc_liq_net_pressure", "<", "long", (5, 10, 15, 20, 25),
+        mechanism_type="volume_climax_reversal",
+        confirm_features=tuple(_LIQUIDATION_CONFIRM_FEATURES),
+        group="liq_pressure",
+        cooldown=25,
+    ),
+    SeedSpec(
+        "mark_basis_ma10", ">", "short", (75, 80, 85, 90, 95),
+        mechanism_type="funding_divergence",
+        confirm_features=tuple(_FUNDING_DIVERGENCE_CONFIRM_FEATURES),
+        group="basis_divergence",
+        cooldown=40,
+    ),
+    SeedSpec(
+        "mark_basis_ma10", "<", "long", (5, 10, 15, 20, 25),
+        mechanism_type="funding_divergence",
+        confirm_features=tuple(_FUNDING_DIVERGENCE_CONFIRM_FEATURES),
+        group="basis_divergence",
+        cooldown=40,
+    ),
+)
+
+
+_MULTI_CONDITION_SPECS: tuple[MultiConditionSeedSpec, ...] = (
+    MultiConditionSeedSpec(
+        conditions=(
+            ("oi_change_rate_5m", ">", (60, 70, 80, 85, 90)),
+            ("taker_buy_sell_ratio", ">", (50, 55, 60, 65, 70)),
+            ("volume_vs_ma20", ">", (55, 60, 65, 70, 75)),
+        ),
+        direction="long",
+        mechanism_type="oi_accumulation_long",
+        context="TREND_UP",
+        group="oi_accumulation",
+        cooldown=60,
+    ),
 )
 
 
@@ -68,7 +287,7 @@ class RealtimeSeedMiner:
             return []
 
         candidates: list[dict] = []
-        for spec in _SELLER_IMPULSE_SPECS:
+        for spec in _REALTIME_SEED_SPECS:
             if spec.feature not in df.columns:
                 continue
 
@@ -86,7 +305,7 @@ class RealtimeSeedMiner:
                     candidates.append(best_seed)
 
         if not candidates:
-            logger.info("[RT-SEED] 未找到满足条件的 seller_impulse 种子")
+            logger.info("[RT-SEED] No seeds found matching thresholds")
             return []
 
         candidates.sort(
@@ -100,9 +319,13 @@ class RealtimeSeedMiner:
         )
 
         deduped: list[dict] = []
-        seen_keys: set[tuple[str, int]] = set()
+        seen_keys: set[tuple[str, int, str]] = set()
         for item in candidates:
-            key = (str(item["feature"]), int(item["horizon"]))
+            key = (
+                str(item["feature"]),
+                int(item["horizon"]),
+                str(item.get("direction", "")),
+            )
             if key in seen_keys:
                 continue
             seen_keys.add(key)
@@ -114,7 +337,7 @@ class RealtimeSeedMiner:
             if len(deduped) >= self.top_k:
                 break
 
-        logger.info("[RT-SEED] 保留 %d 个实时卖压种子", len(deduped))
+        logger.info("[RT-SEED] Retained %d realtime seeds (long+short)", len(deduped))
         for seed in deduped:
             stats = seed.get("seed_stats", {})
             logger.info(
@@ -205,9 +428,9 @@ class RealtimeSeedMiner:
                 "threshold": threshold,
                 "horizon": horizon,
                 "direction": spec.direction,
-                "mechanism_type": "seller_impulse",
-                "confirm_features": list(_SELLER_IMPULSE_CONFIRM_FEATURES),
-                "group": f"seller_impulse_{spec.feature}",
+                "mechanism_type": spec.mechanism_type,
+                "confirm_features": list(spec.confirm_features or _SELLER_IMPULSE_CONFIRM_FEATURES),
+                "group": spec.group or f"{spec.mechanism_type}_{spec.feature}",
                 "cooldown": spec.cooldown,
                 "origin": "realtime_seed_miner",
                 "seed_stats": {

@@ -1,22 +1,22 @@
-﻿"""
-瀹炴椂淇″彿鐩戞帶鍏ュ彛 (Run Monitor)
+"""
+实时信号监控入口 (Run Monitor)
 
-娴佺▼:
-  1. 鐑惎鍔? 浠?Parquet 鍔犺浇鏈€杩?N 澶╁巻鍙叉暟鎹紝濉弧 3000 鏍规粴鍔ㄧ獥鍙?
-  2. 鍚姩 REST 杞鍗忕▼: 姣?5 鍒嗛挓鍒锋柊 OI / 澶氱┖姣旓紝姣?8 灏忔椂鍒锋柊璧勯噾璐圭巼
-  3. 杩炴帴 Binance Futures WebSocket: btcusdt@kline_1m
-  4. 姣忔敹鍒颁竴鏍归棴鍚?K 绾?
-       鈫?update 鐗瑰緛寮曟搸
-       鈫?杩愯 Phase 1 + Phase 2 淇″彿妫€娴?
-       鈫?鎶ヨ杈撳嚭
-  5. 鑷姩閲嶈繛锛堟渶澶?reconnect_limit 娆★紝姣忔閫€閬?reconnect_delay 绉掞級
+流程:
+  1. 热启动：从 Parquet 加载最近 N 天历史数据，填满 3000 根滚动窗口
+  2. 启动 REST 轮询协程: 每 5 分钟刷新 OI / 多空比，每 8 小时刷新资金费率
+  3. 连接 Binance Futures WebSocket: btcusdt@kline_1m
+  4. 每次收到一根闭合 K 线:
+       → update 特征引擎
+       → 运行 Phase 1 + Phase 2 信号检测
+       → 报告输出
+  5. 自动重连（最多 reconnect_limit 次，每次退避 reconnect_delay 秒）
 
-鐢ㄦ硶:
+用法:
   python run_monitor.py
   python run_monitor.py --storage data/storage --warmup-days 3
-  python run_monitor.py --no-warmup   # 璺宠繃鐑惎鍔紙娴嬭瘯鐢級
+  python run_monitor.py --no-warmup   # 跳过热启动（测试用）
 
-渚濊禆:
+依赖:
   pip install websockets
 """
 
@@ -37,7 +37,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-# 璁?import 鑳芥壘鍒伴」鐩牴鐩綍
+# 让 import 能找到项目根目录
 sys.path.insert(0, str(Path(__file__).parent))
 from runtime_bootstrap import bootstrap_runtime
 bootstrap_runtime()
@@ -79,7 +79,7 @@ def _resolve_project_path(value: str | Path) -> Path:
         return path
     return PROJECT_ROOT / path
 
-# system_state helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ──────────────────── system_state helpers ────────────────────
 try:
     from ui.strategy_descriptions import STRATEGY_ZH as _STRATEGY_ZH
 except Exception:
@@ -87,6 +87,7 @@ except Exception:
 
 _STATE_PATH = PROJECT_ROOT / "monitor" / "output" / "system_state.json"
 _FORCE_STATE_PATH = PROJECT_ROOT / "monitor" / "output" / "force_library_state.json"
+_DISCOVERY_HEARTBEAT_STALE_S = 3 * 60
 
 # Lookup: family -> LiveStrategySpec (for oos_win_rate + mechanism_type in strategy payload)
 _LIVE_SPEC_BY_FAMILY: dict = {spec.family: spec for spec in LIVE_STRATEGIES}
@@ -175,7 +176,12 @@ def _read_discovery_alive() -> bool:
     """Read discovery heartbeat without letting JSON/IO issues break monitor writes."""
     try:
         hb = json.loads(_DISCOVERY_HEARTBEAT.read_text(encoding="utf-8"))
-        return bool(hb.get("alive", False))
+        if not bool(hb.get("alive", False)):
+            return False
+        updated = hb.get("updated")
+        if updated is None:
+            return True
+        return (time.time() - float(updated)) <= _DISCOVERY_HEARTBEAT_STALE_S
     except Exception:
         return False
 
@@ -459,8 +465,8 @@ def setup_logging(log_dir: str | Path) -> None:
         force=True,
     )
 
-# 鈹€鈹€ 甯搁噺 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-# 甯佸畨WebSocket绔偣鍒楄〃锛堣嚜鍔ㄥ垏鎹㈠埌鍙敤绔偣锛?
+# ──────────────────── 常量 (Constants) ────────────────────
+# 币安WebSocket端点列表（自动切换到可用端点）
 WEBSOCKET_ENDPOINTS = [
     "wss://fstream.binance.com/ws/btcusdt@kline_1m",
     "wss://fstream1.binance.com/ws/btcusdt@kline_1m",
@@ -470,8 +476,8 @@ WEBSOCKET_ENDPOINTS = [
 REST_BASE = "https://fapi.binance.com"
 
 HEARTBEAT_EVERY = 60  # 姣?N 鏍?K 绾挎墦鍗板績璺?
-RECONNECT_DELAY = 5  # 鏂嚎鍚庣瓑寰呯鏁帮紙鎸囨暟閫€閬?脳 2锛?
-RECONNECT_LIMIT = 20  # 鏈€澶氶噸杩炴鏁?
+RECONNECT_DELAY = 5  # 断线后等待秒数（指数退避 × 2）
+RECONNECT_LIMIT = 20  # 最多重连次数
 WS_HEARTBEAT_S = 30
 WS_CONNECT_TIMEOUT_S = 20
 WS_IDLE_TIMEOUT_S = 180
@@ -547,7 +553,7 @@ def _build_order_manager_with_timeout(timeout_s: float = 20.0) -> OrderManager |
     return manager if isinstance(manager, OrderManager) else None
 
 
-# 鈹€鈹€ REST 杈呭姪鏁版嵁杞 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ──────────────────── REST 辅助数据 ────────────────────
 
 
 def _fetch_json_sync(url: str, params: dict | None = None) -> dict:
@@ -569,7 +575,7 @@ async def _fetch_json(url: str, params: dict | None = None) -> dict:
 async def poll_side_data(
     engine: LiveFeatureEngine,
     interval_oi: int = 60,  # was 300; 4/6 alpha rules depend on OI freshness
-    interval_fr: int = 28800,
+    interval_fr: int = 300,  # keep funding_rate inside the 10min freshness window
 ) -> None:
     """
     鍚庡彴鍗忕▼锛氬畾鏈熶粠 Binance REST API 鎷夊彇杈呭姪鏁版嵁骞舵洿鏂扮壒寰佸紩鎿庣紦瀛樸€?
@@ -635,7 +641,7 @@ async def poll_side_data(
         await asyncio.sleep(interval_oi)
 
 
-# 鈹€鈹€ WebSocket 涓诲惊鐜?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ──────────────────── WebSocket 主循环 ────────────────────
 
 
 async def run_websocket(
@@ -802,7 +808,7 @@ async def run_websocket(
     logger.error(f"Reached reconnect limit ({RECONNECT_LIMIT}); monitor exiting")
 
 
-# 鈹€鈹€ 涓诲嚱鏁?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ──────────────────── 主函数 (Main) ────────────────────
 
 
 async def main():
@@ -814,8 +820,8 @@ async def main():
     print()
     print("=" * 60)
     print("  BTC/USDT 瀹炴椂淇″彿鐩戞帶")
-    print(f"  鍚姩鏃堕棿: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    print(f"  瀛樺偍璺緞: {storage_path}")
+    print(f"  启动时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"  存储路径: {storage_path}")
     print(f"  Alpha 鍐峰嵈鏈? {args.alpha_cooldown} bars")
     print(
         "  P2 startup guard: "
@@ -918,7 +924,16 @@ async def main():
     from monitor.decision_logger import DecisionLogger
     decision_logger = DecisionLogger(log_dir=args.log_dir)
     execution_engine.set_decision_logger(decision_logger)
-    logger.info("[INIT] SignalHealth + AdaptiveCooldown + DecisionLogger wired")
+
+    # Wire conviction engine (adaptive brain) — Phase 0: shadow mode only
+    from monitor.conviction_engine import ConvictionEngine
+    conviction_engine = ConvictionEngine(shadow_mode=True)
+    execution_engine.set_conviction_engine(conviction_engine)
+    logger.info(
+        "[INIT] ConvictionEngine wired (shadow_mode=True): %s",
+        conviction_engine.status_summary(),
+    )
+    logger.info("[INIT] SignalHealth + AdaptiveCooldown + DecisionLogger + Brain wired")
 
     runtime_state: dict[str, float | int | bool | None] = {
         "price": _last_price or 0.0,
@@ -930,7 +945,7 @@ async def main():
     if execution_engine.order_manager is not None:
         try:
             _last_balance = execution_engine.order_manager.get_usdt_balance()
-            logger.info(f"[INIT] 褰撳墠浣欓: {_last_balance:.2f} USDT")
+            logger.info(f"[INIT] 当前余额: {_last_balance:.2f} USDT")
             prev_state = read_json_file(_STATE_PATH, {})
             prev_state["balance"] = _last_balance
             write_json_atomic(_STATE_PATH, prev_state, ensure_ascii=False, indent=2)

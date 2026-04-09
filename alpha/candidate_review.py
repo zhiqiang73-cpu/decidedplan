@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from alpha.product_policy import is_product_alpha_family
+
 # 进入 pending 的自动筛选闸门:
 # 1. 入场要能赚钱，而且 OOS 次数不能太少
 # 2. 出场要能说明“力在消退”，而且触发次数不能只是个位数
@@ -71,7 +73,7 @@ def _safe_int(value: Any) -> int:
 
 def _has_force_decay_exit(exit_info: dict[str, Any]) -> bool:
     exit_method = str(exit_info.get("exit_method", "") or "")
-    if exit_method == "causal":
+    if exit_method in {"causal", "force_decay_vs_entry"} and bool(exit_info.get("snapshot_required")):
         return True
 
     top3 = exit_info.get("top3")
@@ -85,7 +87,31 @@ def _has_force_decay_exit(exit_info: dict[str, Any]) -> bool:
         if not isinstance(conditions, list):
             continue
         for cond in conditions:
-            if isinstance(cond, dict) and cond.get("source") == "causal":
+            if not isinstance(cond, dict):
+                continue
+            feature = str(cond.get("feature", "") or "")
+            source = str(cond.get("source", "") or "")
+            if feature.endswith("_vs_entry") or source in {"causal", "force_decay"}:
+                return True
+    return False
+
+
+def _has_thesis_invalidation(exit_info: dict[str, Any]) -> bool:
+    invalidation = exit_info.get("invalidation")
+    if not isinstance(invalidation, list) or not invalidation:
+        return False
+    for combo in invalidation:
+        if not isinstance(combo, dict):
+            continue
+        conditions = combo.get("conditions")
+        if not isinstance(conditions, list):
+            continue
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            feature = str(cond.get("feature", "") or "")
+            source = str(cond.get("source", "") or "")
+            if feature.endswith("_vs_entry") or source == "thesis_invalidation":
                 return True
     return False
 
@@ -117,6 +143,12 @@ def _direction_reason(card: dict[str, Any]) -> str | None:
 
 
 def _entry_reasons(card: dict[str, Any], reasons: list[str]) -> None:
+    family = str(card.get("family") or "").strip()
+    if not family:
+        reasons.append("缺少可落 live family，还是研究半成品")
+    elif not is_product_alpha_family(family):
+        reasons.append(f"family 还没进入 live 成品名单: {family}")
+
     validation = card.get("validation", {})
     if card.get("status") == "auto_rejected" or validation.get("passed") is False:
         issues = list(validation.get("issues") or [])
@@ -163,6 +195,18 @@ def _exit_reasons(card: dict[str, Any], reasons: list[str]) -> None:
 
     if not _has_force_decay_exit(exit_info):
         reasons.append("出场还没有落到明确的力消退条件")
+
+    if not bool(exit_info.get("snapshot_required")):
+        reasons.append("鍑哄満杩樻病鏄庣‘渚濊禆 entry snapshot / vs_entry")
+    if not _has_thesis_invalidation(exit_info):
+        reasons.append("娌℃湁 thesis invalidation 閫€鍑猴紝鍋囪澶辫触杩樻病琚攣瀹?")
+
+    stop_pct = _safe_float(card.get("stop_pct"))
+    if stop_pct <= 0:
+        reasons.append("娌℃湁鏈哄埗鍖栨鎹熼槇鍊?stop_pct")
+    stop_logic = card.get("stop_logic")
+    if not isinstance(stop_logic, dict) or str(stop_logic.get("type", "") or "") != "mechanism_hard_stop":
+        reasons.append("姝㈡崯杩樻病鍜屾満鍒跺け鏁堥€昏緫缁熶竴")
 
     exit_pf = _safe_float(
         exit_info.get("earliest_pf")

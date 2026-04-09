@@ -104,6 +104,39 @@ def _extract_top3_exit_combos(exit_payload: dict | None) -> list[list[dict]]:
     return combos
 
 
+def _extract_combo_groups(exit_payload: dict | None, key: str) -> list[list[dict]]:
+    if not isinstance(exit_payload, dict):
+        return []
+
+    payload = exit_payload.get(key)
+    if not isinstance(payload, list) or not payload:
+        return []
+
+    combos: list[list[dict]] = []
+    for entry in payload:
+        conditions = entry.get("conditions", []) if isinstance(entry, dict) else []
+        if not isinstance(conditions, list) or not conditions:
+            continue
+        combo: list[dict] = []
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            feature = str(cond.get("feature", "")).strip()
+            operator = str(cond.get("operator") or cond.get("op") or "").strip()
+            threshold = _safe_float(cond.get("threshold"))
+            if feature and operator in {"<", ">"} and threshold is not None:
+                combo.append(
+                    {
+                        "feature": feature,
+                        "operator": operator,
+                        "threshold": threshold,
+                    }
+                )
+        if combo:
+            combos.append(combo)
+    return combos
+
+
 def _is_enabled_approved_card(card: dict) -> bool:
     """Only load cards that are explicitly approved for live execution.
 
@@ -205,6 +238,7 @@ def _build_alpha_rules_from_approved(approved: list[dict]) -> list[dict]:
 
             # Extract Top-3 exit combos from ExitConditionMiner output
             exit_combos = _extract_top3_exit_combos(card.get("exit"))
+            invalidation_combos = _extract_combo_groups(card.get("exit"), "invalidation")
             # Backward compat: single flat condition for legacy code paths
             exit_condition = _normalize_exit_condition(card.get("exit"))
 
@@ -216,7 +250,7 @@ def _build_alpha_rules_from_approved(approved: list[dict]) -> list[dict]:
                 {
                     "name": card_id,
                     "family": family,
-                    "mechanism_type": get_mechanism_for_family(family),
+                    "mechanism_type": str(card.get("mechanism_type") or get_mechanism_for_family(family)),
                     "group": group,
                     "feature": entry["feature"],
                     "op": entry["operator"],
@@ -226,6 +260,7 @@ def _build_alpha_rules_from_approved(approved: list[dict]) -> list[dict]:
                     "combo_conditions": combo_conditions,
                     "exit": exit_condition,
                     "exit_combos": exit_combos,
+                    "invalidation_combos": invalidation_combos,
                     "exit_params": dict(card.get("exit_params") or {})
                     if isinstance(card.get("exit_params"), dict)
                     else None,
@@ -347,6 +382,25 @@ class AlphaRuleChecker:
                 logger.debug("[Alpha] %s skipped: confidence=%d < 2", name, confidence)
                 continue
 
+            # ── 高点新鲜度物理确认（A2 做空专用）──────────────────────
+            # 物理逻辑: A2 做空假设"价格在高位分发"，但需要区分：
+            #   - 真正分发: 24h high 最近不再被刷新（价格停滞在顶部）
+            #   - 趋势新高: 24h high 仍在被不断刷新（趋势还在加速）
+            # 后者做空会被趋势碾过。
+            if family.startswith("A2") and direction == "short":
+                _dist_high = _safe_get(row, "dist_to_24h_high", default=None)
+                _close_slope = _safe_get(row, "close_slope_20", default=None)
+                # 如果 close_slope_20 可用且为正（价格还在涨），必须更严格
+                if _close_slope is not None and _close_slope > 0:
+                    # 价格仍在上涨 + 距高点很近 = 趋势新高，不是分发
+                    if _dist_high is not None and _dist_high > -0.003:
+                        logger.info(
+                            "[Alpha] %s A2 SHORT blocked: uptrend (slope=%.4f) + "
+                            "near new high (dist=%.4f) = not distribution",
+                            name, _close_slope, _dist_high,
+                        )
+                        continue
+
             label = "HIGH" if confidence >= 3 else "MEDIUM"
             self._last_trigger[name] = self._bar_count
             confirms_str = ", ".join(confirms) if confirms else "none"
@@ -368,6 +422,7 @@ class AlphaRuleChecker:
                 "confidence_label": label,
                 "alpha_exit_conditions": [rule["exit"]] if rule.get("exit") else [],
                 "alpha_exit_combos": list(rule.get("exit_combos") or []),
+                "alpha_invalidation_combos": list(rule.get("invalidation_combos") or []),
                 "alpha_exit_params": dict(rule.get("exit_params") or {})
                 if isinstance(rule.get("exit_params"), dict)
                 else None,
@@ -399,20 +454,70 @@ class AlphaRuleChecker:
 
     def _check_physical_confirms(self, row: pd.Series, direction: str) -> list[str]:
         confirms: list[str] = []
+
+        def _add(label: str) -> None:
+            if label not in confirms:
+                confirms.append(label)
+
         volume_ma = _safe_get(row, "volume_vs_ma20", default=0.0)
         taker_ratio = _safe_get(row, "taker_buy_sell_ratio", default=1.0)
         oi_change = _safe_get(row, "oi_change_rate_5m", default=None)
+        quote_imbalance = _safe_get(row, "quote_imbalance", default=None)
+        bid_depth_ratio = _safe_get(row, "bid_depth_ratio", default=None)
+        spread_anomaly = _safe_get(row, "spread_anomaly", default=None)
+        large_trade_buy_ratio = _safe_get(row, "large_trade_buy_ratio", default=None)
+        direction_net = _safe_get(row, "direction_net_1m", default=None)
+        direction_autocorr = _safe_get(row, "direction_autocorr", default=None)
+        liq_pressure = _safe_get(row, "btc_liq_net_pressure", default=None)
+        mark_basis_ma10 = _safe_get(row, "mark_basis_ma10", default=None)
+        rt_funding_rate = _safe_get(row, "rt_funding_rate", default=None)
 
         if direction == "short":
             if volume_ma >= 1.0 and taker_ratio < 1.0:
-                confirms.append("volume_confirm")
+                _add("volume_confirm")
             if oi_change is not None and oi_change < 0:
-                confirms.append("oi_confirm")
+                _add("oi_confirm")
+            if quote_imbalance is not None and quote_imbalance < -0.05:
+                _add("book_confirm")
+            elif bid_depth_ratio is not None and bid_depth_ratio < 0.48:
+                _add("book_confirm")
+            if (
+                (direction_net is not None and direction_net < 0)
+                or (large_trade_buy_ratio is not None and large_trade_buy_ratio < 0.45)
+            ) and (direction_autocorr is None or direction_autocorr <= 0):
+                _add("flow_confirm")
+            if liq_pressure is not None and liq_pressure > 0.05:
+                _add("liq_confirm")
+            if (
+                (mark_basis_ma10 is not None and mark_basis_ma10 > 0.0 and (rt_funding_rate is None or rt_funding_rate >= 0.0))
+                or (rt_funding_rate is not None and rt_funding_rate > 0.00005)
+            ):
+                _add("basis_confirm")
+            if spread_anomaly is not None and spread_anomaly > 0.10:
+                _add("stress_confirm")
         elif direction == "long":
             if volume_ma >= 1.0 and taker_ratio > 1.0:
-                confirms.append("volume_confirm")
+                _add("volume_confirm")
             if oi_change is not None and oi_change > 0:
-                confirms.append("oi_confirm")
+                _add("oi_confirm")
+            if quote_imbalance is not None and quote_imbalance > 0.05:
+                _add("book_confirm")
+            elif bid_depth_ratio is not None and bid_depth_ratio > 0.52:
+                _add("book_confirm")
+            if (
+                (direction_net is not None and direction_net > 0)
+                or (large_trade_buy_ratio is not None and large_trade_buy_ratio > 0.55)
+            ) and (direction_autocorr is None or direction_autocorr >= 0):
+                _add("flow_confirm")
+            if liq_pressure is not None and liq_pressure < -0.05:
+                _add("liq_confirm")
+            if (
+                (mark_basis_ma10 is not None and mark_basis_ma10 < 0.0 and (rt_funding_rate is None or rt_funding_rate <= 0.0))
+                or (rt_funding_rate is not None and rt_funding_rate < -0.00005)
+            ):
+                _add("basis_confirm")
+            if spread_anomaly is not None and spread_anomaly > 0.10:
+                _add("stress_confirm")
 
         return confirms
 

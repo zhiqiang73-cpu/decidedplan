@@ -1,0 +1,37 @@
+{
+  "mfe_floor|P1-10": {
+    "mfe_floor_ratio": 0.0,
+    "avg_net": -0.034,
+    "pf": 0.82,
+    "n": 246,
+    "win_rate": 49.2
+  },
+  "mfe_floor|P1-8": {
+    "mfe_floor_ratio": 0.0,
+    "avg_net": -0.0527,
+    "pf": 0.79,
+    "n": 246,
+    "win_rate": 63.0
+  },
+  "mfe_floor|P1-11": {
+    "mfe_floor_ratio": 0.0,
+    "avg_net": 0.0225,
+    "pf": 1.1,
+    "n": 247,
+    "win_rate": 63.2
+  },
+  "r4h_guard": {
+    "r4h_threshold": 0.7,
+    "avg_net": -0.0438,
+    "pf": 0.78,
+    "n": 231,
+    "win_rate": 48.5
+  },
+  "a2_dist_guard": {
+    "dist_threshold": -0.003,
+    "avg_net": -0.0194,
+    "pf": 0.91,
+    "n": 517,
+    "win_rate": 53.4
+  }
+}

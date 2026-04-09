@@ -281,7 +281,7 @@ export function getTrades(opts: {
 
       return {
         tradeId:     get("trade_id") || String(i + 1),
-        strategyId:  get("signal_name"),
+        strategyId:  get("strategy_id") || get("signal_name"),
         symbol:      "BTCUSDT",
         direction:   (get("direction").toUpperCase() as "LONG" | "SHORT"),
         status,

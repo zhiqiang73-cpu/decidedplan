@@ -4,7 +4,7 @@ import { trpc } from "@/lib/trpc";
 import { Download } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { formatDateTimeUTC8 } from "@/lib/time";
-import { formatDirection, formatTradeStatus } from "@/lib/labels";
+import { formatDirection, formatTradeStatus, formatExitReason } from "@/lib/labels";
 
 export default function TradeHistory() {
   const [statusFilter, setStatusFilter] = useState<"" | "open" | "closed" | "cancelled">("");
@@ -168,7 +168,7 @@ export default function TradeHistory() {
                       </td>
                       <td className="px-4 py-3 text-xs font-num" style={{ color: "#848e9c" }}>{t.entryAt ? formatDateTimeUTC8(t.entryAt) : "-"}</td>
                       <td className="px-4 py-3 text-xs font-num" style={{ color: "#848e9c" }}>{t.exitAt ? formatDateTimeUTC8(t.exitAt) : "-"}</td>
-                      <td className="px-4 py-3 text-xs" style={{ color: "#848e9c" }}>{t.exitReason ?? "-"}</td>
+                      <td className="px-4 py-3 text-xs" style={{ color: "#848e9c" }}>{formatExitReason(t.exitReason)}</td>
                     </tr>
                   );
                 })}

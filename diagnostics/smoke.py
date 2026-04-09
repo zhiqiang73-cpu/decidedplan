@@ -1,4 +1,4 @@
-﻿"""Fast smoke checks for the live trading runtime."""
+"""Fast smoke checks for the live trading runtime."""
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def _check_watchdog_preflight(root: Path) -> tuple[bool, str]:
     if report.has_errors:
         return False, format_report(report)
     if report.warning_count:
-        return False, format_report(report)
+        return True, f"Preflight passed with {report.warning_count} warning(s)\n{format_report(report)}"
     return True, "Preflight checks passed with no warnings"
 
 

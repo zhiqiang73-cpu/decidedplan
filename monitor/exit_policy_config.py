@@ -17,6 +17,7 @@ CORE_EXIT_FAMILIES = (
     "P1-10",
     "P1-11",
     "C1",
+    "OA-1",
 )
 
 FAMILY_MIN_HOLD_CAPS = {
@@ -28,6 +29,7 @@ FAMILY_MIN_HOLD_CAPS = {
     "P1-10": 20,
     "P1-11": 24,
     "C1": 30,
+    "OA-1": 3,
 }
 
 BEST_PARAMS_PATH = Path("monitor/output/exit_policy_best_params.json")
@@ -50,6 +52,16 @@ class ExitParams:
     confidence_stop_multipliers: dict = field(default_factory=lambda: {1: 0.7, 2: 1.0, 3: 1.3})
     regime_stop_multipliers: dict = field(default_factory=lambda: {
         "QUIET_TREND": 0.8,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5,
+    })
+    # SHORT 方向独立 regime 乘数
+    # 回测验证: 多数 SHORT 策略在 QUIET_TREND 下 regime_mult=0.6 最优
+    # (P1-11 SHORT 例外, 最优 1.3, 通过 best_params.json 单独覆盖)
+    regime_stop_multipliers_short: dict = field(default_factory=lambda: {
+        "QUIET_TREND": 0.6,
         "RANGE_BOUND": 1.0,
         "VOLATILE_TREND": 1.5,
         "VOL_EXPANSION": 1.5,
@@ -126,6 +138,10 @@ def build_exit_params(payload: Any, base: ExitParams | None = None) -> ExitParam
             regime_stop_multipliers=_coerce_multiplier_map(
                 payload.get("regime_stop_multipliers"),
                 base=base.regime_stop_multipliers,
+            ),
+            regime_stop_multipliers_short=_coerce_multiplier_map(
+                payload.get("regime_stop_multipliers_short"),
+                base=base.regime_stop_multipliers_short,
             ),
             mfe_ratchet_threshold=_coerce_float(payload.get("mfe_ratchet_threshold"), base.mfe_ratchet_threshold),
             mfe_ratchet_ratio=_coerce_float(payload.get("mfe_ratchet_ratio"), base.mfe_ratchet_ratio),

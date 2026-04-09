@@ -21,7 +21,7 @@
 
 趋势方向（与制度正交的第二维度）:
 
-  TREND_UP       上涨趋势      → P2 Alpha SHORT 需要 HIGH 置信度
+  TREND_UP       上涨趋势      → P2 Alpha SHORT 完全封锁（派发论点在上涨中无效）
   TREND_DOWN     下跌趋势      → P2 Alpha LONG 需要 HIGH 置信度
   TREND_NEUTRAL  无明确趋势    → 不额外限制
 
@@ -179,7 +179,7 @@ class RegimeDetector:
           QUIET_TREND:    所有信号正常
 
         趋势方向过滤:
-          TREND_UP:       P2 Alpha SHORT 需 HIGH 置信度（防止逆势做空）
+          TREND_UP:       P2 Alpha SHORT 完全封锁（派发论点在上涨中无效）
           TREND_DOWN:     P2 Alpha LONG 需 HIGH 置信度（防止逆势做多）
           TREND_NEUTRAL:  不额外限制
 
@@ -200,16 +200,26 @@ class RegimeDetector:
                 regime, phase, direction, conf
             )
 
-            # 趋势方向过滤：逆势 P2 Alpha 信号需要 HIGH 置信度
-            if reject_reason is None and phase == "P2":
-                if trend_direction == TREND_UP and direction == "short" and conf < 3:
-                    reject_reason = (
-                        f"TREND_UP: P2 SHORT requires HIGH confidence (got {conf})"
-                    )
-                elif trend_direction == TREND_DOWN and direction == "long" and conf < 3:
-                    reject_reason = (
-                        f"TREND_DOWN: P2 LONG requires HIGH confidence (got {conf})"
-                    )
+            # 趋势方向过滤：逆势信号需要更高置信度
+            # P2 Alpha: 逆势需要 HIGH (conf >= 3)
+            # P1 信号: 逆势需要 MEDIUM+ (conf >= 2)
+            if reject_reason is None:
+                if trend_direction == TREND_UP and direction == "short":
+                    if phase == "P2":
+                        reject_reason = (
+                            "TREND_UP: P2 SHORT completely blocked "
+                            "(distribution thesis invalid in uptrend)"
+                        )
+                    elif conf < 2:
+                        reject_reason = (
+                            f"TREND_UP: P1 SHORT requires conf>=2 (got {conf})"
+                        )
+                elif trend_direction == TREND_DOWN and direction == "long":
+                    min_conf = 3 if phase == "P2" else 2
+                    if conf < min_conf:
+                        reject_reason = (
+                            f"TREND_DOWN: {phase} LONG requires conf>={min_conf} (got {conf})"
+                        )
 
             if reject_reason:
                 logger.warning(

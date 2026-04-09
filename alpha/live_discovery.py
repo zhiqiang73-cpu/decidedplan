@@ -13,7 +13,7 @@ LiveDiscoveryEngine - 持续运行的 Alpha 策略自动发现引擎
 
 运行:
   engine = LiveDiscoveryEngine()
-  cards = engine.run_once(data_days=30)
+  cards = engine.run_once(data_days=365)
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from alpha.candidate_review import (
     split_review_candidates,
 )
 from alpha.auto_explain import AutoExplainer
+from alpha.product_policy import infer_product_family, sync_product_candidate_pool
 from alpha.combo_scanner import ComboScanner, CONFIRM_FEATURES
 from alpha.realtime_seed_miner import RealtimeSeedMiner
 from utils.file_io import read_json_file, write_json_atomic
@@ -61,13 +62,269 @@ _MIN_OOS_NET = 0.0        # OOS 净收益 (%, 费后)
 _ALPHA_EXIT_MAX_HOLD = 120
 
 _ALPHA_DEFAULT_EXIT_PARAMS = ExitParams(
+    take_profit_pct=0.0,        # 不固定止盈，让力消失决定
     stop_pct=0.70,
-    protect_start_pct=0.20,
-    protect_gap_ratio=0.50,
-    protect_floor_pct=0.03,
-    min_hold_bars=5,
-    max_hold_factor=4,
+    protect_start_pct=0.04,     # 阶段1: MFE > 费用(0.04%) 启动保本
+    protect_gap_ratio=0.40,     # 阶段2: 锁住峰值 40% 利润
+    protect_floor_pct=0.02,     # 保本底线
+    min_hold_bars=3,            # 最少持 3 bar
+    max_hold_factor=4,          # 安全网
+    exit_confirm_bars=1,        # 不等待确认
+    decay_exit_threshold=0.85,
+    decay_tighten_threshold=0.50,
 )
+_VS_ENTRY_TAG = "_vs_entry"
+_FORCE_DECAY_RATIO = 0.55
+_FORCE_INVALIDATION_RATIO = 0.30
+
+_SELLER_IMPULSE_CONFIRM_FEATURES = [
+    "taker_buy_sell_ratio",
+    "volume_vs_ma20",
+    "volume_acceleration",
+    "spread_vs_ma20",
+    "large_trade_buy_ratio",
+    "direction_net_1m",
+    "sell_notional_share_1m",
+    "trade_burst_index",
+    "direction_autocorr",
+    "btc_liq_net_pressure",
+    "total_liq_usd_5m",
+]
+
+_MM_REBALANCE_CONFIRM_FEATURES = [
+    "spread_vs_ma20",
+    "kyle_lambda",
+    "quote_imbalance",
+    "bid_depth_ratio",
+    "spread_anomaly",
+    "large_trade_buy_ratio",
+    "direction_autocorr",
+]
+
+_LIQUIDATION_CONFIRM_FEATURES = [
+    "btc_liq_net_pressure",
+    "total_liq_usd_5m",
+    "liq_size_p90_5m",
+    "taker_buy_sell_ratio",
+    "volume_vs_ma20",
+    "direction_net_1m",
+    "direction_autocorr",
+]
+
+_FUNDING_DIVERGENCE_CONFIRM_FEATURES = [
+    "oi_change_rate_5m",
+    "oi_change_rate_1h",
+    "ls_ratio_change_5m",
+    "mark_basis",
+    "mark_basis_ma10",
+    "rt_funding_rate",
+    "avg_trade_size",
+]
+
+_NEUTRAL_FEATURE_VALUES: dict[str, float] = {
+    "taker_buy_sell_ratio": 1.0,
+    "volume_vs_ma20": 1.0,
+    "spread_vs_ma20": 1.0,
+    "avg_trade_size": 1.0,
+    "taker_buy_pct": 0.5,
+    "large_trade_buy_ratio": 0.5,
+    "sell_notional_share_1m": 0.5,
+    "bid_depth_ratio": 0.5,
+    "position_in_range_24h": 0.5,
+    "position_in_range_4h": 0.5,
+    "quote_imbalance": 0.0,
+    "spread_anomaly": 0.0,
+    "direction_net_1m": 0.0,
+    "direction_autocorr": 0.0,
+    "btc_liq_net_pressure": 0.0,
+    "total_liq_usd_5m": 0.0,
+    "liq_size_p90_5m": 0.0,
+    "rt_funding_rate": 0.0,
+    "funding_rate": 0.0,
+    "mark_basis": 0.0,
+    "mark_basis_ma10": 0.0,
+    "oi_change_rate_5m": 0.0,
+    "oi_change_rate_1h": 0.0,
+    "ls_ratio_change_5m": 0.0,
+    "volume_acceleration": 0.0,
+    "kyle_lambda": 0.0,
+    "vwap_deviation": 0.0,
+    "dist_to_24h_low": 0.0,
+    "dist_to_24h_high": 0.0,
+    "amplitude_1m": 0.0,
+    "amplitude_ma20": 0.0,
+}
+
+_FEATURE_MIN_DELTAS: dict[str, float] = {
+    "quote_imbalance": 0.02,
+    "bid_depth_ratio": 0.015,
+    "spread_anomaly": 0.04,
+    "direction_net_1m": 0.02,
+    "direction_autocorr": 0.02,
+    "btc_liq_net_pressure": 0.02,
+    "total_liq_usd_5m": 0.05,
+    "liq_size_p90_5m": 0.03,
+    "mark_basis": 0.0002,
+    "mark_basis_ma10": 0.0002,
+    "rt_funding_rate": 0.00002,
+    "funding_rate": 0.00002,
+    "taker_buy_sell_ratio": 0.03,
+    "volume_vs_ma20": 0.04,
+    "spread_vs_ma20": 0.03,
+    "large_trade_buy_ratio": 0.02,
+    "sell_notional_share_1m": 0.02,
+    "position_in_range_24h": 0.04,
+    "position_in_range_4h": 0.04,
+    "dist_to_24h_low": 0.002,
+    "dist_to_24h_high": 0.002,
+    "vwap_deviation": 0.002,
+    "oi_change_rate_5m": 0.003,
+    "oi_change_rate_1h": 0.003,
+    "ls_ratio_change_5m": 0.005,
+}
+
+_MECHANISM_EXIT_PARAM_TEMPLATES: dict[str, ExitParams] = {
+    "mm_rebalance": ExitParams(
+        stop_pct=0.45,
+        protect_start_pct=0.10,
+        protect_gap_ratio=0.42,
+        protect_floor_pct=0.02,
+        min_hold_bars=2,
+        max_hold_factor=3,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.75,
+        decay_tighten_threshold=0.40,
+        tighten_gap_ratio=0.22,
+        mfe_ratchet_threshold=0.08,
+        mfe_ratchet_ratio=0.45,
+    ),
+    "seller_impulse": ExitParams(
+        stop_pct=0.55,
+        protect_start_pct=0.12,
+        protect_gap_ratio=0.45,
+        protect_floor_pct=0.025,
+        min_hold_bars=3,
+        max_hold_factor=3,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.78,
+        decay_tighten_threshold=0.45,
+        tighten_gap_ratio=0.24,
+        mfe_ratchet_threshold=0.10,
+        mfe_ratchet_ratio=0.42,
+    ),
+    "volume_climax_reversal": ExitParams(
+        stop_pct=0.85,
+        protect_start_pct=0.18,
+        protect_gap_ratio=0.50,
+        protect_floor_pct=0.03,
+        min_hold_bars=4,
+        max_hold_factor=4,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.80,
+        decay_tighten_threshold=0.50,
+        tighten_gap_ratio=0.28,
+        mfe_ratchet_threshold=0.12,
+        mfe_ratchet_ratio=0.40,
+    ),
+    "funding_divergence": ExitParams(
+        stop_pct=0.90,
+        protect_start_pct=0.22,
+        protect_gap_ratio=0.52,
+        protect_floor_pct=0.04,
+        min_hold_bars=5,
+        max_hold_factor=5,
+        exit_confirm_bars=2,
+        decay_exit_threshold=0.82,
+        decay_tighten_threshold=0.55,
+        tighten_gap_ratio=0.28,
+        mfe_ratchet_threshold=0.15,
+        mfe_ratchet_ratio=0.38,
+    ),
+    "vwap_reversion": ExitParams(
+        stop_pct=0.65,
+        protect_start_pct=0.14,
+        protect_gap_ratio=0.46,
+        protect_floor_pct=0.03,
+        min_hold_bars=4,
+        max_hold_factor=4,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.78,
+        decay_tighten_threshold=0.45,
+        tighten_gap_ratio=0.25,
+    ),
+    "compression_release": ExitParams(
+        stop_pct=0.80,
+        protect_start_pct=0.18,
+        protect_gap_ratio=0.50,
+        protect_floor_pct=0.03,
+        min_hold_bars=4,
+        max_hold_factor=4,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.80,
+        decay_tighten_threshold=0.50,
+        tighten_gap_ratio=0.28,
+    ),
+    "seller_drought": ExitParams(
+        stop_pct=0.60,
+        protect_start_pct=0.12,
+        protect_gap_ratio=0.44,
+        protect_floor_pct=0.025,
+        min_hold_bars=3,
+        max_hold_factor=3,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.76,
+        decay_tighten_threshold=0.42,
+        tighten_gap_ratio=0.24,
+    ),
+    "bottom_taker_exhaust": ExitParams(
+        stop_pct=0.65,
+        protect_start_pct=0.14,
+        protect_gap_ratio=0.46,
+        protect_floor_pct=0.03,
+        min_hold_bars=4,
+        max_hold_factor=4,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.78,
+        decay_tighten_threshold=0.45,
+        tighten_gap_ratio=0.25,
+    ),
+    "top_buyer_exhaust": ExitParams(
+        stop_pct=0.65,
+        protect_start_pct=0.14,
+        protect_gap_ratio=0.46,
+        protect_floor_pct=0.03,
+        min_hold_bars=4,
+        max_hold_factor=4,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.78,
+        decay_tighten_threshold=0.45,
+        tighten_gap_ratio=0.25,
+    ),
+    "funding_cycle_oversold": ExitParams(
+        stop_pct=0.75,
+        protect_start_pct=0.16,
+        protect_gap_ratio=0.48,
+        protect_floor_pct=0.03,
+        min_hold_bars=4,
+        max_hold_factor=4,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.80,
+        decay_tighten_threshold=0.50,
+        tighten_gap_ratio=0.27,
+    ),
+    "amplitude_absorption": ExitParams(
+        stop_pct=0.90,
+        protect_start_pct=0.20,
+        protect_gap_ratio=0.52,
+        protect_floor_pct=0.04,
+        min_hold_bars=4,
+        max_hold_factor=4,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.82,
+        decay_tighten_threshold=0.52,
+        tighten_gap_ratio=0.30,
+    ),
+}
 
 
 # ── 机制类型推断（从入场特征推断物理机制）────────────────────────────────────
@@ -157,6 +414,61 @@ _MECHANISM_CONFIRM_FEATURES: dict[str, list[str]] = {
     ],
 }
 
+_FEATURE_TO_MECHANISM.update({
+    "quote_imbalance": "mm_rebalance",
+    "bid_depth_ratio": "mm_rebalance",
+    "spread_anomaly": "mm_rebalance",
+    "direction_autocorr": "seller_impulse",
+    "btc_liq_net_pressure": "seller_impulse",
+    "total_liq_usd_5m": "volume_climax_reversal",
+    "liq_size_p90_5m": "volume_climax_reversal",
+    "rt_funding_rate": "funding_divergence",
+    "mark_basis": "funding_divergence",
+    "mark_basis_ma10": "funding_divergence",
+})
+
+_MECHANISM_CONFIRM_FEATURES.update({
+    "mm_rebalance": list(_MM_REBALANCE_CONFIRM_FEATURES),
+    "seller_impulse": list(_SELLER_IMPULSE_CONFIRM_FEATURES),
+    "volume_climax_reversal": list(_LIQUIDATION_CONFIRM_FEATURES),
+    "funding_divergence": list(_FUNDING_DIVERGENCE_CONFIRM_FEATURES),
+    "funding_cycle_oversold": [
+        "taker_buy_sell_ratio",
+        "volume_vs_ma20",
+        "oi_change_rate_5m",
+        "quote_imbalance",
+        "bid_depth_ratio",
+        "mark_basis_ma10",
+        "rt_funding_rate",
+    ],
+    "compression_release": [
+        "volume_vs_ma20",
+        "volume_acceleration",
+        "spread_vs_ma20",
+        "kyle_lambda",
+        "quote_imbalance",
+        "bid_depth_ratio",
+        "oi_change_rate_5m",
+        "oi_change_rate_1h",
+    ],
+    "seller_drought": [
+        "volume_vs_ma20",
+        "taker_buy_sell_ratio",
+        "avg_trade_size",
+        "quote_imbalance",
+        "bid_depth_ratio",
+        "oi_change_rate_5m",
+    ],
+    "amplitude_absorption": [
+        "spread_anomaly",
+        "quote_imbalance",
+        "bid_depth_ratio",
+        "volume_acceleration",
+        "trade_burst_index",
+        "btc_liq_net_pressure",
+    ],
+})
+
 
 def _infer_mechanism_type(
     entry_feature: str,
@@ -214,9 +526,60 @@ def _infer_mechanism_type(
         and direction == "short"
     ):
         return "seller_impulse"
+    # ── buyer_impulse: LONG mirrors of seller_impulse ────────────────────
+    if (
+        entry_feature == "taker_buy_sell_ratio"
+        and operator == ">"
+        and direction == "long"
+    ):
+        return "buyer_impulse"
+    if (
+        entry_feature in {"volume_vs_ma20", "volume_acceleration"}
+        and operator == ">"
+        and direction == "long"
+    ):
+        return "buyer_impulse"
+    if (
+        entry_feature == "large_trade_buy_ratio"
+        and operator == ">"
+        and direction == "long"
+    ):
+        return "buyer_impulse"
+    if (
+        entry_feature == "direction_net_1m"
+        and operator == ">"
+        and direction == "long"
+    ):
+        return "buyer_impulse"
+    if (
+        entry_feature == "sell_notional_share_1m"
+        and operator == "<"
+        and direction == "long"
+    ):
+        return "buyer_impulse"
+    if (
+        entry_feature == "trade_burst_index"
+        and operator == ">"
+        and direction == "long"
+    ):
+        return "buyer_impulse"
+    if entry_feature == "direction_autocorr" and direction == "long":
+        return "buyer_impulse"
     if entry_feature == "funding_rate" and direction == "long":
         return "funding_cycle_oversold"
     if entry_feature == "position_in_range_4h" and direction == "short":
+        return "funding_divergence"
+    if entry_feature in {"quote_imbalance", "bid_depth_ratio"}:
+        return "mm_rebalance"
+    if entry_feature == "spread_anomaly":
+        return "mm_rebalance" if operator == ">" else "compression_release"
+    if entry_feature == "direction_autocorr":
+        return "seller_impulse"
+    if entry_feature == "btc_liq_net_pressure":
+        return "seller_impulse" if direction == "short" else "volume_climax_reversal"
+    if entry_feature in {"total_liq_usd_5m", "liq_size_p90_5m"}:
+        return "volume_climax_reversal"
+    if entry_feature in {"rt_funding_rate", "mark_basis", "mark_basis_ma10"}:
         return "funding_divergence"
 
     return base_mechanism
@@ -224,6 +587,260 @@ def _infer_mechanism_type(
 
 def _confirm_features_for_mechanism(mechanism_type: str) -> list[str]:
     return list(_MECHANISM_CONFIRM_FEATURES.get(mechanism_type, CONFIRM_FEATURES))
+
+
+def _feature_neutral_value(feature: str, reference: float = 0.0) -> float:
+    if feature in _NEUTRAL_FEATURE_VALUES:
+        return _NEUTRAL_FEATURE_VALUES[feature]
+    if "position_in_range" in feature:
+        return 0.5
+    if feature.endswith("_ratio"):
+        return 1.0
+    return 0.0
+
+
+def _feature_min_delta(feature: str, reference: float) -> float:
+    return max(_FEATURE_MIN_DELTAS.get(feature, 0.0), abs(reference) * 0.15, 1e-4)
+
+
+def _signed_decay_gap(feature: str, entry_op: str, entry_threshold: float) -> tuple[float, float, float]:
+    neutral = _feature_neutral_value(feature, entry_threshold)
+    raw_gap = neutral - entry_threshold
+    if abs(raw_gap) < 1e-8:
+        fallback = _feature_min_delta(feature, entry_threshold)
+        raw_gap = fallback if entry_op == "<" else -fallback
+    base_gap = max(abs(raw_gap), _feature_min_delta(feature, entry_threshold))
+    return neutral, raw_gap, base_gap
+
+
+def _build_vs_entry_condition(
+    feature: str,
+    delta: float,
+    *,
+    source: str,
+    role: str,
+    neutral_value: float,
+) -> dict:
+    return {
+        "feature": f"{feature}{_VS_ENTRY_TAG}",
+        "operator": ">" if delta > 0 else "<",
+        "threshold": round(float(delta), 8),
+        "source": source,
+        "role": role,
+        "neutral_value": round(float(neutral_value), 8),
+    }
+
+
+def _build_absolute_condition(
+    feature: str,
+    target_value: float,
+    *,
+    operator: str,
+    source: str,
+    role: str,
+    neutral_value: float,
+) -> dict:
+    return {
+        "feature": feature,
+        "operator": operator,
+        "threshold": round(float(target_value), 8),
+        "source": source,
+        "role": role,
+        "neutral_value": round(float(neutral_value), 8),
+    }
+
+
+def _build_force_decay_condition(feature: str, entry_op: str, entry_threshold: float) -> tuple[dict, dict]:
+    neutral, raw_gap, base_gap = _signed_decay_gap(feature, entry_op, entry_threshold)
+    decay_delta = np.sign(raw_gap) * max(base_gap * _FORCE_DECAY_RATIO, _feature_min_delta(feature, entry_threshold))
+    repair_target = entry_threshold + decay_delta
+    return (
+        _build_vs_entry_condition(
+            feature,
+            float(decay_delta),
+            source="force_decay",
+            role="decay",
+            neutral_value=neutral,
+        ),
+        _build_absolute_condition(
+            feature,
+            repair_target,
+            operator=">" if decay_delta > 0 else "<",
+            source="force_decay",
+            role="repair_target",
+            neutral_value=neutral,
+        ),
+    )
+
+
+def _build_invalidation_condition(feature: str, entry_op: str, entry_threshold: float) -> dict:
+    neutral, raw_gap, base_gap = _signed_decay_gap(feature, entry_op, entry_threshold)
+    invalid_delta = -np.sign(raw_gap) * max(base_gap * _FORCE_INVALIDATION_RATIO, _feature_min_delta(feature, entry_threshold))
+    return _build_vs_entry_condition(
+        feature,
+        float(invalid_delta),
+        source="thesis_invalidation",
+        role="invalidation",
+        neutral_value=neutral,
+    )
+
+
+def _dedupe_combo_entries(entries: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple[tuple[str, str, float], ...]] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        conditions = entry.get("conditions")
+        if not isinstance(conditions, list) or not conditions:
+            continue
+        key_parts: list[tuple[str, str, float]] = []
+        valid = True
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                valid = False
+                break
+            feature = str(cond.get("feature", "")).strip()
+            operator = str(cond.get("operator") or cond.get("op") or "").strip()
+            if not feature or operator not in {"<", ">"}:
+                valid = False
+                break
+            try:
+                threshold = float(cond.get("threshold"))
+            except (TypeError, ValueError):
+                valid = False
+                break
+            key_parts.append((feature, operator, round(threshold, 8)))
+        if not valid:
+            continue
+        key = tuple(key_parts)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
+
+
+def _build_mechanism_exit_params(
+    mechanism_type: str,
+    horizon: int,
+    direction: str,
+) -> ExitParams:
+    base = _MECHANISM_EXIT_PARAM_TEMPLATES.get(mechanism_type, _ALPHA_DEFAULT_EXIT_PARAMS)
+    stop_pct = float(base.stop_pct)
+    protect_start_pct = float(base.protect_start_pct)
+    max_hold_factor = int(base.max_hold_factor)
+    min_hold_bars = int(base.min_hold_bars)
+
+    if horizon >= 60:
+        stop_pct *= 1.08
+        protect_start_pct *= 1.10
+        max_hold_factor = max(max_hold_factor, 4)
+    if mechanism_type in {"seller_impulse", "volume_climax_reversal"} and direction == "short":
+        stop_pct *= 1.05
+    if mechanism_type == "mm_rebalance" and horizon <= 15:
+        min_hold_bars = min(min_hold_bars, 2)
+
+    return ExitParams(
+        take_profit_pct=base.take_profit_pct,
+        stop_pct=round(stop_pct, 4),
+        protect_start_pct=round(protect_start_pct, 4),
+        protect_gap_ratio=base.protect_gap_ratio,
+        protect_floor_pct=base.protect_floor_pct,
+        min_hold_bars=min_hold_bars,
+        max_hold_factor=max_hold_factor,
+        exit_confirm_bars=base.exit_confirm_bars,
+        decay_exit_threshold=base.decay_exit_threshold,
+        decay_tighten_threshold=base.decay_tighten_threshold,
+        tighten_gap_ratio=base.tighten_gap_ratio,
+        confidence_stop_multipliers=dict(base.confidence_stop_multipliers),
+        regime_stop_multipliers=dict(base.regime_stop_multipliers),
+        regime_stop_multipliers_short=dict(base.regime_stop_multipliers_short),
+        mfe_ratchet_threshold=base.mfe_ratchet_threshold,
+        mfe_ratchet_ratio=base.mfe_ratchet_ratio,
+    )
+
+
+def _build_stop_logic(mechanism_type: str, exit_params: ExitParams, *, direction: str) -> dict:
+    return {
+        "type": "mechanism_hard_stop",
+        "mechanism_type": mechanism_type,
+        "direction": direction,
+        "stop_pct": round(float(exit_params.stop_pct), 4),
+        "reason": "thesis_invalidated_or_force_stalled",
+    }
+
+
+def _compile_combo_set(df: pd.DataFrame, combo_entries: object) -> list[list[dict]]:
+    combos = combo_entries if isinstance(combo_entries, list) else []
+    compiled: list[list[dict]] = []
+    for combo in combos:
+        if not isinstance(combo, dict):
+            continue
+        conds = combo.get("conditions")
+        if not isinstance(conds, list) or not conds:
+            continue
+        parsed_combo: list[dict] = []
+        valid = True
+        for cond in conds:
+            if not isinstance(cond, dict):
+                valid = False
+                break
+            feature = str(cond.get("feature", "")).strip()
+            operator = str(cond.get("operator") or cond.get("op") or "").strip()
+            if not feature or operator not in {"<", ">"}:
+                valid = False
+                break
+            base_feature = (
+                feature[: -len(_VS_ENTRY_TAG)]
+                if feature.endswith(_VS_ENTRY_TAG)
+                else feature
+            )
+            if base_feature not in df.columns:
+                valid = False
+                break
+            try:
+                threshold = float(cond.get("threshold"))
+            except (TypeError, ValueError):
+                valid = False
+                break
+            parsed_combo.append(
+                {
+                    "values": df[base_feature].values,
+                    "operator": operator,
+                    "threshold": threshold,
+                    "vs_entry": feature.endswith(_VS_ENTRY_TAG),
+                }
+            )
+        if valid and parsed_combo:
+            compiled.append(parsed_combo)
+    return compiled
+
+
+def _combo_matches(compiled_combos: list[list[dict]], entry_idx: int, bar_idx: int) -> bool:
+    for combo in compiled_combos:
+        all_met = True
+        for cond in combo:
+            values = cond["values"]
+            value = values[bar_idx]
+            if np.isnan(value):
+                all_met = False
+                break
+            if cond["vs_entry"]:
+                entry_value = values[entry_idx]
+                if np.isnan(entry_value):
+                    all_met = False
+                    break
+                value = value - entry_value
+            if cond["operator"] == "<" and not (value < cond["threshold"]):
+                all_met = False
+                break
+            if cond["operator"] == ">" and not (value > cond["threshold"]):
+                all_met = False
+                break
+        if all_met:
+            return True
+    return False
 
 
 def _derive_mechanism_exit(
@@ -296,6 +913,88 @@ def _derive_mechanism_exit(
     return {"top3": combos, "exit_method": "causal"}
 
 
+def _derive_mechanism_exit_v2(
+    entry_feature: str,
+    entry_op: str,
+    entry_threshold: float,
+    combo_conditions: list[dict] | None = None,
+    *,
+    mechanism_type: str,
+) -> dict:
+    primary_decay, primary_abs = _build_force_decay_condition(
+        entry_feature, entry_op, entry_threshold
+    )
+    primary_invalidation = _build_invalidation_condition(
+        entry_feature, entry_op, entry_threshold
+    )
+
+    combos: list[dict] = [
+        {
+            "conditions": [primary_decay],
+            "combo_label": "C1",
+            "description": f"{entry_feature} relative to entry has repaired enough",
+        },
+        {
+            "conditions": [primary_decay, primary_abs],
+            "combo_label": "C2",
+            "description": f"{entry_feature} repaired versus entry and absolute state",
+        },
+    ]
+    invalidation: list[dict] = [
+        {
+            "conditions": [primary_invalidation],
+            "combo_label": "I1",
+            "description": f"{entry_feature} worsened versus entry; thesis broken",
+        }
+    ]
+
+    if combo_conditions:
+        cc = combo_conditions[0]
+        cc_feature = str(cc["feature"])
+        cc_op = str(cc["op"])
+        cc_thr = float(cc["threshold"])
+        confirm_decay, confirm_abs = _build_force_decay_condition(
+            cc_feature, cc_op, cc_thr
+        )
+        confirm_invalidation = _build_invalidation_condition(
+            cc_feature, cc_op, cc_thr
+        )
+        combos.extend(
+            [
+                {
+                    "conditions": [primary_decay, confirm_decay],
+                    "combo_label": "C3",
+                    "description": "Entry force and confirm force both repaired versus entry",
+                },
+                {
+                    "conditions": [primary_abs, confirm_abs],
+                    "combo_label": "C4",
+                    "description": "Primary and confirm states both returned toward neutral",
+                },
+            ]
+        )
+        invalidation.append(
+            {
+                "conditions": [primary_invalidation, confirm_invalidation],
+                "combo_label": "I2",
+                "description": "Primary and confirm force both worsened versus entry",
+            }
+        )
+
+    return {
+        "top3": _dedupe_combo_entries(combos)[:3],
+        "invalidation": _dedupe_combo_entries(invalidation),
+        "exit_method": "force_decay_vs_entry",
+        "snapshot_required": True,
+        "mechanism_type": mechanism_type,
+        "force_features": [entry_feature] + [
+            str(item.get("feature", ""))
+            for item in (combo_conditions or [])
+            if isinstance(item, dict) and item.get("feature")
+        ],
+    }
+
+
 class LiveDiscoveryEngine:
     """
     Alpha 策略自动发现引擎。
@@ -317,13 +1016,15 @@ class LiveDiscoveryEngine:
         horizons: Optional[list[int]] = None,
         min_triggers: int = 30,
         min_icir: float = 0.10,
+        direction_filter: str = "both",
     ):
         self.storage_path = storage_path
         self.symbol = symbol.upper()
         self.top_n = top_n
-        self.horizons = horizons or [5, 15, 30, 60]
+        self.horizons = horizons or [3, 5, 10, 15, 30, 60]
         self.min_triggers = min_triggers
         self.min_icir = min_icir
+        self.direction_filter = direction_filter  # "long", "short", or "both"
 
         # 输出目录: BTCUSDT 沿用 alpha/output/ 保持向后兼容
         # 其他交易对使用 alpha/output/{symbol}/
@@ -357,7 +1058,7 @@ class LiveDiscoveryEngine:
 
     # ── 主入口 ────────────────────────────────────────────────────────────────
 
-    def run_once(self, data_days: int = 30) -> list[dict]:
+    def run_once(self, data_days: int = 365) -> list[dict]:
         """
         执行一次完整发现流程。
 
@@ -407,12 +1108,24 @@ class LiveDiscoveryEngine:
 
         # ── Step 4: 挖掘种子原子 (单条件阈值，作为 combo 的种子) ──────────────
         logger.info(f"[DISCOVERY] 挖掘 Top-{self.top_n} 特征的种子原子...")
-        atoms = self._miner.mine_from_scan(df, scan_df, top_n=self.top_n)
+        seed_scan_df = self._select_seed_scan_rows(scan_df)
+        logger.info(f"[DISCOVERY] 重数据维度保底后 seed rows = {len(seed_scan_df)}")
+        atoms = self._miner.mine_from_scan(df, seed_scan_df, top_n=len(seed_scan_df))
         logger.info(f"[DISCOVERY] IC 原子种子: {len(atoms)} 个")
 
         logger.info("[DISCOVERY] 挖掘实时卖压种子...")
         realtime_seeds = self._realtime_seed_miner.mine(df, self.horizons)
         logger.info(f"[DISCOVERY] 实时卖压种子: {len(realtime_seeds)} 个")
+
+        # ── Direction filter ──────────────────────────────────────────────
+        if self.direction_filter != "both":
+            _dir = self.direction_filter
+            atoms = [a for a in atoms if getattr(a, "direction", "") == _dir]
+            realtime_seeds = [s for s in realtime_seeds if s.get("direction") == _dir]
+            logger.info(
+                "[DISCOVERY] Direction filter=%s: %d atoms, %d realtime seeds remain",
+                _dir, len(atoms), len(realtime_seeds),
+            )
 
         if not atoms and not realtime_seeds:
             logger.warning("[DISCOVERY] 未挖掘到满足条件的种子原子")
@@ -498,7 +1211,17 @@ class LiveDiscoveryEngine:
 
                 # 出场：入场信号消失 = 出场，不挖掘历史数据
                 direction = row["direction"]
-                final_exit = _derive_mechanism_exit(
+                mechanism_type = _infer_mechanism_type(
+                    str(row["seed_feature"]),
+                    direction,
+                    str(row["seed_op"]),
+                )
+                exit_params = _build_mechanism_exit_params(
+                    mechanism_type,
+                    int(row["horizon"]),
+                    direction,
+                )
+                final_exit = _derive_mechanism_exit_v2(
                     entry_feature=str(row["seed_feature"]),
                     entry_op=str(row["seed_op"]),
                     entry_threshold=float(row["seed_threshold"]),
@@ -507,18 +1230,18 @@ class LiveDiscoveryEngine:
                         "op":        row["confirm_op"],
                         "threshold": float(row["confirm_threshold"]),
                     }],
+                    mechanism_type=mechanism_type,
                 )
 
                 # Backtest exit conditions on OOS data
                 exit_metrics = self._shadow_smart_exit_backtest(
                     df, entry_mask, final_exit, direction, int(row["horizon"]),
-                    params=_ALPHA_DEFAULT_EXIT_PARAMS,
+                    params=exit_params,
                 )
                 final_exit.update(exit_metrics)
 
                 # 构建策略卡片
-                card = self._build_combo_card(row, final_exit)
-                card["exit_params"] = _ALPHA_DEFAULT_EXIT_PARAMS.to_dict()
+                card = self._build_combo_card(row, final_exit, exit_params, mechanism_type)
                 results.append(card)
         else:
             logger.info("[DISCOVERY] 组合扫描未找到合格候选")
@@ -531,19 +1254,29 @@ class LiveDiscoveryEngine:
             atom_map = {a.rule_str(): a for a in atoms}
             single_candidates = self._filter_candidates(wf_reports, atom_map, test_df)
             for atom, wf in single_candidates:
-                exit_cond = _derive_mechanism_exit(
+                mechanism_type = _infer_mechanism_type(
+                    atom.feature,
+                    atom.direction,
+                    atom.operator,
+                )
+                exit_params = _build_mechanism_exit_params(
+                    mechanism_type,
+                    int(atom.horizon),
+                    atom.direction,
+                )
+                exit_cond = _derive_mechanism_exit_v2(
                     entry_feature=atom.feature,
                     entry_op=atom.operator,
                     entry_threshold=float(atom.threshold),
+                    mechanism_type=mechanism_type,
                 )
                 entry_mask_atom = self._build_entry_mask(df, atom)
                 exit_metrics = self._shadow_smart_exit_backtest(
                     df, entry_mask_atom, exit_cond, atom.direction, int(atom.horizon),
-                    params=_ALPHA_DEFAULT_EXIT_PARAMS,
+                    params=exit_params,
                 )
                 exit_cond.update(exit_metrics)
-                card = self._build_card(atom, wf, exit_cond)
-                card["exit_params"] = _ALPHA_DEFAULT_EXIT_PARAMS.to_dict()
+                card = self._build_card(atom, wf, exit_cond, exit_params, mechanism_type)
                 results.append(card)
 
         if not results:
@@ -578,11 +1311,37 @@ class LiveDiscoveryEngine:
             self._save_flagged(flagged)
 
         self._save_pending(pending)
+        sync_product_candidate_pool()
         self._print_summary(pending)
 
         return pending
 
     # ── 内部方法 ──────────────────────────────────────────────────────────────
+
+    def _select_seed_scan_rows(self, scan_df: pd.DataFrame) -> pd.DataFrame:
+        """Keep strong global scan rows while reserving slots for heavy-data dimensions."""
+        if scan_df.empty:
+            return scan_df
+
+        best = self._scanner.best_per_feature(scan_df)
+        frames = [best.head(self.top_n)]
+        heavy_dim_quotas = {
+            "LIQUIDATION": 2,
+            "MICROSTRUCTURE": 3,
+            "ORDER_FLOW": 4,
+            "MARK_PRICE": 2,
+        }
+        for dim, quota in heavy_dim_quotas.items():
+            sub = best[best["dimension"] == dim].head(quota)
+            if not sub.empty:
+                frames.append(sub)
+
+        return (
+            pd.concat(frames, ignore_index=False)
+            .drop_duplicates(subset=["feature", "horizon"])
+            .sort_values("ICIR", key=lambda s: s.abs(), ascending=False)
+            .reset_index(drop=True)
+        )
 
     def _filter_candidates(
         self,
@@ -654,6 +1413,8 @@ class LiveDiscoveryEngine:
         atom: CausalAtom,
         wf_report: dict,
         exit_cond: Optional[dict],
+        exit_params: ExitParams,
+        mechanism_type: str,
     ) -> dict:
         """将原子 + WF 报告 + 出场条件打包成策略候选 dict。"""
         oos = wf_report.get("OOS", {})
@@ -671,6 +1432,18 @@ class LiveDiscoveryEngine:
                 "horizon":   max(int(atom.horizon), 30),
             },
             "exit": exit_cond,  # None = 使用固定持仓 horizon
+            "exit_params": exit_params.to_dict(),
+            "stop_pct": round(float(exit_params.stop_pct), 4),
+            "stop_logic": _build_stop_logic(
+                mechanism_type,
+                exit_params,
+                direction=atom.direction,
+            ),
+            "strategy_blueprint": {
+                "snapshot_required": True,
+                "force_decay_exit": list(exit_cond.get("top3") or []) if isinstance(exit_cond, dict) else [],
+                "thesis_invalidation": list(exit_cond.get("invalidation") or []) if isinstance(exit_cond, dict) else [],
+            },
             "stats": {
                 "oos_win_rate":   round(float(oos.get("win_rate") or 0), 2),
                 "n_oos":          int(oos.get("n_triggers") or 0),
@@ -682,10 +1455,9 @@ class LiveDiscoveryEngine:
             "rule_str": atom.rule_str(),
             "discovered_at": datetime.now(timezone.utc).isoformat(),
             "status": "pending",
-            "mechanism_type": _infer_mechanism_type(
-                atom.feature, atom.direction, atom.operator
-            ),
+            "mechanism_type": mechanism_type,
         }
+        card["family"] = infer_product_family(card)
 
         return card
 
@@ -725,6 +1497,8 @@ class LiveDiscoveryEngine:
         self,
         row,
         exit_cond: Optional[dict],
+        exit_params: ExitParams,
+        mechanism_type: str,
     ) -> dict:
         """将 combo 扫描结果打包成策略卡片。"""
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -735,7 +1509,7 @@ class LiveDiscoveryEngine:
             + row["confirm_feature"][:8]
         )
 
-        stop_pct = None
+        stop_pct = round(float(exit_params.stop_pct), 4)
 
         card = {
             "id": card_id,
@@ -757,6 +1531,17 @@ class LiveDiscoveryEngine:
             ],
             "exit": exit_cond,
             "stop_pct": stop_pct,
+            "exit_params": exit_params.to_dict(),
+            "stop_logic": _build_stop_logic(
+                mechanism_type,
+                exit_params,
+                direction=row["direction"],
+            ),
+            "strategy_blueprint": {
+                "snapshot_required": True,
+                "force_decay_exit": list(exit_cond.get("top3") or []) if isinstance(exit_cond, dict) else [],
+                "thesis_invalidation": list(exit_cond.get("invalidation") or []) if isinstance(exit_cond, dict) else [],
+            },
             "stats": {
                 "oos_win_rate":    round(float(row["oos_wr"]), 2),
                 "n_oos":           int(row["oos_n"]),
@@ -780,10 +1565,9 @@ class LiveDiscoveryEngine:
                 f"-> {row['direction']} {int(row['horizon'])}bars"
             ),
             "discovered_at": now_iso,
-            "mechanism_type": _infer_mechanism_type(
-                row["seed_feature"], row["direction"], str(row["seed_op"])
-            ),
+            "mechanism_type": mechanism_type,
         }
+        card["family"] = infer_product_family(card)
         return card
 
     def _run_causal_validation(self, cards: list[dict]) -> list[dict]:
@@ -830,12 +1614,19 @@ class LiveDiscoveryEngine:
             "improvement": 0.0,
             "triggered_exit_pct": 0.0,
             "n_samples": 0,
-            "exit_reason_counts": {"hard_stop": 0, "profit_protect": 0, "logic_complete": 0, "time_cap": 0},
+            "exit_reason_counts": {
+                "hard_stop": 0,
+                "thesis_invalidated": 0,
+                "profit_protect": 0,
+                "logic_complete": 0,
+                "time_cap": 0,
+            },
             "avg_bars_held": 0.0,
             "win_rate": 0.0,
         }
 
         combos = exit_info.get("top3") if isinstance(exit_info, dict) else None
+        invalidation = exit_info.get("invalidation") if isinstance(exit_info, dict) else None
         if not isinstance(combos, list) or not combos:
             return _EMPTY
 
@@ -848,23 +1639,8 @@ class LiveDiscoveryEngine:
         max_hold_bars = horizon * params.max_hold_factor
 
         # 预先验证每个 combo 的条件是否都能在 df 中找到对应列
-        valid_combos = []
-        for combo in combos:
-            conds = combo.get("conditions")
-            if not isinstance(conds, list) or not conds:
-                continue
-            parsed = []
-            ok = True
-            for cond in conds:
-                feat = cond.get("feature")
-                op = cond.get("operator")
-                thr = cond.get("threshold")
-                if feat not in df.columns or op not in ("<", ">"):
-                    ok = False
-                    break
-                parsed.append((df[feat].values, op, float(thr)))
-            if ok and parsed:
-                valid_combos.append(parsed)
+        valid_combos = _compile_combo_set(df, combos)
+        invalidation_combos = _compile_combo_set(df, invalidation)
 
         if not valid_combos:
             return _EMPTY
@@ -884,7 +1660,13 @@ class LiveDiscoveryEngine:
         exit_returns = []
         hold_returns = []
         bars_held_list = []
-        reason_counts = {"hard_stop": 0, "profit_protect": 0, "logic_complete": 0, "time_cap": 0}
+        reason_counts = {
+            "hard_stop": 0,
+            "thesis_invalidated": 0,
+            "profit_protect": 0,
+            "logic_complete": 0,
+            "time_cap": 0,
+        }
 
         sign = -1.0 if direction == "short" else 1.0
 
@@ -925,6 +1707,10 @@ class LiveDiscoveryEngine:
                 # Layer 3: 利润保护追踪止损
                 if mfe >= params.protect_start_pct:
                     protect_armed = True
+                if invalidation_combos and _combo_matches(invalidation_combos, entry_idx, bar_idx):
+                    exit_reason = "thesis_invalidated"
+                    exit_bar = j
+                    break
                 if protect_armed:
                     gap = max(params.protect_floor_pct, mfe * params.protect_gap_ratio)
                     new_floor = mfe - gap
@@ -940,25 +1726,7 @@ class LiveDiscoveryEngine:
                     continue
 
                 # Layer 7: 信号消失出场 (只在盈利时触发)
-                combo_fired = False
-                for combo_conds in valid_combos:
-                    all_met = True
-                    for (col_arr, op, thr) in combo_conds:
-                        val = col_arr[bar_idx]
-                        if np.isnan(val):
-                            all_met = False
-                            break
-                        if op == "<" and not (val < thr):
-                            all_met = False
-                            break
-                        if op == ">" and not (val > thr):
-                            all_met = False
-                            break
-                    if all_met:
-                        combo_fired = True
-                        break
-
-                if combo_fired and current_return > 0:
+                if _combo_matches(valid_combos, entry_idx, bar_idx) and current_return > 0:
                     exit_reason = "logic_complete"
                     exit_bar = j
                     break

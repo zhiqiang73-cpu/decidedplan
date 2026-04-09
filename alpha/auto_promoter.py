@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from alpha.product_policy import infer_product_family, sync_product_candidate_pool
+
 logger = logging.getLogger(__name__)
 
 _CONFIG_FILE = Path("alpha/output/promoter_config.json")
@@ -231,6 +233,24 @@ class AutoPromoter:
 
         for candidate in unvalidated:
             cid = candidate.get("id", "?")
+
+            # 统计硬门槛前置检查，不通过直接丢弃，不送 LLM 审核
+            if not self._pass_hard_gates(candidate):
+                stats = candidate.get("stats", {})
+                oos_ret = float(stats.get("oos_avg_ret") or stats.get("oos_net_return") or 0)
+                logger.info(
+                    "[AutoPromoter] REJECTED by hard gates: %s (WR=%.1f%%, n=%d, ret=%.4f)",
+                    cid[:32],
+                    float(stats.get("oos_win_rate") or 0),
+                    int(stats.get("n_oos") or 0),
+                    oos_ret,
+                )
+                candidate = dict(candidate)
+                candidate["status"] = "gate_rejected"
+                new_rejected.append(candidate)
+                rejected_ids.add(cid)
+                continue
+
             try:
                 result = self._validator.validate(candidate)
             except Exception as exc:
@@ -239,6 +259,7 @@ class AutoPromoter:
 
             # 标记已验证
             candidate = dict(candidate)
+            candidate["family"] = infer_product_family(candidate)
             candidate["llm_validated"] = True
             candidate["llm_result"] = result.to_dict()
             candidate["llm_validated_at"] = datetime.now(timezone.utc).isoformat()
@@ -320,6 +341,7 @@ class AutoPromoter:
             key = str(c.get("rule_str", "") or c.get("id", ""))
             merged_review[key] = c  # newer replaces older
         _write_json(_REVIEW_FILE, list(merged_review.values()))
+        sync_product_candidate_pool()
 
         summary = {
             "approved": len(new_approved),
@@ -333,6 +355,38 @@ class AutoPromoter:
         )
         self._flush_state(run_start, summary)
         return summary
+
+    # ── 统计硬门槛 ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _pass_hard_gates(card: dict) -> bool:
+        """
+        统计硬门槛检查 -- 不通过的候选直接丢弃，不送 LLM 审核。
+
+        兼容两种 stats 字段命名：
+          - _build_combo_card 产生的: oos_avg_ret
+          - _build_card(单条件原子) 产生的: oos_net_return
+        """
+        stats = card.get("stats", {})
+        # OOS 胜率 >= 65%（扣费后）
+        if (stats.get("oos_win_rate") or 0) < 65:
+            return False
+        # OOS 样本数 >= 30
+        if (stats.get("n_oos") or 0) < 30:
+            return False
+        # OOS 净收益 > 0%（兼容两种字段名）
+        oos_ret = float(
+            stats.get("oos_avg_ret")
+            if stats.get("oos_avg_ret") is not None
+            else (stats.get("oos_net_return") or 0)
+        )
+        if oos_ret <= 0:
+            return False
+        # 降级比 > 0.5（如果有）
+        degradation = stats.get("degradation")
+        if degradation is not None and float(degradation) < 0.5:
+            return False
+        return True
 
     # ── 持续循环 ──────────────────────────────────────────────────────────────
 
@@ -374,9 +428,10 @@ class AutoPromoter:
         if not isinstance(exit_params_dict, dict):
             return
 
+        card_family = infer_product_family(card)
         entry = card.get("entry", {})
         direction = str(entry.get("direction", "")).lower()
-        family = str(card.get("family") or "").strip()
+        family = str(card_family or card.get("family") or "").strip()
         if not family:
             group = str(card.get("group") or card.get("id", ""))
             horizon = int(entry.get("horizon", 0))
@@ -477,6 +532,10 @@ class AutoPromoter:
 
                 approved = _read_json(_APPROVED_FILE, [])
                 target = dict(target)
+                target["family"] = infer_product_family(target)
+                if not target["family"]:
+                    logger.warning("[AutoPromoter] manual approve blocked: %s missing canonical family", rule_id[:32])
+                    return False
                 target["status"] = "approved"
                 target["approved_at"] = datetime.now(timezone.utc).isoformat()
                 target["approved_by"] = "human_manual"
@@ -484,6 +543,7 @@ class AutoPromoter:
                 _write_json(_APPROVED_FILE, approved)
                 self._persist_exit_params(target)
                 self._register_mechanism_from_card(target)
+                sync_product_candidate_pool()
 
                 self._recent_decisions.append({
                     "id": rule_id[:32],

@@ -1,29 +1,29 @@
-﻿"""
-WebSocket 瀹炴椂鏁版嵁閲囬泦鍚姩鑴氭湰
+"""
+WebSocket 实时数据采集启动脚本
 
-閲囬泦鍐呭:
-  - !forceOrder@arr         鍏ㄥ競鍦虹垎浠撴竻绠楁祦
-  - btcusdt@bookTicker      鏈€浼樹拱鍗栨寕鍗?/ Spread (閲囨牱: 姣忕1鏉?
-  - btcusdt@aggTrade        閫愮瑪鎴愪氦 (瀹炴椂鑱氬悎涓?鍒嗛挓bar)
-  - btcusdt@markPrice@1s    鏍囪浠锋牸 + 瀹炴椂璧勯噾璐圭巼 (姣忓垎閽熼噰鏍?
+采集内容:
+  - !forceOrder@arr         全市场爆仓清算流
+  - btcusdt@bookTicker      最优买卖挂单价 / Spread (采样: 每秒1条)
+  - btcusdt@aggTrade        逐笔成交 (实时聚合成1分钟bar)
+  - btcusdt@markPrice@1s    标记价格 + 实时资金费率 (每分钟采样)
 
-鏁版嵁瀛樺偍:
+数据存储:
   data/storage/liquidations/ ...
   data/storage/book_ticker/  ...
   data/storage/agg_trades/   ...  (1m bar)
-  data/storage/mark_price/   ...  (1m閲囨牱)
+  data/storage/mark_price/   ...  (1m采样)
 
-鐢ㄦ硶:
-    # 閲囬泦鍏ㄩ儴娴?(鎺ㄨ崘)
+用法:
+    # 采集全部流（推荐）
     python run_ws.py
 
-    # 鍙噰闆嗛儴鍒嗘祦
+    # 只采集部分流
     python run_ws.py --streams liquidations book_ticker
 
-    # 鍔犲ぇ BookTicker 閲囨牱闂撮殧 (闄嶄綆瀛樺偍閲?
+    # 加大 BookTicker 采样间隔 (降低存储量)
     python run_ws.py --book-ticker-sample 5
 
-鍋滄: Ctrl-C  (宸茬Н绱殑缂撳啿鏁版嵁浼氬湪閫€鍑烘椂鑷姩鍐欑洏)
+停止: Ctrl-C  (已积攒的缓冲数据会在退出时自动写盘)
 """
 
 import asyncio
@@ -131,7 +131,7 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
 
     def _shutdown(sig_name: str) -> None:
-        logger.info(f"鏀跺埌 {sig_name}锛屾鍦ㄩ€€鍑?..")
+        logger.info(f"收到 {sig_name}，正在退出..")
         collector.stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -144,7 +144,7 @@ async def main() -> None:
     try:
         await collector.run()
     except KeyboardInterrupt:
-        logger.info("鏀跺埌 KeyboardInterrupt锛屾鍦ㄩ€€鍑?..")
+        logger.info("收到 KeyboardInterrupt，正在退出..")
         collector.stop()
 
 
