@@ -704,6 +704,29 @@ export const appRouter = router({
       };
     }),
 
+    getHeartbeat: publicProcedure.query(() => {
+      const hbPath = path.join(PROJECT_ROOT, "monitor/output/discovery_heartbeat.json");
+      try {
+        if (!fs.existsSync(hbPath)) return { alive: false, pid: 0, updatedAt: null, ageSeconds: 99999 };
+        const raw = JSON.parse(fs.readFileSync(hbPath, "utf8"));
+        const updatedAt = raw.updated ? new Date(raw.updated * 1000) : null;
+        const ageSeconds = updatedAt ? Math.round((Date.now() - updatedAt.getTime()) / 1000) : 99999;
+        return { alive: raw.alive ?? false, pid: raw.pid ?? 0, updatedAt, ageSeconds };
+      } catch { return { alive: false, pid: 0, updatedAt: null, ageSeconds: 99999 }; }
+    }),
+
+    getLLMConfig: publicProcedure.query(() => {
+      const cfgPath = path.join(PROJECT_ROOT, "alpha/output/promoter_config.json");
+      try {
+        if (!fs.existsSync(cfgPath)) return { model: "kimi-k2.5", baseUrl: "https://coding.dashscope.aliyuncs.com/v1", apiKeyMasked: "****" };
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+        const llm = cfg.llm ?? {};
+        const key = String(llm.api_key ?? "");
+        const masked = key.length > 8 ? key.slice(0, 4) + "****" + key.slice(-4) : "****";
+        return { model: llm.model ?? "kimi-k2.5", baseUrl: llm.base_url ?? "", apiKeyMasked: masked };
+      } catch { return { model: "unknown", baseUrl: "", apiKeyMasked: "****" }; }
+    }),
+
     getDiscoveryLog: publicProcedure.input(z.object({
       lines: z.number().default(50),
     }).nullish()).query(({ input }) => {

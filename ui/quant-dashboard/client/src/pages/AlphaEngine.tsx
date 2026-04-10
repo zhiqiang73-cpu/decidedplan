@@ -106,10 +106,10 @@ export default function AlphaEngine() {
   const latestRun = runs[0];
   const isRunning = globalStatus?.status === "running";
 
-  // 心跳状态
+  // 心跳状态: Python端每60秒写一次heartbeat（含休眠期），超过120秒无心跳=异常
   const hbAge = heartbeat?.ageSeconds ?? 99999;
-  const hbColor = hbAge < 120 ? "#0ecb81" : hbAge < 7200 ? "#f0b90b" : "#f6465d";
-  const hbLabel = hbAge < 120 ? "引擎运行中" : hbAge < 7200 ? "引擎休眠中" : "引擎离线";
+  const hbColor = hbAge < 120 ? "#0ecb81" : hbAge < 300 ? "#f0b90b" : "#f6465d";
+  const hbLabel = hbAge < 120 ? "引擎心跳正常" : hbAge < 300 ? "引擎响应慢" : "引擎离线";
 
   // 今日候选 (UTC+8)
   const todayStr = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
