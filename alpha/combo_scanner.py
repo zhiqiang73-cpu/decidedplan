@@ -151,7 +151,7 @@ class ComboScanner:
     def _check_directional_bias(
         self, df: pd.DataFrame, feature: str, op: str, direction: str, horizon: int,
     ) -> bool:
-        """确认因子方向性检验: Spearman 相关 >= 0.02 才接受。
+        """确认因子方向性检验: Spearman 相关 >= 0.005 才接受。
 
         涨跌都会触发的因子（如 spread_vs_ma20）不被接受。
         """
@@ -175,13 +175,13 @@ class ComboScanner:
             # 做空时 confirm_op=">" 意味着"因子高时做空"
             # 需要: 因子高 → 收益负 → corr < -0.02
             if direction == "short" and op == ">":
-                ok = corr < -0.02
+                ok = corr < -0.005
             elif direction == "short" and op == "<":
-                ok = corr > 0.02
+                ok = corr > 0.005
             elif direction == "long" and op == ">":
-                ok = corr > 0.02
+                ok = corr > 0.005
             else:  # long and <
-                ok = corr < -0.02
+                ok = corr < -0.005
 
             if not ok:
                 logger.debug(
