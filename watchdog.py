@@ -128,14 +128,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay", type=int, default=30, help="Base restart delay in seconds")
     parser.add_argument("--no-discovery", action="store_true", help="Do not start live discovery")
     parser.add_argument("--no-data-sync", action="store_true", help="Do not start websocket data collection")
-    parser.add_argument("--discovery-interval", type=float, default=6.0, help="Discovery interval in hours")
+    parser.add_argument("--discovery-interval", type=float, default=1.0, help="Discovery interval in hours")
     parser.add_argument(
         "--discovery-start-delay",
         type=int,
         default=300,
         help="Delay discovery startup in seconds so the live chain can stabilize first",
     )
-    parser.add_argument("--data-days", type=int, default=90, help="Lookback window for discovery")
+    parser.add_argument("--data-days", type=int, default=365, help="Lookback window for discovery")
     parser.add_argument("--eth-discovery", action="store_true", help="Also start ETHUSDT live discovery")
     parser.add_argument("--skip-preflight", action="store_true", help="Skip run_doctor-style preflight checks")
     parser.add_argument("--no-ui", action="store_true", help="Do not start the dashboard UI server")
