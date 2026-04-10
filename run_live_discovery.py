@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--watch", action="store_true", help="Run discovery continuously")
 
     parser.add_argument("--symbol", default="BTCUSDT", help="Trading symbol, default BTCUSDT")
-    parser.add_argument("--interval", type=float, default=6.0, help="Watch mode interval in hours")
+    parser.add_argument("--interval", type=float, default=1.0, help="Watch mode interval in hours")
     parser.add_argument("--data-days", type=int, default=365, help="Lookback window in days")
     parser.add_argument(
         "--skip-rest-sync",

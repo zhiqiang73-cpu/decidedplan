@@ -177,7 +177,7 @@ class RegimeTransitionDetector(SignalDetector):
                 "op":            ">",
                 "group":         "regime_transition",
                 "family":        "RT-1",
-                "confidence":    1,
+                "confidence":    2,
             }
 
         # Update confirmed regime state even when no signal fires

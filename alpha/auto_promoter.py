@@ -369,10 +369,10 @@ class AutoPromoter:
         """
         stats = card.get("stats", {})
         # OOS 胜率 >= 65%（扣费后）
-        if (stats.get("oos_win_rate") or 0) < 65:
+        if float(stats.get("oos_win_rate") or 0) < 65:
             return False
         # OOS 样本数 >= 30
-        if (stats.get("n_oos") or 0) < 30:
+        if int(stats.get("n_oos") or 0) < 30:
             return False
         # OOS 净收益 > 0%（兼容两种字段名）
         oos_ret = float(

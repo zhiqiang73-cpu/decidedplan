@@ -149,7 +149,7 @@ Binance WebSocket (kline_1m)
 
 ## 六、Alpha 发现管道
 
-管道入口: `run_live_discovery.py`（`--once` 单次 / `--watch --interval 6` 持续）
+管道入口: `run_live_discovery.py`（`--once` 单次 / `--watch --interval 1` 每小时持续扫描）
 
 | 步骤 | 模块 | 做什么 |
 |------|------|--------|
@@ -200,11 +200,24 @@ LLM 必须回答以下 6 个问题，第 3、5 条不通过则直接拒绝：
 - 连续 3 笔亏损自动收紧止损 + 降低仓位
 - signal_health 接入主链，表现差的策略自动降级
 
+### 4 个关键原则（实盘验证后的核心教训）
+
+P 系列策略全部盈利而 Alpha 管道策略全部亏损的根因分析结论：
+
+| 原则 | 说明 | 代码执行位置 |
+|------|------|------------|
+| **持续性优先** | 信号必须检测"连续 N 个 block 满足条件"的持续状态，单 bar 快照不可靠。特征 `vol_drought_blocks_5m/10m` 和 `price_compression_blocks_5m/10m` 可作为种子或确认因子 | `realtime_seed_miner.py` BlockStateSeed + `feature_engine.py` |
+| **方向性耦合** | 确认因子必须与交易方向有统计偏见（Spearman 相关 >= 0.02）。涨跌都会触发的因子（如价差扩大）直接拒绝 | `combo_scanner.py` 方向性检验 |
+| **出场因果** | 出场条件必须包含入场种子特征的 vs_entry 变化量——力消失了才出场，不是统计巧合 | `live_discovery.py` _validate_exit_causality |
+| **数据充分** | 引擎必须使用 365 天全量数据，n_oos >= 30 不可妥协 | `live_discovery.py` data_days=365 |
+
 ### 数据利用
 
 - 引擎必须使用全量历史数据（data_days=365），不是只用 30 天
+- 扫描频率: 每 1 小时扫描一次（`--interval 1`）
 - 扫描周期: `[3, 5, 10, 15, 30, 60]` bars，覆盖短周期（做市商再平衡）到中周期（分发/枯竭）
 - 重点挖掘 ORDER_FLOW 和 MICROSTRUCTURE 维度的逐笔成交特征
+- 持续性特征（block state）与瞬时特征同等重要，优先作为种子
 
 输出: `alpha/output/pending_rules.json`（候选）、`alpha/output/approved_rules.json`（已批准）
 

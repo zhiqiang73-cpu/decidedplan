@@ -108,11 +108,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         family="A2-26",
         label="high_proximity_oi_cooldown_short",
         directions=("short",),
-        execution_directions=("short",),
-        notes=(
-            "Approved alpha card: dist_to_24h_high > -0.009746 + "
-            "oi_change_rate_5m < 1.452e-05, with card Top-3 exit combos."
-        ),
+        execution_directions=(),  # SUSPENDED 2026-04-10: 旧审批流程不合格，等新引擎重新挖掘
+        notes="SUSPENDED: 旧Alpha管道产出，缺少持续性检测/方向性验证/因果出场。等新引擎重新挖掘验证后再上线。",
         uses_card_exit=True,
         oos_win_rate=75.0,
         mechanism_type="near_high_distribution",
@@ -122,12 +119,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         family="A2-29",
         label="high_proximity_wide_spread_short",
         directions=("short",),
-        execution_directions=(),  # REMOVED: live WR=30% (OOS=66.7%), spread confirmation non-directional
-        notes=(
-            "SUSPENDED 2026-04-10: 20 trades, WR=30%, net=-1.44%. "
-            "spread_vs_ma20 confirmation lacks directional edge. "
-            "Original: dist_to_24h_high > -0.009746 + spread_vs_ma20 > 1.688."
-        ),
+        execution_directions=(),  # SUSPENDED: live WR=30%, spread confirmation non-directional
+        notes="SUSPENDED: spread_vs_ma20 confirmation lacks directional edge.",
         uses_card_exit=True,
         oos_win_rate=72.0,
         mechanism_type="near_high_distribution",
@@ -137,12 +130,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         family="A3-OI",
         label="oi_divergence_short",
         directions=("short",),
-        execution_directions=("short",),
-        notes=(
-            "Approved alpha card: dist_to_24h_high > -0.005 + "
-            "oi_change_rate_1h < -0.01 (price near high + OI falling = distribution). "
-            "Mechanism: oi_divergence. OOS WR=80.7% n=57 PF=7.38. Card Top-3 exit combos."
-        ),
+        execution_directions=(),  # SUSPENDED: 仅1笔交易，巨亏-0.69%
+        notes="SUSPENDED: 旧Alpha管道产出，等新引擎重新挖掘。",
         uses_card_exit=True,
         oos_win_rate=None,
         mechanism_type="oi_divergence",
@@ -152,12 +141,8 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         family="A4-PIR",
         label="position_high_oi_stall_short",
         directions=("short",),
-        execution_directions=("short",),
-        notes=(
-            "Approved alpha card: position_in_range_4h > 0.7159 + "
-            "oi_change_rate_1h < 7.4e-05 (high position + OI stall = distribution). "
-            "OOS WR=68.75% n=32 PF=1.99. Card Top-3 exit combos."
-        ),
+        execution_directions=(),  # SUSPENDED: WR=52.6%, 基本持平
+        notes="SUSPENDED: 旧Alpha管道产出，等新引擎重新挖掘。",
         uses_card_exit=True,
         oos_win_rate=68.75,
         mechanism_type="oi_divergence",

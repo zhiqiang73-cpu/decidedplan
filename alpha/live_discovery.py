@@ -913,6 +913,40 @@ def _derive_mechanism_exit(
     return {"top3": combos, "exit_method": "causal"}
 
 
+def _ensure_causal_exit(entry_feature: str, entry_op: str, combos: list[dict]) -> list[dict]:
+    """确保出场条件至少包含 1 个基于入场种子特征的 vs_entry 变化量。
+
+    力消失了才出场，不是统计巧合。如果所有 combo 都没有入场特征的
+    vs_entry 条件，自动在第一个 combo 中添加占位条件。
+    """
+    entry_vs = f"{entry_feature}_vs_entry"
+    has_causal = any(
+        any(
+            entry_feature in str(c.get("feature", ""))
+            and "_vs_entry" in str(c.get("feature", ""))
+            for c in combo.get("conditions", [])
+        )
+        for combo in combos
+    )
+    if not has_causal and combos:
+        # 入场 op=">" 意味着特征高时入场，衰竭是特征下降 → vs_entry < 0 → operator="<"
+        # 入场 op="<" 意味着特征低时入场，衰竭是特征上升 → vs_entry > 0 → operator=">"
+        decay_op = "<" if entry_op == ">" else ">"
+        combos[0]["conditions"].append({
+            "feature": entry_vs,
+            "operator": decay_op,
+            "threshold": 0.0,
+            "source": "causal_bridge",
+            "role": "entry_force_decay",
+            "neutral_value": 0.0,
+        })
+        combos[0]["description"] = (
+            combos[0].get("description", "") +
+            f" [causal: {entry_vs} decay added]"
+        )
+    return combos
+
+
 def _derive_mechanism_exit_v2(
     entry_feature: str,
     entry_op: str,
@@ -980,6 +1014,9 @@ def _derive_mechanism_exit_v2(
                 "description": "Primary and confirm force both worsened versus entry",
             }
         )
+
+    # -- 因果耦合检查: 出场条件必须包含入场种子特征的 vs_entry 变化量 --
+    combos = _ensure_causal_exit(entry_feature, entry_op, combos)
 
     return {
         "top3": _dedupe_combo_entries(combos)[:3],

@@ -369,8 +369,23 @@ def main() -> None:
     ui_guard: ProcessGuard | None = None
     if ui_enabled:
         if _port_is_in_use(8050):
-            logger.warning("[ui] port 8050 already in use; reusing existing dashboard instance")
-        else:
+            logger.warning("[ui] port 8050 occupied by stale process, killing it...")
+            try:
+                import subprocess as _sp
+                result = _sp.run(
+                    ["powershell", "-Command",
+                     "Get-NetTCPConnection -LocalPort 8050 -State Listen -ErrorAction SilentlyContinue | "
+                     "ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"],
+                    capture_output=True, timeout=10,
+                )
+                time.sleep(2)
+                if _port_is_in_use(8050):
+                    logger.error("[ui] failed to free port 8050; dashboard disabled")
+                else:
+                    logger.info("[ui] port 8050 freed successfully")
+            except Exception as exc:
+                logger.error("[ui] failed to kill stale process: %s", exc)
+        if not _port_is_in_use(8050):
             ui_guard = ProcessGuard(
                 "ui",
                 ui_cmd,

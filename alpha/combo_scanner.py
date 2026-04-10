@@ -119,6 +119,11 @@ CONFIRM_FEATURES = [
     "rt_funding_rate",
     "mark_basis",
     "mark_basis_ma10",
+    # Sustained state (block counts) -- P 系列核心能力
+    "vol_drought_blocks_5m",
+    "vol_drought_blocks_10m",
+    "price_compression_blocks_5m",
+    "price_compression_blocks_10m",
 ]
 
 
@@ -141,6 +146,53 @@ class ComboScanner:
         self.seed_rules       = list(seed_rules) if seed_rules else []
         self.confirm_features = confirm_features or CONFIRM_FEATURES
         self.train_frac       = train_frac
+        self._bias_cache: dict[tuple, bool] = {}
+
+    def _check_directional_bias(
+        self, df: pd.DataFrame, feature: str, op: str, direction: str, horizon: int,
+    ) -> bool:
+        """确认因子方向性检验: Spearman 相关 >= 0.02 才接受。
+
+        涨跌都会触发的因子（如 spread_vs_ma20）不被接受。
+        """
+        cache_key = (feature, op, direction, horizon)
+        if cache_key in self._bias_cache:
+            return self._bias_cache[cache_key]
+
+        fwd_col = f"fwd_ret_{horizon}"
+        if fwd_col not in df.columns or feature not in df.columns:
+            self._bias_cache[cache_key] = True  # 无法检验时放行
+            return True
+
+        try:
+            from scipy.stats import spearmanr
+            valid = df[[feature, fwd_col]].dropna()
+            if len(valid) < 200:
+                self._bias_cache[cache_key] = True
+                return True
+            corr, _ = spearmanr(valid[feature], valid[fwd_col])
+
+            # 做空时 confirm_op=">" 意味着"因子高时做空"
+            # 需要: 因子高 → 收益负 → corr < -0.02
+            if direction == "short" and op == ">":
+                ok = corr < -0.02
+            elif direction == "short" and op == "<":
+                ok = corr > 0.02
+            elif direction == "long" and op == ">":
+                ok = corr > 0.02
+            else:  # long and <
+                ok = corr < -0.02
+
+            if not ok:
+                logger.debug(
+                    "  [BIAS] rejected %s %s for %s: corr=%.4f (no directional edge)",
+                    feature, op, direction, corr,
+                )
+            self._bias_cache[cache_key] = ok
+            return ok
+        except ImportError:
+            self._bias_cache[cache_key] = True
+            return True
 
     def scan(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -234,6 +286,12 @@ class ComboScanner:
                             continue
 
                         if combo_oos["pf"] < 1.0:
+                            continue
+
+                        # -- 方向性检验: 确认因子必须与交易方向有统计偏见 --
+                        if not self._check_directional_bias(
+                            df, feat, op, direction, horizon
+                        ):
                             continue
 
                         results.append({
@@ -392,6 +450,12 @@ class ComboScanner:
                             if wr_improvement < MIN_WR_IMPROVEMENT:
                                 continue
                             if combo_oos["pf"] < 1.0:
+                                continue
+
+                            # -- 方向性检验 --
+                            if not self._check_directional_bias(
+                                df, conf_feat, conf_op, direction, horizon
+                            ):
                                 continue
 
                             results.append({
