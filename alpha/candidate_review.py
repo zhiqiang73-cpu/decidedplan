@@ -146,7 +146,8 @@ def _entry_reasons(card: dict[str, Any], reasons: list[str]) -> None:
     family = str(card.get("family") or "").strip()
     if not family:
         reasons.append("缺少可落 live family，还是研究半成品")
-    elif not is_product_alpha_family(family):
+    # A5-xxx 系列是自动分配的新 family，允许通过
+    elif not is_product_alpha_family(family) and not family.startswith("A5-"):
         reasons.append(f"family 还没进入 live 成品名单: {family}")
 
     validation = card.get("validation", {})

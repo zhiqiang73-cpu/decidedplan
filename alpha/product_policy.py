@@ -69,7 +69,40 @@ def infer_product_family(card: dict[str, Any]) -> str:
         if isinstance(condition, dict) and condition.get("feature"):
             confirm_feature = str(condition.get("feature") or "").strip()
             break
-    return _FAMILY_SIGNATURES.get((entry_feature, confirm_feature, direction), "")
+
+    # 先查硬编码签名表
+    known = _FAMILY_SIGNATURES.get((entry_feature, confirm_feature, direction), "")
+    if known:
+        return known
+
+    # 新发现的候选: 自动分配递增 family (A5-001, A5-002, ...)
+    # 只要候选通过了统计硬门槛, 就给它一个 family, 不再拦住
+    return _auto_assign_family(card, entry_feature, confirm_feature, direction)
+
+
+_next_auto_id = 1
+
+def _auto_assign_family(card: dict[str, Any], entry_feature: str, confirm_feature: str, direction: str) -> str:
+    """为通过统计门槛的新候选自动分配 family。"""
+    global _next_auto_id
+    # 从已有 approved/pending 中找最大编号
+    import re
+    for pool_path in (_APPROVED_PATH, _PENDING_PATH):
+        existing = read_json_file(pool_path) or []
+        for rule in existing:
+            fam = str(rule.get("family") or "")
+            m = re.match(r"A5-(\d+)", fam)
+            if m:
+                _next_auto_id = max(_next_auto_id, int(m.group(1)) + 1)
+
+    family = f"A5-{_next_auto_id:03d}"
+    _next_auto_id += 1
+
+    # 注册签名以避免重复分配
+    sig = (entry_feature, confirm_feature, direction)
+    _FAMILY_SIGNATURES[sig] = family
+
+    return family
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

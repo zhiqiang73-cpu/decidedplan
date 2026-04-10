@@ -91,10 +91,11 @@
     "category": "UI对接",
     "title": "前后端全对接：Python系统数据接入 Node.js Dashboard",
     "description": "移除所有假数据，接入 system_state.json / trades.csv / alerts.log / *.json",
-    "status": "in_progress",
+    "status": "completed",
     "priority": "high",
     "layer": "ui",
-    "sortOrder": 9
+    "sortOrder": 9,
+    "completedAt": "2026-04-10T20:00:00Z"
   },
   {
     "id": 10,
