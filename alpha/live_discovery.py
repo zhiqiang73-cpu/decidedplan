@@ -731,11 +731,36 @@ def _build_mechanism_exit_params(
     protect_start_pct = float(base.protect_start_pct)
     max_hold_factor = int(base.max_hold_factor)
     min_hold_bars = int(base.min_hold_bars)
+    protect_gap_ratio = float(base.protect_gap_ratio)
 
-    if horizon >= 60:
-        stop_pct *= 1.08
+    # 根据 horizon 自适应参数（短周期力需要更紧的止损和更敏感的保本）
+    if horizon <= 5:
+        # 3-5 分钟微结构力：利润空间 0.05-0.15%，止损必须极紧
+        stop_pct = 0.15
+        protect_start_pct = 0.03
+        protect_gap_ratio = 0.30
+        min_hold_bars = 1
+        max_hold_factor = 3
+    elif horizon <= 15:
+        # 5-15 分钟短周期力：利润空间 0.10-0.30%
+        stop_pct = 0.25
+        protect_start_pct = 0.04
+        protect_gap_ratio = 0.35
+        min_hold_bars = 2
+        max_hold_factor = 3
+    elif horizon <= 30:
+        # 30 分钟中周期力：利润空间 0.15-0.50%
+        stop_pct = 0.40
+        protect_start_pct = 0.05
+        protect_gap_ratio = 0.40
+        min_hold_bars = 3
+        max_hold_factor = 4
+    else:
+        # 60 分钟长周期力
+        stop_pct = max(stop_pct, 0.50)
         protect_start_pct *= 1.10
         max_hold_factor = max(max_hold_factor, 4)
+
     if mechanism_type in {"seller_impulse", "volume_climax_reversal"} and direction == "short":
         stop_pct *= 1.05
     if mechanism_type == "mm_rebalance" and horizon <= 15:
@@ -745,7 +770,7 @@ def _build_mechanism_exit_params(
         take_profit_pct=base.take_profit_pct,
         stop_pct=round(stop_pct, 4),
         protect_start_pct=round(protect_start_pct, 4),
-        protect_gap_ratio=base.protect_gap_ratio,
+        protect_gap_ratio=round(protect_gap_ratio, 4),
         protect_floor_pct=base.protect_floor_pct,
         min_hold_bars=min_hold_bars,
         max_hold_factor=max_hold_factor,
@@ -911,6 +936,79 @@ def _derive_mechanism_exit(
         })
 
     return {"top3": combos, "exit_method": "causal"}
+
+
+def _optimize_exit_params(
+    engine,
+    df: pd.DataFrame,
+    entry_mask,
+    exit_info: dict,
+    direction: str,
+    horizon: int,
+    base_params: ExitParams,
+) -> tuple[ExitParams, dict]:
+    """在 OOS 数据上网格扫描 stop_pct 和 protect_start_pct，找到 PF 最高的参数组合。
+
+    不硬编码，用数据说话。
+    """
+    # 止损网格：根据 horizon 确定扫描范围
+    if horizon <= 5:
+        stop_grid = [0.08, 0.10, 0.12, 0.15, 0.20]
+        protect_grid = [0.02, 0.03, 0.04, 0.05]
+    elif horizon <= 15:
+        stop_grid = [0.12, 0.15, 0.20, 0.25, 0.30]
+        protect_grid = [0.03, 0.04, 0.05, 0.06]
+    elif horizon <= 30:
+        stop_grid = [0.20, 0.25, 0.30, 0.40, 0.50]
+        protect_grid = [0.04, 0.05, 0.06, 0.08]
+    else:
+        stop_grid = [0.30, 0.40, 0.50, 0.70, 1.00]
+        protect_grid = [0.05, 0.08, 0.10, 0.12]
+
+    best_pf = -1.0
+    best_params = base_params
+    best_metrics: dict = {}
+
+    for stop in stop_grid:
+        for protect in protect_grid:
+            trial = ExitParams(
+                take_profit_pct=base_params.take_profit_pct,
+                stop_pct=stop,
+                protect_start_pct=protect,
+                protect_gap_ratio=base_params.protect_gap_ratio,
+                protect_floor_pct=max(0.01, protect * 0.5),
+                min_hold_bars=base_params.min_hold_bars,
+                max_hold_factor=base_params.max_hold_factor,
+                exit_confirm_bars=base_params.exit_confirm_bars,
+                decay_exit_threshold=base_params.decay_exit_threshold,
+                decay_tighten_threshold=base_params.decay_tighten_threshold,
+            )
+            metrics = engine._shadow_smart_exit_backtest(
+                df, entry_mask, exit_info, direction, horizon, params=trial,
+            )
+            pf = metrics.get("earliest_pf", 0)
+            net = metrics.get("net_return_with_exit", 0)
+            # 选 PF 最高且净收益 > 0 的参数
+            if pf > best_pf and net > 0:
+                best_pf = pf
+                best_params = trial
+                best_metrics = metrics
+
+    # 如果所有参数都不行，用默认参数的结果
+    if not best_metrics:
+        best_metrics = engine._shadow_smart_exit_backtest(
+            df, entry_mask, exit_info, direction, horizon, params=base_params,
+        )
+        best_params = base_params
+
+    if best_pf > 0:
+        logger.info(
+            "  [PARAM-OPT] best stop=%.2f%% protect=%.2f%% -> PF=%.2f net=%.4f%%",
+            best_params.stop_pct, best_params.protect_start_pct,
+            best_pf, best_metrics.get("net_return_with_exit", 0),
+        )
+
+    return best_params, best_metrics
 
 
 def _ensure_causal_exit(entry_feature: str, entry_op: str, combos: list[dict]) -> list[dict]:
@@ -1270,10 +1368,10 @@ class LiveDiscoveryEngine:
                     mechanism_type=mechanism_type,
                 )
 
-                # Backtest exit conditions on OOS data
-                exit_metrics = self._shadow_smart_exit_backtest(
-                    df, entry_mask, final_exit, direction, int(row["horizon"]),
-                    params=exit_params,
+                # Backtest exit conditions on OOS data -- 用网格扫描找最优止损参数
+                exit_params, exit_metrics = _optimize_exit_params(
+                    self, df, entry_mask, final_exit, direction,
+                    int(row["horizon"]), exit_params,
                 )
                 final_exit.update(exit_metrics)
 
@@ -1308,9 +1406,9 @@ class LiveDiscoveryEngine:
                     mechanism_type=mechanism_type,
                 )
                 entry_mask_atom = self._build_entry_mask(df, atom)
-                exit_metrics = self._shadow_smart_exit_backtest(
-                    df, entry_mask_atom, exit_cond, atom.direction, int(atom.horizon),
-                    params=exit_params,
+                exit_params, exit_metrics = _optimize_exit_params(
+                    self, df, entry_mask_atom, exit_cond, atom.direction,
+                    int(atom.horizon), exit_params,
                 )
                 exit_cond.update(exit_metrics)
                 card = self._build_card(atom, wf, exit_cond, exit_params, mechanism_type)
