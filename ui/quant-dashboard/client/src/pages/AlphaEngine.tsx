@@ -94,12 +94,32 @@ export default function AlphaEngine() {
     },
   });
 
+  // -- 新增: 心跳 + LLM 配置 + discovery log --
+  const { data: heartbeat } = trpc.alphaEngine.getHeartbeat.useQuery(undefined, { refetchInterval: 15_000 });
+  const { data: llmConfig } = trpc.alphaEngine.getLLMConfig.useQuery(undefined, { refetchInterval: 60_000 });
+  const { data: discoveryLogLines = [] } = trpc.alphaEngine.getDiscoveryLog.useQuery({ lines: 30 }, { refetchInterval: 30_000 });
+
   const candidates = rawCandidates as CandidateRow[];
   const reviewQueue = rawReviewQueue as ReviewRow[];
   const pendingCandidates = candidates.filter((item) => item.status === "pending");
   const approvedCandidates = candidates.filter((item) => item.status === "approved");
   const latestRun = runs[0];
   const isRunning = globalStatus?.status === "running";
+
+  // 心跳状态
+  const hbAge = heartbeat?.ageSeconds ?? 99999;
+  const hbColor = hbAge < 120 ? "#0ecb81" : hbAge < 7200 ? "#f0b90b" : "#f6465d";
+  const hbLabel = hbAge < 120 ? "引擎运行中" : hbAge < 7200 ? "引擎休眠中" : "引擎离线";
+
+  // 今日候选 (UTC+8)
+  const todayStr = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+  const todayCandidates = candidates.filter((c) => {
+    const disc = (c as any).discoveredAt;
+    if (!disc) return false;
+    const d = new Date(disc);
+    const utc8 = new Date(d.getTime() + 8 * 3600000);
+    return utc8.toISOString().slice(0, 10) === todayStr;
+  });
 
   useEffect(() => {
     if (!alphaProgress) return;
@@ -131,9 +151,16 @@ export default function AlphaEngine() {
               {"统一展示 discovery 状态、候选规则、review queue 和运行记录。"}
             </p>
           </div>
-          <div className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg" style={{ backgroundColor: "#1e2329", color: connected ? "#0ecb81" : "#848e9c" }}>
-            {connected ? <Activity size={14} /> : <Clock3 size={14} />}
-            <span>{connected ? "WebSocket 已连接" : "WebSocket 重连中"}</span>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg" style={{ backgroundColor: "#1e2329", color: hbColor }}>
+              <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: hbColor, boxShadow: hbAge < 120 ? `0 0 6px ${hbColor}` : "none", animation: hbAge < 120 ? "pulse 2s infinite" : "none" }} />
+              <span>{hbLabel}</span>
+              {llmConfig && <span style={{ color: "#848e9c", marginLeft: 4 }}>{`| ${llmConfig.model}`}</span>}
+            </div>
+            <div className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg" style={{ backgroundColor: "#1e2329", color: connected ? "#0ecb81" : "#848e9c" }}>
+              {connected ? <Activity size={14} /> : <Clock3 size={14} />}
+              <span>{connected ? "WebSocket 已连接" : "WebSocket 重连中"}</span>
+            </div>
           </div>
         </div>
 
@@ -203,41 +230,64 @@ export default function AlphaEngine() {
             <SummaryCell label={"待复核"} value={String(reviewQueue.length)} />
             <SummaryCell label={"已批准候选"} value={String(approvedCandidates.length)} />
             <SummaryCell label={"当前连接"} value={connected ? "WS online" : "WS reconnecting"} valueColor={connected ? "#0ecb81" : "#848e9c"} />
-            <div className="rounded-lg p-3 text-xs leading-6" style={{ backgroundColor: "#161a1e", color: "#848e9c" }}>
-              {"这里只展示后端真实返回的候选及 review queue，不再做虚假计数或 UI 自造状态。"}
-            </div>
+            {llmConfig && (
+              <div className="rounded-lg p-3 text-xs leading-6" style={{ backgroundColor: "#161a1e" }}>
+                <div style={{ color: "#bc8cff" }}>{"LLM 审核引擎"}</div>
+                <div style={{ color: "#eaecef" }}>{`模型: ${llmConfig.model}`}</div>
+                <div style={{ color: "#848e9c" }}>{`API: ${llmConfig.baseUrl || "--"}`}</div>
+                <div style={{ color: "#848e9c" }}>{`Key: ${llmConfig.apiKeyMasked}`}</div>
+              </div>
+            )}
           </div>
         </div>
 
         <div className="card-q overflow-hidden">
           <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: "1px solid #2b3139" }}>
-            <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>{"待审候选"}</h3>
-            <span className="text-xs" style={{ color: "#848e9c" }}>{`${pendingCandidates.length} 条`}</span>
+            <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>{"今日发现"}</h3>
+            <span className="text-xs" style={{ color: "#848e9c" }}>{`${todayStr} (UTC+8) | ${todayCandidates.length} 条`}</span>
           </div>
-          {pendingCandidates.length === 0 ? (
-            <div className="px-4 py-6 text-sm" style={{ color: "#848e9c" }}>{"当前没有 pending 候选。"}</div>
+          {todayCandidates.length === 0 ? (
+            <div className="px-4 py-6 text-sm" style={{ color: "#848e9c" }}>{"今日暂无新发现，引擎每小时自动扫描，新候选将在此出现。"}</div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr style={{ borderBottom: "1px solid #1e2329" }}>
-                    {["规则", "方向", "OOS 胜率", "样本", "置信度", "操作"].map((heading) => (
+                    {["规则", "方向", "OOS WR", "样本", "LLM 评估", "状态", "操作"].map((heading) => (
                       <th key={heading} className="px-4 py-2.5 text-left text-xs font-medium" style={{ color: "#848e9c" }}>{heading}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {pendingCandidates.map((candidate, index) => (
-                    <tr key={candidate.candidateId} style={{ borderBottom: index < pendingCandidates.length - 1 ? "1px solid #1e2329" : "none" }}>
+                  {todayCandidates.map((candidate, index) => {
+                    const llmR = (candidate as any).llmResult as any;
+                    const statusColor = candidate.status === "approved" ? "#0ecb81" : candidate.status === "rejected" ? "#f6465d" : "#f0b90b";
+                    const statusLabel = candidate.status === "approved" ? "已批准" : candidate.status === "rejected" ? "已驳回" : "待审";
+                    return (
+                    <tr key={candidate.candidateId} style={{ borderBottom: index < todayCandidates.length - 1 ? "1px solid #1e2329" : "none" }}>
                       <td className="px-4 py-3">
-                        <div className="text-sm" style={{ color: "#eaecef" }}>{candidate.fullExpression}</div>
-                        <div className="text-xs mt-1" style={{ color: "#848e9c" }}>{candidate.symbol}</div>
+                        <div className="text-xs font-mono" style={{ color: "#f0b90b" }}>{candidate.fullExpression}</div>
                       </td>
-                      <td className="px-4 py-3 text-sm" style={{ color: "#eaecef" }}>{formatDirection(candidate.direction)}</td>
+                      <td className="px-4 py-3 text-sm" style={{ color: candidate.direction === "LONG" ? "#0ecb81" : "#f6465d" }}>{candidate.direction === "LONG" ? "做多" : "做空"}</td>
                       <td className="px-4 py-3 text-sm font-num" style={{ color: scoreColor(candidate.oosWinRate) }}>{formatPercent(candidate.oosWinRate)}</td>
                       <td className="px-4 py-3 text-sm font-num" style={{ color: "#eaecef" }}>{String(candidate.sampleSize ?? 0)}</td>
-                      <td className="px-4 py-3 text-sm font-num" style={{ color: confidenceColor(candidate.confidenceScore) }}>{formatConfidence(candidate.confidenceScore)}</td>
                       <td className="px-4 py-3">
+                        {llmR ? (
+                          <div>
+                            <div className="text-xs" style={{ color: "#bc8cff" }}>{llmR.mechanism_display_name ?? "--"}</div>
+                            {!llmR.is_valid && llmR.rejection_reason && (
+                              <div className="text-xs mt-0.5" style={{ color: "#f6465d" }}>{llmR.rejection_reason}</div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs" style={{ color: "#848e9c" }}>{"--"}</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="text-xs px-2 py-0.5 rounded-full" style={{ backgroundColor: `${statusColor}20`, color: statusColor }}>{statusLabel}</span>
+                      </td>
+                      <td className="px-4 py-3">
+                        {candidate.status === "pending" && (
                         <div className="flex items-center gap-1.5">
                           <Button size="sm" onClick={() => approveCandidate.mutate({ candidateId: candidate.candidateId })} className="h-7 px-2 text-xs" style={{ backgroundColor: "rgba(14,203,129,0.15)", color: "#0ecb81", border: "1px solid rgba(14,203,129,0.3)" }}>
                             <CheckCircle2 size={11} className="mr-1" />
@@ -246,13 +296,12 @@ export default function AlphaEngine() {
                           <Button size="sm" onClick={() => rejectCandidate.mutate({ candidateId: candidate.candidateId })} className="h-7 px-2 text-xs" style={{ backgroundColor: "rgba(246,70,93,0.12)", color: "#f6465d", border: "1px solid rgba(246,70,93,0.25)" }}>
                             {"驳回"}
                           </Button>
-                          <Button size="sm" onClick={() => triggerBacktest.mutate({ candidateId: candidate.candidateId })} className="h-7 px-2 text-xs" style={{ backgroundColor: "rgba(240,185,11,0.15)", color: "#f0b90b", border: "1px solid rgba(240,185,11,0.3)" }}>
-                            {"回测"}
-                          </Button>
                         </div>
+                        )}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -297,11 +346,16 @@ export default function AlphaEngine() {
               <span className="text-xs" style={{ color: "#848e9c" }}>{`${logs.length} 条`}</span>
             </div>
             <div className="max-h-80 overflow-y-auto px-4 py-3 space-y-2">
-              {logs.length === 0 ? (
-                <div className="text-sm" style={{ color: "#848e9c" }}>{"等待 Alpha progress 输入..."}</div>
+              {logs.length === 0 && discoveryLogLines.length === 0 ? (
+                <div className="text-sm" style={{ color: "#848e9c" }}>{"等待引擎运行..."}</div>
               ) : (
-                logs.map((log, index) => (
-                  <div key={`${log.ts}-${index}`} className="rounded-lg p-3 text-xs font-mono" style={{ backgroundColor: "#161a1e", color: log.level === "success" ? "#0ecb81" : log.level === "warn" ? "#f0b90b" : "#c9d1d9" }}>
+                [...(discoveryLogLines as string[]).map((line, i) => ({
+                  ts: line.slice(0, 8),
+                  message: line.slice(10),
+                  level: (line.includes("ERROR") ? "warn" : line.includes("合格") ? "success" : "info") as "info" | "success" | "warn",
+                  key: `dl-${i}`,
+                })), ...logs.map((l, i) => ({ ...l, key: `ws-${i}` }))].slice(-50).map((log) => (
+                  <div key={(log as any).key ?? log.ts} className="rounded-lg p-3 text-xs font-mono" style={{ backgroundColor: "#161a1e", color: log.level === "success" ? "#0ecb81" : log.level === "warn" ? "#f0b90b" : "#c9d1d9" }}>
                     <span style={{ color: "#848e9c" }}>{log.ts}</span>
                     <span>{`  ${log.message}`}</span>
                   </div>

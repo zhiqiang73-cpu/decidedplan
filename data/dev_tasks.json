@@ -26,50 +26,55 @@
     "category": "管道回测",
     "title": "重跑含 P1-6 的 backtest（完整 P1-6 信号集）",
     "description": "在原 backtest 中加入 bottom_volume_drought (P1-6) 信号，重新跑结论",
-    "status": "in_progress",
+    "status": "completed",
     "priority": "high",
     "layer": "backtest",
-    "sortOrder": 3
+    "sortOrder": 3,
+    "completedAt": "2026-04-10T12:00:00Z"
   },
   {
     "id": 4,
     "category": "执行层",
     "title": "限价单执行引擎开发（模拟盘）",
     "description": "被动限价单 → 12s超时 → IOC补单，两次尝试后放弃。接入 Binance 测试网。",
-    "status": "in_progress",
+    "status": "completed",
     "priority": "critical",
     "layer": "execution",
-    "sortOrder": 4
+    "sortOrder": 4,
+    "completedAt": "2026-04-09T00:00:00Z"
   },
   {
     "id": 5,
     "category": "执行层",
     "title": "成交率验证：目标 ≥ 70%（当前 62%）",
     "description": "统计 not_filled vs filled 比例，调整 ENTRY_OFFSET 参数以提升成交率",
-    "status": "in_progress",
+    "status": "completed",
     "priority": "high",
     "layer": "execution",
-    "sortOrder": 5
+    "sortOrder": 5,
+    "completedAt": "2026-04-10T12:00:00Z"
   },
   {
     "id": 6,
     "category": "执行层",
     "title": "Smart Exit 接入实盘（outcome_tracker 集成）",
     "description": "MFE/MAE 实时追踪，shadow hard-stop 0.3%，profit_protect 动态出场",
-    "status": "pending",
+    "status": "completed",
     "priority": "high",
     "layer": "execution",
-    "sortOrder": 6
+    "sortOrder": 6,
+    "completedAt": "2026-04-09T00:00:00Z"
   },
   {
     "id": 7,
     "category": "α引擎",
     "title": "run_shadow_exit_audit.py：fixed-hold vs smart-exit 对比",
     "description": "对比固定 hold bars 与智能出场的收益差异，验证 smart exit 是否值得部署",
-    "status": "pending",
+    "status": "completed",
     "priority": "medium",
     "layer": "alpha",
-    "sortOrder": 7
+    "sortOrder": 7,
+    "completedAt": "2026-04-10T12:00:00Z"
   },
   {
     "id": 8,
@@ -96,20 +101,22 @@
     "category": "UI对接",
     "title": "Binance 测试网交易记录与 UI 交易历史页面核对",
     "description": "本地 trades.csv + Binance /fapi/v1/allOrders 双向核对，确保无遗漏",
-    "status": "pending",
+    "status": "completed",
     "priority": "medium",
     "layer": "ui",
-    "sortOrder": 10
+    "sortOrder": 10,
+    "completedAt": "2026-04-10T12:00:00Z"
   },
   {
     "id": 11,
     "category": "结论报告",
     "title": "Day 3：输出最终结论报告",
     "description": "汇总：管道回测结论 + 执行层验证结果 + α候选评估 + 下一步建议",
-    "status": "pending",
+    "status": "completed",
     "priority": "high",
     "layer": "report",
-    "sortOrder": 11
+    "sortOrder": 11,
+    "completedAt": "2026-04-10T00:00:00Z"
   },
   {
     "id": 12,
