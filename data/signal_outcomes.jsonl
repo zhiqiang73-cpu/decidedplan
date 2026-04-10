@@ -69,3 +69,12 @@
 {"card_id": "P1-10", "direction": "short", "net_return_pct": 0.12720903482458742, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T02:01:22.796780+00:00"}
 {"card_id": "A4-PIR", "direction": "short", "net_return_pct": 0.042548460289933004, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T05:57:21.042934+00:00"}
 {"card_id": "A4-PIR", "direction": "short", "net_return_pct": -0.17168872940629104, "flow_type": "PASSIVE", "regime": "RANGE_BOUND", "ts": "2026-04-10T10:55:03.572424+00:00"}
+{"card_id": "OA-1_oi_accumulation_long", "direction": "long", "net_return_pct": 0.03353244473698645, "flow_type": "AGGRESSIVE_BUY", "regime": "QUIET_TREND", "ts": "2026-04-10T14:39:18.398310+00:00"}
+{"card_id": "A2-29", "direction": "short", "net_return_pct": -0.10902889763316995, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T15:25:27.797156+00:00"}
+{"card_id": "A2-26", "direction": "short", "net_return_pct": 0.27252277865926783, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T15:58:41.600128+00:00"}
+{"card_id": "A4-PIR", "direction": "short", "net_return_pct": -0.0721231772842382, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T17:27:54.683166+00:00"}
+{"card_id": "A2-26", "direction": "short", "net_return_pct": -0.402902555960994, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T17:52:00.076945+00:00"}
+{"card_id": "A4-PIR", "direction": "short", "net_return_pct": -0.2578786715195133, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T17:52:33.726198+00:00"}
+{"card_id": "A4-PIR", "direction": "short", "net_return_pct": 0.08411111917818961, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T18:35:11.177545+00:00"}
+{"card_id": "A4-PIR", "direction": "short", "net_return_pct": -0.04503546338616405, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T19:03:28.167990+00:00"}
+{"card_id": "A2-26", "direction": "short", "net_return_pct": -0.5416438356164344, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T20:31:24.179032+00:00"}

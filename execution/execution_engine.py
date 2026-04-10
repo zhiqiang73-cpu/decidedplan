@@ -289,8 +289,9 @@ class ExecutionEngine:
                 self._entry_confirm_pending.pop(confirm_key, None)
             return
 
-        if not is_alpha and (family, direction) not in EXECUTION_WHITELIST:
-            logger.debug("[EXEC] Rejected %s %s: not in whitelist", family, direction)
+        # Alpha 信号也必须通过白名单 -- 防止 approved_rules.json 绕过 live_catalog 暂停
+        if (family, direction) not in EXECUTION_WHITELIST:
+            logger.info("[EXEC] Rejected %s %s: not in whitelist (alpha=%s)", family, direction, is_alpha)
             self._log_blocked(signal_name, family, direction, "whitelist",
                               confidence, f"{family}|{direction} not in EXECUTION_WHITELIST")
             return
