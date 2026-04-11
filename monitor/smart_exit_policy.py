@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from monitor.exit_policy_config import ExitParams, resolve_max_hold_bars
+from monitor.exit_policy_config import ExitParams, resolve_safety_cap_bars
 
 SNAPSHOT_COLUMNS = (
     "vwap_deviation",
@@ -65,6 +65,7 @@ SNAPSHOT_COLUMNS = (
 _EXIT_REASON_SET = {"reverse_structure", "logic_failed", "logic_complete", "regime_shift"}
 LOGIC_COMPLETE_MIN_RETURN_PCT = 0.0
 VS_ENTRY_TAG = "_vs_entry"
+SAFETY_CAP_EXIT_REASON = "safety_cap"
 
 
 def _coerce_float(value: object) -> Optional[float]:
@@ -231,9 +232,9 @@ def _build_alpha_exit_summary(
         except Exception:
             horizon = 0
         if horizon > 0:
-            parts.append(f"No dedicated card exit; fallback hold {horizon} bars")
+            parts.append(f"No dedicated causal exit; fallback safety cap {horizon} bars")
         else:
-            parts.append("No dedicated card exit")
+            parts.append("No dedicated causal exit")
 
     return " | ".join(parts)
 
@@ -248,11 +249,16 @@ def build_entry_snapshot(alert: Dict, features: Optional[pd.Series]) -> Dict[str
     alpha_exit_params = _normalize_alpha_exit_params(alert.get("alpha_exit_params"))
 
     stop_pct = _coerce_float(alert.get("stop_pct"))
+    research_horizon = _coerce_float(alert.get("research_horizon_bars"))
+    if research_horizon is None:
+        research_horizon = _coerce_float(alert.get("horizon"))
+
     snapshot: Dict[str, object] = {
         "family": alert.get("family") or normalize_family(alert.get("name", "")),
         "desc": alert.get("desc", ""),
         "feature": alert.get("feature", ""),
         "feature_value": alert.get("feature_value"),
+        "research_horizon_bars": int(research_horizon or 0),
         "exit_summary": _build_alpha_exit_summary(
             alpha_exit_conditions,
             stop_pct,
@@ -559,10 +565,22 @@ def _eval_p0_2(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Di
       C3: dist_to_24h_high_vs_entry < -0.003624 AND position_in_range_24h_vs_entry < -0.089729 AND vwap_deviation_vs_entry < -0.003921
     Earliest: C2
     Stop: -1.50%
+
+    LONG (对称条件，资金费率结算后价格回升 = 力释放):
+      position_in_range_24h_vs_entry > 0.089729 AND vwap_deviation_vs_entry > 0.003921
     """
+    direction = str(position.get("direction", "")).lower()
     r24h_vs_entry = _vs_entry_val(row, snapshot, "position_in_range_24h")
     vwap_vs_entry = _vs_entry_val(row, snapshot, "vwap_deviation")
 
+    if direction == "long":
+        # LONG: 价格回升到入场区间上方，VWAP 偏离回正 = 资金费率套利力释放完毕
+        if (r24h_vs_entry is not None and r24h_vs_entry > 0.089729
+                and vwap_vs_entry is not None and vwap_vs_entry > 0.003921):
+            return {"action": "exit", "reason": "logic_complete", "health": 1.0}
+        return {"action": "hold", "reason": "hold", "health": 0.0}
+
+    # SHORT（默认方向）: 价格下跌，24h 区间位置和 VWAP 偏离均下移 = 空头逻辑完成
     if (r24h_vs_entry is not None and r24h_vs_entry < -0.089729
             and vwap_vs_entry is not None and vwap_vs_entry < -0.003921):
         return {"action": "exit", "reason": "logic_complete", "health": 1.0}
@@ -946,25 +964,6 @@ def evaluate_exit_action(
             "current_return": current_return,
         }
 
-    if family == "P1-8" and str(position.get("direction", "")).lower() == "short" and params.take_profit_pct > 0:
-        max_hold_bars = resolve_max_hold_bars(
-            family=family,
-            base_horizon=max(1, int(position.get("hold_bars", 1) or 1)),
-            params=params,
-        )
-        if bars_held >= max_hold_bars:
-            return {
-                "action": "exit",
-                "reason": "time_cap",
-                "health": float(runtime_state.get("last_health", 0.0) or 0.0),
-                "current_return": current_return,
-            }
-        return {
-            "action": "hold",
-            "reason": "tp_sl_mode",
-            "health": float(runtime_state.get("last_health", 0.0) or 0.0),
-            "current_return": current_return,
-        }
 
     _refresh_runtime_protect(runtime_state, params)
     if runtime_state.get("protect_armed"):
@@ -977,18 +976,11 @@ def evaluate_exit_action(
                 "current_return": current_return,
             }
 
-    max_hold_bars = resolve_max_hold_bars(
+    safety_cap_bars = resolve_safety_cap_bars(
         family=family,
         base_horizon=max(1, int(position.get("hold_bars", 1) or 1)),
         params=params,
     )
-    if bars_held >= max_hold_bars:
-        return {
-            "action": "exit",
-            "reason": "time_cap",
-            "health": float(runtime_state.get("last_health", 0.0) or 0.0),
-            "current_return": current_return,
-        }
 
     if bars_held < params.min_hold_bars:
         return {
@@ -1098,6 +1090,16 @@ def evaluate_exit_action(
             "action": "hold",
             "reason": f"confirm_{reason}",
             "health": runtime_state["last_health"],
+            "current_return": current_return,
+        }
+
+    if bars_held >= safety_cap_bars:
+        runtime_state["pending_exit_reason"] = ""
+        runtime_state["pending_exit_count"] = 0
+        return {
+            "action": "exit",
+            "reason": SAFETY_CAP_EXIT_REASON,
+            "health": float(runtime_state.get("last_health", 0.0) or 0.0),
             "current_return": current_return,
         }
 

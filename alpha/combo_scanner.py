@@ -126,6 +126,52 @@ CONFIRM_FEATURES = [
     "price_compression_blocks_10m",
 ]
 
+_TREND_PRICE_SLOPE_PCT = 0.002
+_TREND_DIR_AUTOCORR_MIN = 0.12
+_TREND_DIR_NET_MIN = 0.05
+_TREND_RANGE_HIGH = 0.75
+_TREND_RANGE_LOW = 0.25
+_TREND_LOOKBACK_BARS = 20
+
+
+def _context_mask(df: pd.DataFrame, context: str) -> pd.Series:
+    if not context:
+        return pd.Series(True, index=df.index)
+
+    slope_up = pd.Series(False, index=df.index)
+    slope_down = pd.Series(False, index=df.index)
+    if "close" in df.columns:
+        slope = df["close"].pct_change(_TREND_LOOKBACK_BARS)
+        slope_up = slope > _TREND_PRICE_SLOPE_PCT
+        slope_down = slope < -_TREND_PRICE_SLOPE_PCT
+
+    flow_up = pd.Series(False, index=df.index)
+    flow_down = pd.Series(False, index=df.index)
+    if {"direction_autocorr", "direction_net_1m"}.issubset(df.columns):
+        flow_up = (
+            (df["direction_autocorr"] > _TREND_DIR_AUTOCORR_MIN)
+            & (df["direction_net_1m"] > _TREND_DIR_NET_MIN)
+        )
+        flow_down = (
+            (df["direction_autocorr"] > _TREND_DIR_AUTOCORR_MIN)
+            & (df["direction_net_1m"] < -_TREND_DIR_NET_MIN)
+        )
+
+    range_up = pd.Series(False, index=df.index)
+    range_down = pd.Series(False, index=df.index)
+    if "position_in_range_24h" in df.columns:
+        range_up = df["position_in_range_24h"] > _TREND_RANGE_HIGH
+        range_down = df["position_in_range_24h"] < _TREND_RANGE_LOW
+
+    up_votes = slope_up.astype(int) + flow_up.astype(int) + range_up.astype(int)
+    down_votes = slope_down.astype(int) + flow_down.astype(int) + range_down.astype(int)
+
+    if context == "TREND_UP":
+        return (up_votes >= 2).fillna(False)
+    if context == "TREND_DOWN":
+        return (down_votes >= 2).fillna(False)
+    return pd.Series(True, index=df.index)
+
 
 class ComboScanner:
     """
@@ -151,7 +197,7 @@ class ComboScanner:
     def _check_directional_bias(
         self, df: pd.DataFrame, feature: str, op: str, direction: str, horizon: int,
     ) -> bool:
-        """确认因子方向性检验: Spearman 相关 >= 0.005 才接受。
+        """确认因子方向性检验: Spearman 相关 >= 0.02 才接受（CLAUDE.md 硬门槛）。
 
         涨跌都会触发的因子（如 spread_vs_ma20）不被接受。
         """
@@ -175,13 +221,13 @@ class ComboScanner:
             # 做空时 confirm_op=">" 意味着"因子高时做空"
             # 需要: 因子高 → 收益负 → corr < -0.02
             if direction == "short" and op == ">":
-                ok = corr < -0.005
+                ok = corr < -0.02
             elif direction == "short" and op == "<":
-                ok = corr > 0.005
+                ok = corr > 0.02
             elif direction == "long" and op == ">":
-                ok = corr > 0.005
+                ok = corr > 0.02
             else:  # long and <
-                ok = corr < -0.005
+                ok = corr < -0.02
 
             if not ok:
                 logger.debug(
@@ -299,6 +345,9 @@ class ComboScanner:
                             "seed_feature":     seed["feature"],
                             "seed_op":          seed["op"],
                             "seed_threshold":   seed["threshold"],
+                            "seed_conditions":  list(seed.get("conditions") or []),
+                            "seed_context":     str(seed.get("context", "") or ""),
+                            "seed_mechanism_type": str(seed.get("mechanism_type", "") or ""),
                             "confirm_feature":  feat,
                             "confirm_op":       op,
                             "confirm_pct":      pct,
@@ -527,17 +576,55 @@ class ComboScanner:
           持续状态下触发率 21-25%（信号稀释），
           首次穿越触发率约 0.5-2%（信号纯净）。
         """
-        feat   = seed["feature"]
-        op     = seed["op"]
-        thresh = seed["threshold"]
-        if feat not in df.columns:
-            return pd.Series(False, index=df.index)
+        conditions = seed.get("conditions") or []
+        if conditions:
+            primary = conditions[0]
+            feat = str(primary.get("feature", ""))
+            op = str(primary.get("op", primary.get("operator", "")))
+            thresh = float(primary.get("threshold", 0.0))
+            if feat not in df.columns:
+                return pd.Series(False, index=df.index)
 
-        col = df[feat].values
-        return pd.Series(
-            _crossing_mask(col, op, thresh, cooldown=seed.get("cooldown", 60)),
-            index=df.index,
-        )
+            mask = pd.Series(
+                _crossing_mask(
+                    df[feat].values,
+                    op,
+                    thresh,
+                    cooldown=seed.get("cooldown", 60),
+                ),
+                index=df.index,
+            )
+            for cond in conditions[1:]:
+                cond_feat = str(cond.get("feature", ""))
+                cond_op = str(cond.get("op", cond.get("operator", "")))
+                cond_thresh = float(cond.get("threshold", 0.0))
+                if cond_feat not in df.columns:
+                    return pd.Series(False, index=df.index)
+                if cond_op == "<":
+                    cond_mask = df[cond_feat] < cond_thresh
+                elif cond_op == "<=":
+                    cond_mask = df[cond_feat] <= cond_thresh
+                elif cond_op == ">=":
+                    cond_mask = df[cond_feat] >= cond_thresh
+                else:
+                    cond_mask = df[cond_feat] > cond_thresh
+                mask = mask & cond_mask.fillna(False)
+        else:
+            feat = seed["feature"]
+            op = seed["op"]
+            thresh = seed["threshold"]
+            if feat not in df.columns:
+                return pd.Series(False, index=df.index)
+
+            mask = pd.Series(
+                _crossing_mask(df[feat].values, op, thresh, cooldown=seed.get("cooldown", 60)),
+                index=df.index,
+            )
+
+        context = str(seed.get("context", "") or "")
+        if context:
+            mask = mask & _context_mask(df, context)
+        return mask.fillna(False)
 
     def _eval_seed(self, seed: dict, df: pd.DataFrame, fwd_col: str) -> dict:
         mask = self._get_seed_mask(seed, df)
@@ -572,7 +659,10 @@ class ComboScanner:
         fwd = df.loc[valid, fwd_col].values
 
         # short: 收益 = -fwd_ret；long: 收益 = +fwd_ret
+        # 扣除 Maker 来回费用 0.04%（0.02% × 2），统计净收益
+        FEE = 0.0004
         rets = -fwd if direction == "short" else fwd
+        rets = rets - FEE
 
         wins   = rets[rets > 0]
         losses = rets[rets <= 0]

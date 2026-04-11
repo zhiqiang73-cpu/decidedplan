@@ -351,16 +351,32 @@ class SignalHealth:
         days: int,
         predicate: Callable[[float], bool],
     ) -> bool:
-        """检查截止某一天是否满足连续多日的 PF 条件。"""
+        """检查在有交易记录的日子中，截止某天是否有连续 N 个交易日满足 PF 条件。
+
+        修复：跳过无交易日（PF 为 None），只在有交易记录的日子中做连续计数。
+        稀少触发策略（如 P1-11 每周 1-2 次）不会因无交易日中断连续判断。
+        """
         if days <= 0:
             return False
 
-        for offset in range(days):
-            day = end_day - timedelta(days=days - 1 - offset)
-            value = daily_pf.get(day)
-            if value is None or not predicate(value):
-                return False
-        return True
+        # 收集 end_day 之前（含当天）所有有交易日，按日期降序排列
+        trading_days = sorted(
+            (d for d in daily_pf if d <= end_day),
+            reverse=True,
+        )
+
+        # 从最近的有交易日往前数，检查连续 N 个有交易日是否全满足条件
+        consecutive = 0
+        for d in trading_days:
+            value = daily_pf.get(d)
+            if value is not None and predicate(value):
+                consecutive += 1
+                if consecutive >= days:
+                    return True
+            else:
+                # 当前有交易日不满足条件，连续链断开
+                break
+        return False
 
     def _parse_timestamp(self, value: Any) -> datetime | None:
         """解析 ISO8601 时间，统一转成带 UTC 时区的 datetime。"""

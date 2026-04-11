@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from alpha.product_policy import infer_product_family, sync_product_candidate_pool
+from alpha.force_classifier import register_card as _register_force
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,19 @@ def _write_json(path: Path, data: Any) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def _candidate_key(card: dict) -> str:
+    return str(card.get("rule_str", "") or card.get("id", "") or "").strip()
+
+
+def _dedupe_cards(cards: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for card in cards:
+        key = _candidate_key(card)
+        if key:
+            merged[key] = card
+    return list(merged.values())
 
 
 def _load_config() -> dict:
@@ -182,6 +196,15 @@ class AutoPromoter:
         approved = _read_json(_APPROVED_FILE, [])
         rejected = _read_json(_REJECTED_FILE, [])
         review = _read_json(_REVIEW_FILE, [])
+        if isinstance(pending, list):
+            deduped_pending = _dedupe_cards(pending)
+            if len(deduped_pending) != len(pending):
+                logger.info(
+                    "[AutoPromoter] cleaned %d duplicate pending candidate(s)",
+                    len(pending) - len(deduped_pending),
+                )
+                pending = deduped_pending
+                _write_json(_PENDING_FILE, pending)
 
         # Dedup: collect rule_str keys already in approved/review to skip re-validation
         existing_rule_strs: set[str] = set()
@@ -227,12 +250,15 @@ class AutoPromoter:
         approved_ids: set[str] = set()
         rejected_ids: set[str] = set()
         review_ids: set[str] = set()
+        deferred_ids: set[str] = set()
+        deferred_candidates: dict[str, dict] = {}
         new_approved: list[dict] = []
         new_rejected: list[dict] = []
         new_review: list[dict] = []
 
         for candidate in unvalidated:
-            cid = candidate.get("id", "?")
+            cid = str(candidate.get("id", "?"))
+            ckey = _candidate_key(candidate) or cid
 
             # 统计硬门槛前置检查，不通过直接丢弃，不送 LLM 审核
             if not self._pass_hard_gates(candidate):
@@ -248,13 +274,92 @@ class AutoPromoter:
                 candidate = dict(candidate)
                 candidate["status"] = "gate_rejected"
                 new_rejected.append(candidate)
-                rejected_ids.add(cid)
+                rejected_ids.add(ckey)
+                continue
+
+            # ── 纯统计快速批准通道 ──
+            # 当统计指标足够强时，跳过大模型验证，直接批准
+            if self._pass_stats_auto_approve(candidate):
+                candidate = dict(candidate)
+                candidate["family"] = infer_product_family(candidate)
+                candidate["llm_validated"] = False
+                candidate["status"] = "approved"
+                candidate["approved_at"] = datetime.now(timezone.utc).isoformat()
+                candidate["approved_by"] = "stats_auto"
+                candidate["mechanism_type"] = str(
+                    candidate.get("mechanism_type")
+                    or candidate.get("entry", {}).get("mechanism_type")
+                    or "data_driven"
+                )
+                new_approved.append(candidate)
+                approved_ids.add(ckey)
+                self._total_approved += 1
+                self._persist_exit_params(candidate)
+                try:
+                    _register_force(candidate)  # 写入力注册表
+                except Exception as _fe:
+                    logger.warning("[AutoPromoter] 力库注册失败: %s", _fe)
+
+                stats = candidate.get("stats", {})
+                self._recent_decisions.append({
+                    "id": cid[:32],
+                    "rule_str": candidate.get("rule_str", "?")[:60],
+                    "direction": candidate.get("entry", {}).get("direction", "?"),
+                    "oos_wr": stats.get("oos_win_rate", 0),
+                    "n_oos": stats.get("n_oos", 0),
+                    "confidence": 1.0,
+                    "mechanism_type": candidate["mechanism_type"],
+                    "mechanism_display_name": candidate["mechanism_type"],
+                    "is_valid": True,
+                    "decision": "STATS_AUTO_APPROVED",
+                    "decided_at": datetime.now(timezone.utc).isoformat(),
+                })
+                self._recent_decisions = self._recent_decisions[-50:]
+                logger.info(
+                    "[AutoPromoter] STATS_AUTO_APPROVE %s  WR=%.1f%% n=%d PF=%.2f",
+                    cid[:24],
+                    float(stats.get("oos_win_rate") or 0),
+                    int(stats.get("n_oos") or 0),
+                    float(stats.get("oos_pf") or stats.get("oos_profit_factor") or 0),
+                )
                 continue
 
             try:
                 result = self._validator.validate(candidate)
             except Exception as exc:
                 logger.error("[AutoPromoter] 验证异常 %s: %s", cid[:24], exc)
+                continue
+
+            if getattr(result, "transient_failure", False):
+                candidate = dict(candidate)
+                candidate["family"] = infer_product_family(candidate)
+                candidate["llm_validated"] = False
+                candidate["llm_validation_deferred"] = True
+                candidate["llm_validation_error"] = result.rejection_reason
+                candidate["llm_validation_last_attempt_at"] = datetime.now(timezone.utc).isoformat()
+                deferred_ids.add(ckey)
+                deferred_candidates[ckey] = candidate
+                self._recent_decisions.append(
+                    {
+                        "id": cid[:32],
+                        "rule_str": candidate.get("rule_str", "?")[:60],
+                        "direction": candidate.get("entry", {}).get("direction", "?"),
+                        "oos_wr": candidate.get("stats", {}).get("oos_win_rate", 0),
+                        "n_oos": candidate.get("stats", {}).get("n_oos", 0),
+                        "confidence": 0.0,
+                        "mechanism_type": result.mechanism_type,
+                        "mechanism_display_name": result.mechanism_display_name,
+                        "is_valid": False,
+                        "decision": "LLM_DEFERRED",
+                        "decided_at": datetime.now(timezone.utc).isoformat(),
+                        "reason": result.rejection_reason,
+                    }
+                )
+                self._recent_decisions = self._recent_decisions[-50:]
+                logger.warning(
+                    "[AutoPromoter] DEFER %s due to transient LLM failure: %s",
+                    cid[:24], result.rejection_reason[:80],
+                )
                 continue
 
             # 标记已验证
@@ -283,11 +388,15 @@ class AutoPromoter:
                 candidate["approved_by"] = "llm_auto"
                 candidate["mechanism_type"] = result.mechanism_type
                 new_approved.append(candidate)
-                approved_ids.add(cid)
+                approved_ids.add(ckey)
                 decision_entry["decision"] = "AUTO_APPROVED"
                 self._total_approved += 1
                 self._persist_exit_params(candidate)
                 self._register_mechanism_if_new(candidate, result)
+                try:
+                    _register_force(candidate)  # 写入力注册表
+                except Exception as _fe:
+                    logger.warning("[AutoPromoter] 力库注册失败: %s", _fe)
                 logger.info(
                     "[AutoPromoter] AUTO_APPROVE conf=%.2f mechanism=%s  %s",
                     result.confidence, result.mechanism_type, cid[:24],
@@ -296,7 +405,7 @@ class AutoPromoter:
             elif result.confidence >= self._review_thr:
                 candidate["status"] = "review_queue"
                 new_review.append(candidate)
-                review_ids.add(cid)
+                review_ids.add(ckey)
                 decision_entry["decision"] = "REVIEW_QUEUE"
                 self._total_review += 1
                 logger.info(
@@ -308,7 +417,7 @@ class AutoPromoter:
                 candidate["status"] = "llm_rejected"
                 candidate["rejection_reason"] = result.rejection_reason
                 new_rejected.append(candidate)
-                rejected_ids.add(cid)
+                rejected_ids.add(ckey)
                 decision_entry["decision"] = "AUTO_REJECTED"
                 self._total_rejected += 1
                 logger.info(
@@ -322,10 +431,10 @@ class AutoPromoter:
         # 更新文件
         # review_queue 的条目只写入 review_queue.json，不留在 pending_rules.json
         remaining_pending = [
-            c for c in pending
-            if c.get("id") not in approved_ids
-            and c.get("id") not in rejected_ids
-            and c.get("id") not in review_ids
+            deferred_candidates.get(_candidate_key(c), c) for c in pending
+            if _candidate_key(c) not in approved_ids
+            and _candidate_key(c) not in rejected_ids
+            and _candidate_key(c) not in review_ids
         ]
 
         _write_json(_PENDING_FILE, remaining_pending)
@@ -347,16 +456,85 @@ class AutoPromoter:
             "approved": len(new_approved),
             "rejected": len(new_rejected),
             "review": len(new_review),
+            "deferred": len(deferred_ids),
             "skipped": len(pending) - len(unvalidated),
         }
         logger.info(
-            "[AutoPromoter] 本轮完成: 批准=%d 拒绝=%d 审查队列=%d 跳过=%d",
-            summary["approved"], summary["rejected"], summary["review"], summary["skipped"],
+            "[AutoPromoter] 本轮完成: 批准=%d 拒绝=%d 审查队列=%d 延期=%d 跳过=%d",
+            summary["approved"], summary["rejected"], summary["review"], summary["deferred"], summary["skipped"],
         )
         self._flush_state(run_start, summary)
         return summary
 
     # ── 统计硬门槛 ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _pass_stats_auto_approve(card: dict) -> bool:
+        """
+        纯统计快速批准通道 -- 指标足够强时跳过大模型验证直接批准。
+
+        门槛组合（全部满足才放行）：
+          - 样本外胜率 >= 65%（与硬门槛一致，由 PF 提供额外安全）
+          - 样本外样本数 >= 12（多条件稀疏种子）或 >= 30（普通种子）
+          - 样本外净收益 > 0.02%（必须明确有钱赚）
+          - 样本外盈亏比 >= 1.5（不能只靠高胜率低盈亏比）
+          - 降级比 >= 0.5（如果有，不比硬门槛更严）
+          - MFE 覆盖率 >= 70%（如果有）
+
+        与 _pass_hard_gates 的区别：增加了 PF 要求 + 净收益下限。
+        这两个额外条件确保只有真正有钱赚的策略才走快速通道。
+        """
+        stats = card.get("stats", {})
+        wf_stats = card.get("wf_stats", {})
+        profile = str(card.get("review_profile") or card.get("discovery_profile") or "")
+
+        # 胜率 >= 65%
+        oos_wr = float(stats.get("oos_win_rate") or wf_stats.get("oos_wr") or 0)
+        if oos_wr < 65.0:
+            return False
+
+        # 样本数: 不低于 30，不妥协（n=12 统计上不可靠）
+        n_oos = int(stats.get("n_oos") or wf_stats.get("oos_n") or 0)
+        if n_oos < 30:
+            return False
+
+        # 净收益 > 0.02%
+        oos_ret = float(
+            stats.get("oos_avg_ret")
+            if stats.get("oos_avg_ret") is not None
+            else (stats.get("oos_net_return") or wf_stats.get("oos_net") or 0)
+        )
+        if oos_ret <= 0.02:
+            return False
+
+        # 盈亏比 >= 1.5
+        oos_pf = float(
+            stats.get("oos_pf")
+            or stats.get("oos_profit_factor")
+            or wf_stats.get("oos_pf")
+            or 0
+        )
+        if oos_pf < 1.5:
+            return False
+
+        # 降级比 >= 0.5（如果有）
+        degradation = (
+            stats.get("degradation")
+            or wf_stats.get("degradation")
+        )
+        if degradation is not None and float(degradation) < 0.5:
+            return False
+
+        # MFE 覆盖率 >= 75%（核心指标：75% 的信号必须有足够正向空间覆盖费用）
+        mfe_cov = (
+            stats.get("mfe_coverage")
+            or stats.get("oos_mfe_coverage")
+            or wf_stats.get("mfe_coverage")
+        )
+        if mfe_cov is not None and float(mfe_cov) < 75.0:
+            return False
+
+        return True
 
     @staticmethod
     def _pass_hard_gates(card: dict) -> bool:
@@ -368,10 +546,11 @@ class AutoPromoter:
           - _build_card(单条件原子) 产生的: oos_net_return
         """
         stats = card.get("stats", {})
+
         # OOS 胜率 >= 65%（扣费后）
         if float(stats.get("oos_win_rate") or 0) < 65:
             return False
-        # OOS 样本数 >= 30
+        # OOS 样本数 >= 30（不可豁免，数量不够用更多历史数据）
         if int(stats.get("n_oos") or 0) < 30:
             return False
         # OOS 净收益 > 0%（兼容两种字段名）
@@ -543,6 +722,10 @@ class AutoPromoter:
                 _write_json(_APPROVED_FILE, approved)
                 self._persist_exit_params(target)
                 self._register_mechanism_from_card(target)
+                try:
+                    _register_force(target)  # 写入力注册表
+                except Exception as _fe:
+                    logger.warning("[AutoPromoter] 力库注册失败: %s", _fe)
                 sync_product_candidate_pool()
 
                 self._recent_decisions.append({

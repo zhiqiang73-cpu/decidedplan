@@ -38,7 +38,8 @@ def compute_trade_flow_features(df: pd.DataFrame) -> pd.DataFrame:
     taker_buy = df["taker_buy_base"]
     taker_sell = (volume - taker_buy).clip(lower=0)
     df["taker_buy_sell_ratio"] = (
-        taker_buy / taker_sell.replace(0, np.nan)
+        (taker_buy / taker_sell.replace(0, np.nan))
+        .replace([np.inf, -np.inf], np.nan)
     ).astype("float32")
 
     # taker_buy_pct (用于 P0-2 信号): taker买占总量比

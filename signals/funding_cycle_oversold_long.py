@@ -60,7 +60,8 @@ _VARIANTS = (
 class FundingCycleOversoldLong(SignalDetector):
     name = "C1_funding_cycle_oversold_long"
     direction = "long"
-    hold_bars = 30
+    research_horizon_bars = 30
+    hold_bars = research_horizon_bars
     required_columns = [
         "dist_to_24h_low",
         "position_in_range_24h",
@@ -76,8 +77,9 @@ class FundingCycleOversoldLong(SignalDetector):
         if not self.validate_columns(df):
             return result
 
-        union_mask, _ = self._union_mask(df)
-        return self._apply_cooldown(union_mask)
+        # detect() 与 check_live() 保持一致：必须 >= _MIN_VARIANTS 个变体同时触发
+        multi_variant_mask = self._multi_variant_mask(df)
+        return self._apply_cooldown(multi_variant_mask)
 
     # Minimum number of variants that must fire simultaneously.
     # Single-variant fires are weak (e.g. variant C alone fires almost every bar
@@ -101,6 +103,7 @@ class FundingCycleOversoldLong(SignalDetector):
         fr = float(latest["funding_rate"])
         range_pos = float(latest["position_in_range_24h"])
         variant_names = ",".join(matched)
+        research_horizon = self.resolved_research_horizon_bars()
 
         logger.info(
             "[C1 FUNDING OVERSOLD] LONG | %d variants=%s | dist_low=%.5f | "
@@ -119,7 +122,8 @@ class FundingCycleOversoldLong(SignalDetector):
             "phase": "P1",
             "name": self.name,
             "direction": self.direction,
-            "horizon": self.hold_bars,
+            "horizon": research_horizon,
+            "research_horizon_bars": research_horizon,
             "timestamp_ms": latest_ts,
             "desc": (
                 "[C1] funding oversold LONG | %d variants | dist_low=%.5f | fr=%.6f | range=%.4f"
@@ -143,6 +147,13 @@ class FundingCycleOversoldLong(SignalDetector):
             result.iloc[idx] = True
             last_trigger = idx
         return result
+
+    def _multi_variant_mask(self, df: pd.DataFrame) -> pd.Series:
+        """每根 K 线同时触发的变体数 >= _MIN_VARIANTS，才算有效信号（与 check_live 一致）。"""
+        count = pd.Series(0, index=df.index)
+        for spec in _VARIANTS:
+            count += self._build_variant_mask(df, spec).astype(int)
+        return count >= self._MIN_VARIANTS
 
     def _union_mask(self, df: pd.DataFrame) -> tuple[pd.Series, list[str]]:
         union = pd.Series(False, index=df.index)

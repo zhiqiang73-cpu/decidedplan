@@ -407,6 +407,26 @@ def _write_force_library_state() -> None:
         pass
 
 
+async def _daily_health_updater(signal_health: "SignalHealth", interval_s: float = 1440.0) -> None:
+    """每日定时调用 signal_health.update_states()，更新策略生命周期状态。
+
+    interval_s 默认 1440 秒（约等于 1440 根 1 分钟 K 线 = 1 天），
+    确保 degraded/retired 过滤层在有足够新数据后及时生效。
+    """
+    # 首次启动等待一段时间再执行，避免在热启动阶段无数据时立即判断
+    await asyncio.sleep(300.0)
+    while True:
+        try:
+            transitions = await asyncio.to_thread(signal_health.update_states)
+            if transitions:
+                logger.info("[SignalHealth] 状态变更: %s", transitions)
+            else:
+                logger.debug("[SignalHealth] update_states 完成，无状态变更")
+        except Exception as exc:
+            logger.warning("[SignalHealth] update_states 调用失败: %s", exc)
+        await asyncio.sleep(interval_s)
+
+
 async def _heartbeat_state_publisher(
     runner: "SignalRunner",
     execution_engine: "ExecutionEngine",
@@ -971,9 +991,10 @@ async def main():
         run_websocket(engine, runner, alerter, execution_engine, runtime_state)
     )
     poll_task = asyncio.create_task(poll_side_data(engine))
+    health_task = asyncio.create_task(_daily_health_updater(signal_health))
 
     done, pending = await asyncio.wait(
-        [heartbeat_task, ws_task, poll_task], return_when=asyncio.FIRST_COMPLETED
+        [heartbeat_task, ws_task, poll_task, health_task], return_when=asyncio.FIRST_COMPLETED
     )
     for task in pending:
         task.cancel()

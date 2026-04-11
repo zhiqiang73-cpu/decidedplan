@@ -71,4 +71,10 @@ def compute_price_features(df: pd.DataFrame) -> pd.DataFrame:
         df["vwap_24h"]       = np.nan
         df["vwap_deviation"]  = np.nan
 
+    # ── 收盘价斜率（20 bar 差分近似，归一化为价格百分比/bar）──────────────
+    # alpha_rules.py 用来判断价格是否还在上涨（拒绝做空假信号）
+    # slope = (close - close.shift(19)) / 20 / close
+    close_20_ago = close.shift(19)
+    df["close_slope_20"] = ((close - close_20_ago) / 20.0 / close.replace(0, np.nan)).astype("float32")
+
     return df

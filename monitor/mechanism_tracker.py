@@ -212,6 +212,26 @@ def resolve_mechanism_type(signal_name: str, direction: str = "", family: str = 
         if signal_name.startswith(key) or key.startswith(signal_name):
             return mech
 
+    # 最后一步: 从力注册表 force_registry.json 里查 mechanism_type
+    # 这样 Alpha 管道新晋升的策略不会永远卡在 generic_alpha 衰竭上限 0.4
+    try:
+        import json as _json
+        _fr_path = Path(__file__).parent.parent / "alpha" / "output" / "force_registry.json"
+        if _fr_path.exists():
+            _fr = _json.loads(_fr_path.read_text(encoding="utf-8"))
+            for _force_cat, _cat_entry in _fr.get("forces", {}).items():
+                _strat = _cat_entry.get("strategies", {})
+                for _fam, _info in _strat.items():
+                    if family and (family == _fam or family.startswith(_fam) or _fam.startswith(family)):
+                        mtype = str(_info.get("mechanism_type") or "")
+                        if mtype and mtype not in ("generic_alpha", "generic", ""):
+                            logger.debug(
+                                "[MECHANISM] force_registry lookup: %s -> %s", family, mtype,
+                            )
+                            return mtype
+    except Exception as _exc:
+        logger.debug("[MECHANISM] force_registry lookup failed: %s", _exc)
+
     logger.warning(
         "[MECHANISM] No mapping for signal=%s family=%s, falling back to generic_alpha",
         signal_name, family,

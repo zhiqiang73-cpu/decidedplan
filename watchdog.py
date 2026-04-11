@@ -128,7 +128,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay", type=int, default=30, help="Base restart delay in seconds")
     parser.add_argument("--no-discovery", action="store_true", help="Do not start live discovery")
     parser.add_argument("--no-data-sync", action="store_true", help="Do not start websocket data collection")
-    parser.add_argument("--discovery-interval", type=float, default=1.0, help="Discovery interval in hours")
+    parser.add_argument("--discovery-interval", type=float, default=1.0, help="Discovery interval in hours (default 1h)")
+    parser.add_argument("--kimi", action="store_true", help="Use Kimi-driven 7-phase discovery pipeline")
     parser.add_argument(
         "--discovery-start-delay",
         type=int,
@@ -173,7 +174,11 @@ class ProcessGuard:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         if self._log_handle is not None and not self._log_handle.closed:
             self._log_handle.close()
-        self._log_handle = open(self.log_dir / f"{self.name}.log", "w", encoding="utf-8")
+        # 追加模式（不清空），每次重启写分隔线便于追踪崩溃历史
+        log_path = self.log_dir / f"{self.name}.log"
+        self._log_handle = open(log_path, "a", encoding="utf-8")
+        self._log_handle.write(f"\n{'='*60}\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] 进程重启\n{'='*60}\n")
+        self._log_handle.flush()
         env = dict(os.environ)
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.update(self.env_overrides)
@@ -195,13 +200,27 @@ class ProcessGuard:
         if self.proc is None:
             return True
 
-        rc = self.proc.poll()
-        if rc is None:
+        # 非阻塞等待重启：到期后再执行 start()
+        if hasattr(self, "_restart_due") and self._restart_due is not None:
+            if time.monotonic() < self._restart_due:
+                return True
+            self._restart_due = None
+            self.start()
             return True
 
+        rc = self.proc.poll()
+        if rc is None:
+            return True  # 进程仍在运行
+
         runtime = time.time() - self.start_ts
+
         if rc == 0:
-            logger.info("[%s] exited normally after %.0fs", self.name, runtime)
+            # rc=0 不计入重启计数，但监控进程必须永远运行，任何退出都要重启
+            logger.warning(
+                "[%s] exited normally (rc=0) after %.0fs - scheduling restart in 5s",
+                self.name, runtime,
+            )
+            self._restart_due = time.monotonic() + 5
             return True
 
         self.restart_count += 1
@@ -219,8 +238,8 @@ class ProcessGuard:
             self.restart_count,
             self.max_restarts,
         )
-        time.sleep(wait_s)
-        self.start()
+        # 非阻塞：记录到期时间，主循环下次轮询时执行重启
+        self._restart_due = time.monotonic() + wait_s
         return True
 
     def terminate(self) -> None:
@@ -277,6 +296,8 @@ def main() -> None:
         "--data-days",
         str(args.data_days),
     ]
+    if args.kimi:
+        discovery_cmd.append("--kimi")
     discovery_eth_cmd = [
         sys.executable,
         "run_live_discovery.py",

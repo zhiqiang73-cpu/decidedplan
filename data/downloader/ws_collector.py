@@ -10,7 +10,8 @@
 存储路径 (Parquet, 按日期分区):
   data/storage/liquidations/year=YYYY/month=MM/day=DD/YYYYMMDD.parquet
   data/storage/book_ticker/year=YYYY/month=MM/day=DD/YYYYMMDD.parquet
-  data/storage/agg_trades/year=YYYY/month=MM/day=DD/YYYYMMDD.parquet   (1m bar)
+  data/storage/agg_trades/year=YYYY/month=MM/day=DD/YYYYMMDD.parquet   (1m bar, 兼容旧逻辑)
+  data/storage/raw_ticks/year=YYYY/month=MM/day=DD/YYYYMMDD.parquet    (原始逐笔, 供tick引擎使用)
   data/storage/mark_price/year=YYYY/month=MM/day=DD/YYYYMMDD.parquet   (1m采样)
 
 使用方法:
@@ -23,6 +24,7 @@ import asyncio
 import aiohttp
 import json
 import logging
+import os
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -80,6 +82,14 @@ BOOK_TICKER_SCHEMA = pa.schema([
     pa.field("ask_qty",      pa.float64()),  # 最优卖量
 ])
 
+# 原始逐笔成交 schema (与历史 agg_trades 原始tick文件格式一致, 供 TickFeatureEngine 读取)
+RAW_TICK_SCHEMA = pa.schema([
+    pa.field("timestamp",      pa.int64()),    # 成交时间 ms
+    pa.field("price",          pa.float64()),  # 成交价
+    pa.field("quantity",       pa.float64()),  # 成交量 (BTC)
+    pa.field("is_buyer_maker", pa.bool_()),    # True=卖方主动
+])
+
 # aggTrade 聚合为1分钟bar的 schema
 AGG_TRADE_1M_SCHEMA = pa.schema([
     pa.field("timestamp",          pa.int64()),    # 分钟起始 ms
@@ -117,12 +127,14 @@ class StreamBuffer:
         schema: pa.Schema,
         flush_interval_s: int = FLUSH_INTERVAL_S,
         max_records: int = MAX_BUFFER_RECORDS,
+        ts_field: str = "timestamp_ms",
     ):
         self.stream_name    = stream_name
         self.storage_path   = storage_path
         self.schema         = schema
         self.flush_interval = flush_interval_s
         self.max_records    = max_records
+        self.ts_field       = ts_field
 
         self._records: List[dict] = []
         self._lock       = asyncio.Lock()
@@ -167,7 +179,7 @@ class StreamBuffer:
 
         # 按 UTC 日期分组
         groups: Dict[str, List[dict]] = defaultdict(list)
-        ts_field = "event_time" if self.stream_name == "liquidations" else "timestamp_ms"
+        ts_field = self.ts_field
 
         for rec in records:
             ts_ms = rec.get(ts_field, 0)
@@ -226,11 +238,10 @@ class StreamBuffer:
             except Exception as exc:
                 logger.warning(f"读取已有文件失败，将覆盖: {exc}")
 
-        pq.write_table(
-            new_table,
-            file_path,
-            compression="snappy",
-        )
+        # 原子写：先写 .tmp 再 os.replace，防止进程中途被 kill 导致文件损坏
+        tmp_path = str(file_path) + ".tmp"
+        pq.write_table(new_table, tmp_path, compression="snappy")
+        os.replace(tmp_path, file_path)
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -388,7 +399,10 @@ class AggTrade1mBuffer:
                 )
             except Exception as exc:
                 logger.warning(f"[agg_trades_1m] 读取已有文件失败，将覆盖: {exc}")
-        pq.write_table(new_table, file_path, compression="snappy")
+        # 原子写：防止进程中途被 kill 导致文件损坏
+        tmp_path = str(file_path) + ".tmp"
+        pq.write_table(new_table, tmp_path, compression="snappy")
+        os.replace(tmp_path, file_path)
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -496,19 +510,26 @@ class BinanceWSCollector:
         self._buffers: Dict[str, StreamBuffer] = {
             "liquidations": StreamBuffer(
                 "liquidations", self.storage_path,
-                LIQUIDATION_SCHEMA, flush_interval_s
+                LIQUIDATION_SCHEMA, flush_interval_s,
+                ts_field="event_time",
             ),
             "book_ticker": StreamBuffer(
                 "book_ticker", self.storage_path,
-                BOOK_TICKER_SCHEMA, flush_interval_s
+                BOOK_TICKER_SCHEMA, flush_interval_s,
             ),
             "mark_price": StreamBuffer(
                 "mark_price", self.storage_path,
-                MARK_PRICE_SCHEMA, flush_interval_s
+                MARK_PRICE_SCHEMA, flush_interval_s,
+            ),
+            # 原始逐笔落盘: 供 TickFeatureEngine 离线/实时使用
+            "raw_ticks": StreamBuffer(
+                "raw_ticks", self.storage_path,
+                RAW_TICK_SCHEMA, flush_interval_s,
+                ts_field="timestamp",
             ),
         }
 
-        # aggTrade 使用专用1m聚合缓冲区
+        # aggTrade 使用专用1m聚合缓冲区 (保留兼容)
         self._agg_trade_buf = AggTrade1mBuffer(self.storage_path, flush_interval_s)
 
         self._running   = False
@@ -632,11 +653,14 @@ class BinanceWSCollector:
                     self._msg_count["book_ticker"] += 1
                     self._last_book_ticker_ts = now
 
-        # ── aggTrade (高频, 聚合为1m bar) ──
+        # ── aggTrade (高频, 双写: 原始tick落盘 + 聚合为1m bar) ──
         elif event_type == "aggTrade":
             record = _parse_agg_trade(data)
             if record:
-                self._agg_trade_buf.add_tick(record)   # 同步，无 await
+                # 原始逐笔: 直接落盘, 供 TickFeatureEngine 使用
+                await self._buffers["raw_ticks"].add(record)
+                # 1m 聚合: 保持兼容 (同步)
+                self._agg_trade_buf.add_tick(record)
                 self._msg_count["agg_trades"] += 1
 
         # ── markPrice (限速采样, 每分钟一条) ──
@@ -671,9 +695,11 @@ class BinanceWSCollector:
         print("=" * 60)
         print(f"运行时长:    {elapsed / 60:.1f} 分钟")
         print(f"重连次数:    {self._connect_count}")
+        raw_ticks_written = self._buffers["raw_ticks"].total_written
         print(f"清算消息:    {self._msg_count['liquidations']:,} 条")
         print(f"BookTicker:  {self._msg_count['book_ticker']:,} 条 (采样后)")
-        print(f"aggTrade:    {self._msg_count['agg_trades']:,} 条 -> {self._agg_trade_buf.total_written} 个1m bar")
+        print(f"aggTrade:    {self._msg_count['agg_trades']:,} 条"
+              f" -> 原始tick {raw_ticks_written:,} 条 / 1m bar {self._agg_trade_buf.total_written} 个")
         print(f"markPrice:   {self._msg_count['mark_price']:,} 条 (1分钟采样)")
         for name, buf in self._buffers.items():
             print(f"  {name} 已写盘: {buf.total_written:,} 条")
@@ -684,6 +710,7 @@ class BinanceWSCollector:
         elapsed = time.monotonic() - (self._start_time or time.monotonic())
         written = {name: buf.total_written for name, buf in self._buffers.items()}
         written["agg_trades_1m_bars"] = self._agg_trade_buf.total_written
+        written["raw_ticks"] = self._buffers["raw_ticks"].total_written
         return {
             "elapsed_minutes": elapsed / 60,
             "reconnects":      self._connect_count,

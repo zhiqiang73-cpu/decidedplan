@@ -44,9 +44,9 @@ class WalkForwardValidator:
                     gross 指标另外保留供对比参考。
     """
 
-    def __init__(self, train_frac: float = 0.67, fee_pct: float = 0.10):
+    def __init__(self, train_frac: float = 0.67, fee_pct: float = 0.04):
         self.train_frac = train_frac
-        self.fee_pct    = fee_pct        # 往返费率（百分比，非小数）
+        self.fee_pct    = fee_pct        # 往返费率（百分比，非小数）；Maker 0.02%×2=0.04%
 
     # ── 数据切分 ────────────────────────────────────────────────────────────
     def split(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -200,12 +200,12 @@ class WalkForwardValidator:
         )
 
         return {
-            "rule":               atom.rule_str(),
-            "IS":                 is_metrics,
-            "OOS":                oos_metrics,
-            "degradation":        round(degradation, 3),
-            "is_robust":          is_robust,
-            "mfe_coverage_rate":  round(mfe_coverage_rate, 4),
+            "rule":          atom.rule_str(),
+            "IS":            is_metrics,
+            "OOS":           oos_metrics,
+            "degradation":   round(degradation, 3),
+            "is_robust":     is_robust,
+            "mfe_coverage":  round(mfe_coverage_rate * 100.0, 2),  # 0-100 scale, live_discovery 兼容
         }
 
 

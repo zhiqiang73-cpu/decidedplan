@@ -104,6 +104,12 @@ class FeatureEngine:
             df = compute_trade_flow_features(df)
         if "LIQUIDITY" in dims:
             df = compute_liquidity_features(df)
+        # MARK_PRICE 必须先于 POSITIONING 执行：
+        # compute_positioning_features 的 funding_rate_trend/consecutive_extreme_funding
+        # 依赖实时资金费率；compute_mark_price_features 将 mp_funding_rate 写入 df，
+        # 使 POSITIONING 能使用 WebSocket 实时值而非 REST 8h 粗数据。
+        if "MARK_PRICE" in dims:
+            df = compute_mark_price_features(df)
         if "POSITIONING" in dims:
             df = compute_positioning_features(df)
         if "CROSS_MARKET" in dims:
@@ -114,8 +120,6 @@ class FeatureEngine:
             df = compute_microstructure_features(df)
         if "ORDER_FLOW" in dims:
             df = compute_order_flow_features(df)
-        if "MARK_PRICE" in dims:
-            df = compute_mark_price_features(df)
 
         # -- 持续性状态特征（P 系列核心能力，Alpha 管道必需） --
         df = _add_state_block_features(df)
@@ -254,52 +258,107 @@ class FeatureEngine:
         raw = self._load_parquet_range_ts("agg_trades", "timestamp", start_ts, end_ts)
         if raw.empty:
             return df
-        if "at_large_buy_ratio" not in raw.columns:
-            fallback = self._load_parquet_files_ts("agg_trades", "timestamp", start_ts, end_ts)
-            if not fallback.empty and "at_large_buy_ratio" in fallback.columns:
-                raw = fallback
         raw = raw.copy()
         raw["timestamp"] = raw["timestamp"].astype("int64")
+        has_tick_payload = "price" in raw.columns and raw["price"].notna().any()
+        has_preag_payload = "at_large_buy_ratio" in raw.columns and raw["at_large_buy_ratio"].notna().any()
+        if not has_tick_payload and not has_preag_payload:
+            logger.warning(
+                "  agg_trades: mixed schema dataset lost payload columns, retrying file-wise load"
+            )
+            raw = self._load_parquet_files_ts("agg_trades", "timestamp", start_ts, end_ts)
+            if raw.empty:
+                return df
+            raw = raw.copy()
+            raw["timestamp"] = raw["timestamp"].astype("int64")
 
-        # ws_collector 已预聚合为1m bar (含 at_large_buy_ratio 列)
-        if "at_large_buy_ratio" in raw.columns:
-            keep = ["timestamp"] + [c for c in [
-                "at_large_buy_ratio", "at_burst_index", "at_dir_net_1m",
-                "buy_usd_1m", "sell_usd_1m", "trade_count",
-            ] if c in raw.columns]
-            agg = raw[keep].sort_values("timestamp").reset_index(drop=True)
-            logger.info("  agg_trades: pre-aggregated 1m bars, %s rows", f"{len(agg):,}")
-            return pd.merge_asof(df, agg, on="timestamp", tolerance=60_000, direction="backward")
+        # 区分新旧格式：
+        #   新格式 (ws_collector): 已预聚合1m bar，含 at_large_buy_ratio
+        #   旧格式 (历史下载):     原始逐笔成交，含 price/quantity/is_buyer_maker
+        # PyArrow 加载混合格式时会统一 schema，缺失列填 NaN，
+        # 所以需要按列是否有效值来拆分，分别处理。
+        has_preag_col = "at_large_buy_ratio" in raw.columns
+        has_tick_col = "price" in raw.columns
 
-        # 原始tick数据 (历史下载或旧格式) — 动态聚合
+        frames: list = []
+
+        if has_preag_col:
+            preag_rows = raw[raw["at_large_buy_ratio"].notna()].copy()
+            if not preag_rows.empty:
+                keep = ["timestamp"] + [c for c in [
+                    "at_large_buy_ratio", "at_burst_index", "at_dir_net_1m",
+                    "buy_usd_1m", "sell_usd_1m", "trade_count",
+                ] if c in preag_rows.columns]
+                frames.append(preag_rows[keep])
+                logger.info("  agg_trades: %s pre-aggregated 1m rows", f"{len(preag_rows):,}")
+
+        if has_tick_col:
+            # 取预聚合列为 NaN 的行（即旧格式逐笔数据），或全是旧格式的情况
+            if has_preag_col:
+                tick_rows = raw[raw["at_large_buy_ratio"].isna() & raw["price"].notna()].copy()
+            else:
+                tick_rows = raw[raw["price"].notna()].copy()
+            if not tick_rows.empty:
+                agg_from_ticks = self._aggregate_raw_ticks(tick_rows)
+                frames.append(agg_from_ticks)
+                logger.info("  agg_trades: %s raw tick rows -> %s 1m bars",
+                            f"{len(tick_rows):,}", f"{len(agg_from_ticks):,}")
+
+        if not frames:
+            logger.warning("  agg_trades: 无法解析数据格式，跳过合并")
+            return df
+
+        agg = (pd.concat(frames, ignore_index=True)
+               .sort_values("timestamp")
+               .drop_duplicates(subset="timestamp", keep="last")
+               .reset_index(drop=True))
+        return pd.merge_asof(df, agg, on="timestamp", tolerance=60_000, direction="backward")
+
+    def _aggregate_raw_ticks(self, raw):
+        """将原始逐笔成交数据聚合为1分钟 bar，计算完整微结构特征。"""
+        import numpy as np, pandas as pd
+        raw = raw.copy()
         raw["minute_ts"] = (raw["timestamp"] // 60_000) * 60_000
         raw["trade_usd"] = raw["price"] * raw["quantity"]
+        # is_buyer_maker=False → 主动买方（taker buy）；=True → 主动卖方（taker sell）
+        is_buy = ~raw["is_buyer_maker"].astype(bool)
+        raw["buy_usd"]  = np.where(is_buy,  raw["trade_usd"], 0.0)
+        raw["sell_usd"] = np.where(~is_buy, raw["trade_usd"], 0.0)
         raw["direction"] = np.where(raw["is_buyer_maker"], -1, 1)
+
+        grp = raw.groupby("minute_ts")
+
+        # 向量化聚合（快，无 apply）
+        buy_usd_1m  = grp["buy_usd"].sum().rename("buy_usd_1m")
+        sell_usd_1m = grp["sell_usd"].sum().rename("sell_usd_1m")
+        trade_count = grp["trade_usd"].count().rename("trade_count")
+        dn = (grp["direction"].sum() / grp["direction"].count()).rename("at_dir_net_1m")
+
+        # 大单买方比 + 爆发指数需要 apply（含分位数/间隔计算）
         def _lbr(g):
             if len(g) < 2: return np.nan
             thr = g["trade_usd"].quantile(0.9)
             lg = g[g["trade_usd"] >= thr]
             return np.nan if lg.empty else float((lg["direction"] == 1).sum() / len(lg))
+
         def _bi(g):
             if len(g) < 3: return np.nan
             iv = g["timestamp"].sort_values().diff().dropna()
             mu = iv.mean()
             return np.nan if mu == 0 else float(iv.std() / mu)
-        def _dn(g):
-            return np.nan if g.empty else float(g["direction"].sum() / len(g))
-        grp = raw.groupby("minute_ts")
+
         try:
             lb = grp.apply(_lbr, include_groups=False).rename("at_large_buy_ratio")
             bi = grp.apply(_bi,  include_groups=False).rename("at_burst_index")
-            dn = grp.apply(_dn,  include_groups=False).rename("at_dir_net_1m")
         except TypeError:
             lb = grp[["trade_usd", "direction"]].apply(_lbr).rename("at_large_buy_ratio")
             bi = grp[["timestamp"]].apply(_bi).rename("at_burst_index")
-            dn = grp[["direction"]].apply(_dn).rename("at_dir_net_1m")
-        agg = (pd.concat([lb, bi, dn], axis=1).reset_index()
-               .rename(columns={"minute_ts": "timestamp"})
-               .sort_values("timestamp").reset_index(drop=True))
-        return pd.merge_asof(df, agg, on="timestamp", tolerance=60_000, direction="backward")
+
+        agg = pd.concat([lb, bi, dn, buy_usd_1m, sell_usd_1m, trade_count], axis=1)
+        return (agg.reset_index()
+                .rename(columns={"minute_ts": "timestamp"})
+                .sort_values("timestamp")
+                .reset_index(drop=True))
 
     # -- mark_price 数据聚合合并
 
@@ -327,14 +386,23 @@ class FeatureEngine:
     # -- 通用 parquet 加载 (支持任意时间戳列名)
 
     def _load_parquet_range_ts(self, endpoint, ts_col, start_ts, end_ts):
-        import pandas as pd, pyarrow.dataset as ds
+        # 使用 pyarrow filter pushdown 避免全量加载 OOM。
+        # 原实现先 to_table() 全量读取再内存过滤，高频数据（book_ticker/agg_trades）
+        # 在 365 天区间可能超过数千万行触发 OOM。
+        import pandas as pd
+        import pyarrow.dataset as ds
+        import pyarrow.compute as pc
         ep = self.storage_path / endpoint
-        if not ep.exists(): return pd.DataFrame()
+        if not ep.exists():
+            return pd.DataFrame()
         try:
-            raw = ds.dataset(ep, format="parquet", partitioning="hive").to_table().to_pandas()
-            if raw.empty: return raw
+            filt = (pc.field(ts_col) >= start_ts) & (pc.field(ts_col) <= end_ts)
+            raw_table = ds.dataset(ep, format="parquet", partitioning="hive").to_table(filter=filt)
+            if raw_table.num_rows == 0:
+                return pd.DataFrame()
+            raw = raw_table.to_pandas()
             raw[ts_col] = raw[ts_col].astype("int64")
-            return raw[(raw[ts_col]>=start_ts)&(raw[ts_col]<=end_ts)].reset_index(drop=True)
+            return raw.reset_index(drop=True)
         except Exception:
             return self._load_parquet_files_ts(endpoint, ts_col, start_ts, end_ts)
 

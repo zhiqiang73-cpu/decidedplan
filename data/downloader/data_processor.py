@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List
 
@@ -321,8 +322,8 @@ class DataProcessor:
                 logger.warning(f"{endpoint_name}: {col} 列有 {null_count} 个空值")
 
     def get_partition_path(self, endpoint_name: str, timestamp_ms: int) -> Path:
-        """Build the Hive-style day partition path."""
-        dt = datetime.fromtimestamp(timestamp_ms / 1000)
+        """Build the Hive-style day partition path. 使用 UTC 时间，与 ws_collector 保持一致。"""
+        dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
         return (
             self.storage_path
             / endpoint_name
@@ -341,15 +342,13 @@ class DataProcessor:
         partition_path = self.get_partition_path(endpoint_name, timestamp_ms)
         partition_path.mkdir(parents=True, exist_ok=True)
 
-        dt = datetime.fromtimestamp(timestamp_ms / 1000)
+        dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
         file_path = partition_path / f"part-{dt.strftime('%Y%m%d-%H%M%S')}.parquet"
         table = pa.Table.from_pandas(df, preserve_index=False)
-        pq.write_table(
-            table,
-            file_path,
-            compression=self.compression,
-            row_group_size=self.row_group_size,
-        )
+        # 原子写：先写 .tmp 再 os.replace，防止中途 kill 导致文件损坏
+        tmp_path = str(file_path) + ".tmp"
+        pq.write_table(table, tmp_path, compression=self.compression, row_group_size=self.row_group_size)
+        os.replace(tmp_path, file_path)
         logger.info(
             f"{endpoint_name}: 已写入 {len(df):,} 条记录到 {file_path.relative_to(self.storage_path)}"
         )
@@ -363,7 +362,7 @@ class DataProcessor:
         partition_path = self.get_partition_path(endpoint_name, timestamp_ms)
         partition_path.mkdir(parents=True, exist_ok=True)
 
-        dt = datetime.fromtimestamp(timestamp_ms / 1000)
+        dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
         file_path = partition_path / f"{dt.strftime('%Y%m%d')}.parquet"
 
         new_df = df.copy()
@@ -389,12 +388,10 @@ class DataProcessor:
         else:
             combined_table = new_table
 
-        pq.write_table(
-            combined_table,
-            file_path,
-            compression=self.compression,
-            row_group_size=self.row_group_size,
-        )
+        # 原子写：防止进程中途被 kill 导致文件损坏
+        tmp_path = str(file_path) + ".tmp"
+        pq.write_table(combined_table, tmp_path, compression=self.compression, row_group_size=self.row_group_size)
+        os.replace(tmp_path, file_path)
         logger.info(
             f"{endpoint_name}: 已追加 {len(df):,} 条记录到 {file_path.relative_to(self.storage_path)} "
             f"(总计: {combined_table.num_rows:,})"

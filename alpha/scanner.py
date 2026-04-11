@@ -28,7 +28,8 @@ from scipy.stats import spearmanr
 
 logger = logging.getLogger(__name__)
 
-# 不参与 IC 扫描的列（原始数据列、派生标签列）
+# 不参与 IC 扫描的列（原始数据列、派生标签列、TIME 维度）
+# TIME 维度特征禁止作为 Alpha 种子或确认因子（时间季节性是统计伪相关，不是物理因果）
 EXCLUDE_COLS = {
     "timestamp", "open", "high", "low", "close", "volume",
     "quote_volume", "trades", "taker_buy_base", "taker_buy_quote",
@@ -37,6 +38,10 @@ EXCLUDE_COLS = {
     "taker_ratio_api",
     "mark_price", "funding_rate",       # 原始数据，已有派生特征
     "volume_ma20",                       # 均量绝对值，不如比率有用
+    # TIME 维度 — 绝对禁止（CLAUDE.md 红线）
+    "hour_in_day", "minutes_to_funding", "day_of_week",
+    "minute_in_hour", "funding_countdown_m",
+    "is_weekend", "hours_to_options_expiry", "minutes_since_last_big_move",
 }
 
 # 特征 → 维度映射（用于分组展示）
@@ -109,14 +114,42 @@ class FeatureScanner:
     # ── 前向收益计算 ────────────────────────────────────────────────────────
     def add_forward_returns(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        在 df 上追加每个 horizon 的前向收益列。
+        在 df 上追加每个 horizon 的前向收益列 + MFE 列。
 
         前向收益 = close[t+h] / close[t] - 1
-        注意末尾 h 行会产生 NaN（无法计算未来收益）。
+        MFE (Maximum Favorable Excursion):
+          fwd_max_ret_{h} = max(close[t+1..t+h]) / close[t] - 1  (long 最大有利)
+          fwd_min_ret_{h} = min(close[t+1..t+h]) / close[t] - 1  (short 用 -min)
         """
+        import numpy as np
+
         close = df["close"]
+        close_arr = close.values.astype(np.float64)
+        n = len(close_arr)
+
         for h in self.horizons:
             df[f"fwd_ret_{h}"] = (close.shift(-h) / close - 1).astype("float32")
+
+            # MFE: reverse-rolling trick
+            # rolling(h).max() on reversed array = forward-looking max of h bars
+            rev = close_arr[::-1].copy()
+            rev_s = pd.Series(rev)
+            fwd_max_fwd = rev_s.rolling(h, min_periods=1).max().values[::-1].copy()
+            fwd_min_fwd = rev_s.rolling(h, min_periods=1).min().values[::-1].copy()
+
+            # Shift by 1: exclude current bar (want [t+1..t+h], not [t..t+h-1])
+            max_ret = np.full(n, np.nan, dtype=np.float32)
+            min_ret = np.full(n, np.nan, dtype=np.float32)
+            if n > 1:
+                max_ret[:-1] = ((fwd_max_fwd[1:] / close_arr[:-1]) - 1).astype(np.float32)
+                min_ret[:-1] = ((fwd_min_fwd[1:] / close_arr[:-1]) - 1).astype(np.float32)
+            # 末尾 h 行与 fwd_ret 对齐设为 NaN
+            max_ret[max(0, n - h):] = np.nan
+            min_ret[max(0, n - h):] = np.nan
+
+            df[f"fwd_max_ret_{h}"] = max_ret
+            df[f"fwd_min_ret_{h}"] = min_ret
+
         return df
 
     # ── 日级 IC 计算 ────────────────────────────────────────────────────────
@@ -314,11 +347,10 @@ class FeatureScanner:
           - 排除 NaN 占比 > 80% 的列
           - 排除常数列（std == 0）
         """
-        fwd_cols = {f"fwd_ret_{h}" for h in self.horizons}
         candidates = [
             c for c in df.columns
             if c not in EXCLUDE_COLS
-            and c not in fwd_cols
+            and not str(c).startswith("fwd_")
             and pd.api.types.is_numeric_dtype(df[c])
         ]
 
