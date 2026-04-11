@@ -238,77 +238,116 @@ class FeatureEngine:
     # -- book_ticker 数据聚合合并
 
     def _merge_book_ticker_data(self, df, start_ts, end_ts):
+        """按月分批加载 book_ticker 并聚合为 1m bar，避免 OOM。"""
         import pandas as pd, numpy as np
-        raw = self._load_parquet_range_ts("book_ticker", "timestamp_ms", start_ts, end_ts)
-        if raw.empty:
+
+        MONTH_MS = 30 * 24 * 3600 * 1000
+        chunks: list[tuple[int, int]] = []
+        cur = int(start_ts)
+        end_i = int(end_ts)
+        while cur < end_i:
+            chunk_end = min(cur + MONTH_MS, end_i)
+            chunks.append((cur, chunk_end))
+            cur = chunk_end
+
+        all_agg: list = []
+        for cs, ce in chunks:
+            raw = self._load_parquet_range_ts("book_ticker", "timestamp_ms", cs, ce)
+            if raw.empty:
+                continue
+            raw = raw.copy()
+            mid = (raw["ask_price"] + raw["bid_price"]) / 2.0
+            raw["rel_spread"] = (raw["ask_price"] - raw["bid_price"]) / mid.replace(0.0, float("nan"))
+            raw["minute_ts"] = (raw["timestamp_ms"] // 60_000) * 60_000
+            agg = (raw.groupby("minute_ts")
+                   .agg(bk_bid_qty_mean=("bid_qty","mean"),bk_ask_qty_mean=("ask_qty","mean"),bk_spread_mean=("rel_spread","mean"))
+                   .reset_index().rename(columns={"minute_ts":"timestamp"}).sort_values("timestamp").reset_index(drop=True))
+            all_agg.append(agg)
+            del raw
+
+        if not all_agg:
             return df
-        raw = raw.copy()
-        mid = (raw["ask_price"] + raw["bid_price"]) / 2.0
-        raw["rel_spread"] = (raw["ask_price"] - raw["bid_price"]) / mid.replace(0.0, float("nan"))
-        raw["minute_ts"] = (raw["timestamp_ms"] // 60_000) * 60_000
-        agg = (raw.groupby("minute_ts")
-               .agg(bk_bid_qty_mean=("bid_qty","mean"),bk_ask_qty_mean=("ask_qty","mean"),bk_spread_mean=("rel_spread","mean"))
-               .reset_index().rename(columns={"minute_ts":"timestamp"}).sort_values("timestamp").reset_index(drop=True))
+        agg = (pd.concat(all_agg, ignore_index=True)
+               .sort_values("timestamp")
+               .drop_duplicates(subset="timestamp", keep="last")
+               .reset_index(drop=True))
         return pd.merge_asof(df, agg, on="timestamp", tolerance=60_000, direction="backward")
 
     # -- agg_trades 数据聚合合并
 
     def _merge_agg_trades_data(self, df, start_ts, end_ts):
+        """按月分批加载 agg_trades 并聚合为 1m bar，避免全量加载 OOM。
+
+        365 天原始逐笔数据可达 1.5 亿行(~2.3 GiB)，不能一次性读入内存。
+        按月切片 -> 每片聚合为 ~43K 1m bar -> 最终 concat 仅 ~500K 行。
+        """
         import pandas as pd, numpy as np
-        raw = self._load_parquet_range_ts("agg_trades", "timestamp", start_ts, end_ts)
-        if raw.empty:
-            return df
-        raw = raw.copy()
-        raw["timestamp"] = raw["timestamp"].astype("int64")
-        has_tick_payload = "price" in raw.columns and raw["price"].notna().any()
-        has_preag_payload = "at_large_buy_ratio" in raw.columns and raw["at_large_buy_ratio"].notna().any()
-        if not has_tick_payload and not has_preag_payload:
-            logger.warning(
-                "  agg_trades: mixed schema dataset lost payload columns, retrying file-wise load"
-            )
-            raw = self._load_parquet_files_ts("agg_trades", "timestamp", start_ts, end_ts)
+
+        # 按月生成时间片 (每片约30天, 远小于OOM阈值)
+        MONTH_MS = 30 * 24 * 3600 * 1000
+        chunks: list[tuple[int, int]] = []
+        cur = int(start_ts)
+        end = int(end_ts)
+        while cur < end:
+            chunk_end = min(cur + MONTH_MS, end)
+            chunks.append((cur, chunk_end))
+            cur = chunk_end
+
+        all_agg_frames: list = []
+        total_ticks = 0
+        total_preag = 0
+
+        for chunk_start, chunk_end in chunks:
+            raw = self._load_parquet_range_ts("agg_trades", "timestamp", chunk_start, chunk_end)
             if raw.empty:
-                return df
+                continue
             raw = raw.copy()
             raw["timestamp"] = raw["timestamp"].astype("int64")
 
-        # 区分新旧格式：
-        #   新格式 (ws_collector): 已预聚合1m bar，含 at_large_buy_ratio
-        #   旧格式 (历史下载):     原始逐笔成交，含 price/quantity/is_buyer_maker
-        # PyArrow 加载混合格式时会统一 schema，缺失列填 NaN，
-        # 所以需要按列是否有效值来拆分，分别处理。
-        has_preag_col = "at_large_buy_ratio" in raw.columns
-        has_tick_col = "price" in raw.columns
+            has_tick_payload = "price" in raw.columns and raw["price"].notna().any()
+            has_preag_payload = "at_large_buy_ratio" in raw.columns and raw["at_large_buy_ratio"].notna().any()
+            if not has_tick_payload and not has_preag_payload:
+                raw = self._load_parquet_files_ts("agg_trades", "timestamp", chunk_start, chunk_end)
+                if raw.empty:
+                    continue
+                raw = raw.copy()
+                raw["timestamp"] = raw["timestamp"].astype("int64")
 
-        frames: list = []
+            has_preag_col = "at_large_buy_ratio" in raw.columns
+            has_tick_col = "price" in raw.columns
 
-        if has_preag_col:
-            preag_rows = raw[raw["at_large_buy_ratio"].notna()].copy()
-            if not preag_rows.empty:
-                keep = ["timestamp"] + [c for c in [
-                    "at_large_buy_ratio", "at_burst_index", "at_dir_net_1m",
-                    "buy_usd_1m", "sell_usd_1m", "trade_count",
-                ] if c in preag_rows.columns]
-                frames.append(preag_rows[keep])
-                logger.info("  agg_trades: %s pre-aggregated 1m rows", f"{len(preag_rows):,}")
-
-        if has_tick_col:
-            # 取预聚合列为 NaN 的行（即旧格式逐笔数据），或全是旧格式的情况
             if has_preag_col:
-                tick_rows = raw[raw["at_large_buy_ratio"].isna() & raw["price"].notna()].copy()
-            else:
-                tick_rows = raw[raw["price"].notna()].copy()
-            if not tick_rows.empty:
-                agg_from_ticks = self._aggregate_raw_ticks(tick_rows)
-                frames.append(agg_from_ticks)
-                logger.info("  agg_trades: %s raw tick rows -> %s 1m bars",
-                            f"{len(tick_rows):,}", f"{len(agg_from_ticks):,}")
+                preag_rows = raw[raw["at_large_buy_ratio"].notna()].copy()
+                if not preag_rows.empty:
+                    keep = ["timestamp"] + [c for c in [
+                        "at_large_buy_ratio", "at_burst_index", "at_dir_net_1m",
+                        "buy_usd_1m", "sell_usd_1m", "trade_count",
+                    ] if c in preag_rows.columns]
+                    all_agg_frames.append(preag_rows[keep])
+                    total_preag += len(preag_rows)
 
-        if not frames:
-            logger.warning("  agg_trades: 无法解析数据格式，跳过合并")
+            if has_tick_col:
+                if has_preag_col:
+                    tick_rows = raw[raw["at_large_buy_ratio"].isna() & raw["price"].notna()].copy()
+                else:
+                    tick_rows = raw[raw["price"].notna()].copy()
+                if not tick_rows.empty:
+                    agg_from_ticks = self._aggregate_raw_ticks(tick_rows)
+                    all_agg_frames.append(agg_from_ticks)
+                    total_ticks += len(tick_rows)
+
+            del raw  # 及时释放本月原始数据
+
+        if total_preag > 0:
+            logger.info("  agg_trades: %s pre-aggregated 1m rows", f"{total_preag:,}")
+        if total_ticks > 0:
+            logger.info("  agg_trades: %s raw tick rows aggregated to 1m bars", f"{total_ticks:,}")
+
+        if not all_agg_frames:
+            logger.warning("  agg_trades: no data loaded, skipping merge")
             return df
 
-        agg = (pd.concat(frames, ignore_index=True)
+        agg = (pd.concat(all_agg_frames, ignore_index=True)
                .sort_values("timestamp")
                .drop_duplicates(subset="timestamp", keep="last")
                .reset_index(drop=True))

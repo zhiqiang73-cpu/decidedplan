@@ -18,11 +18,11 @@ timeout /t 2 /nobreak >nul
 
 echo [SYSTEM] Starting watchdog...
 if exist C:\Python314\pythonw.exe (
-  start "" C:\Python314\pythonw.exe watchdog.py --discovery-start-delay 300
+  start "" C:\Python314\pythonw.exe watchdog.py --discovery-start-delay 60
 ) else if exist "C:\Users\GPD\AppData\Local\Programs\Python\Python313\python.exe" (
-  start "QuantAlpha Watchdog" "C:\Users\GPD\AppData\Local\Programs\Python\Python313\python.exe" watchdog.py --discovery-start-delay 300
+  start "QuantAlpha Watchdog" "C:\Users\GPD\AppData\Local\Programs\Python\Python313\python.exe" watchdog.py --discovery-start-delay 60
 ) else (
-  start "QuantAlpha Watchdog" python.exe watchdog.py --discovery-start-delay 300
+  start "QuantAlpha Watchdog" python.exe watchdog.py --discovery-start-delay 60
 )
 
 echo [SYSTEM] Waiting for UI port and opening browser...
