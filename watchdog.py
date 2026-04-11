@@ -72,6 +72,31 @@ def _acquire_lock(lock_path: Path) -> None:
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError:
         handle.close()
+        # 尝试读取 lock 中的 PID，如果进程已不存在则清理 stale lock 并重试
+        try:
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+            old_pid = int(payload.get("pid") or -1)
+        except Exception:
+            old_pid = -1
+        stale = False
+        if old_pid > 0:
+            try:
+                import psutil
+                stale = not psutil.pid_exists(old_pid)
+            except ImportError:
+                # psutil 不可用时用 os.kill 探测（Windows: signal 0）
+                try:
+                    os.kill(old_pid, 0)
+                except OSError:
+                    stale = True
+        if stale:
+            logger.warning("[lock] stale lock from dead pid=%s, removing and retrying", old_pid)
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+            # 递归重试一次
+            return _acquire_lock(lock_path)
         raise RuntimeError("watchdog already running; stop the existing instance first")
     _LOCK_HANDLE = handle
     handle.seek(0)
