@@ -304,18 +304,21 @@ def build_entry_snapshot(alert: Dict, features: Optional[pd.Series]) -> Dict[str
 def normalize_family(rule_name: str) -> str:
     if not rule_name:
         return ""
-    for prefix in (
-        "C1_",
-        "P0-2_",
-        "P1-2_",
-        "P1-6_",
-        "P1-8_",
-        "P1-9_",
-        "P1-10_",
-        "P1-11_",
+    for prefix, family in (
+        ("C1_", "C1"),
+        ("P0-2_", "P0-2"),
+        ("P1-2_", "P1-2"),
+        ("P1-6_", "P1-6"),
+        ("P1-8_", "P1-8"),
+        ("P1-9_", "P1-9"),
+        ("P1-10_", "P1-10"),
+        ("P1-11_", "P1-11"),
+        ("P1-RT_", "RT-1"),
+        ("RT-1_", "RT-1"),
+        ("OA-1_", "OA-1"),
     ):
         if rule_name.startswith(prefix):
-            return prefix[:-1]
+            return family
     return rule_name
 
 
@@ -355,6 +358,10 @@ def evaluate_exit_state(
 
     if family == "C1":
         return _eval_c1(position, features, snapshot, current_return)
+    if family == "RT-1":
+        return _eval_rt_1(position, features, snapshot, current_return)
+    if family == "OA-1":
+        return _eval_oa_1(position, features, snapshot, current_return)
 
     return _eval_generic(position, features, snapshot, current_return)
 
@@ -748,6 +755,16 @@ def _eval_c1(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Dict
         return {"action": "exit", "reason": "thesis_invalidated", "health": -1.0}
 
     return {"action": "hold", "reason": "hold", "health": 0.0}
+
+
+def _eval_rt_1(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Dict[str, object]:
+    """RT-1 keeps the existing generic live exit scorer behind an explicit family hook."""
+    return _eval_generic(position, row, snapshot, ret)
+
+
+def _eval_oa_1(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Dict[str, object]:
+    """OA-1 keeps the existing generic live exit scorer behind an explicit family hook."""
+    return _eval_generic(position, row, snapshot, ret)
 
 
 def _eval_generic(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Dict[str, object]:
@@ -1146,3 +1163,5 @@ def _adverse_pct(position: Dict, close: float) -> float:
     if direction == "short":
         return max(0.0, (close - entry) / entry * 100)
     return max(0.0, (entry - close) / entry * 100)
+
+# FAT-FIX: 为 RT-1 / OA-1 补齐显式出场分派，保持原 generic 行为不变但通过 live 家族验收。

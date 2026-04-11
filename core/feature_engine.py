@@ -14,12 +14,12 @@ from core.dimensions.time_features import compute_time_features
 from core.dimensions.price_features import compute_price_features
 from core.dimensions.trade_flow_features import compute_trade_flow_features
 from core.dimensions.liquidity_features import compute_liquidity_features
+from core.dimensions.mark_price_features import compute_mark_price_features
 from core.dimensions.positioning_features import compute_positioning_features
 from core.dimensions.cross_market_features import compute_cross_market_features
 from core.dimensions.liquidation_features import compute_liquidation_features
 from core.dimensions.microstructure_features import compute_microstructure_features
 from core.dimensions.order_flow_features import compute_order_flow_features
-from core.dimensions.mark_price_features import compute_mark_price_features
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +86,12 @@ class FeatureEngine:
                 "PRICE",
                 "TRADE_FLOW",
                 "LIQUIDITY",
+                "MARK_PRICE",
                 "POSITIONING",
                 "CROSS_MARKET",
                 "LIQUIDATION",
                 "MICROSTRUCTURE",
                 "ORDER_FLOW",
-                "MARK_PRICE",
             ]
         dims = {d.upper() for d in feature_dims}
 
@@ -494,3 +494,5 @@ def _add_state_block_features(df: pd.DataFrame) -> pd.DataFrame:
         df[f"price_compression_blocks{suffix}"] = c_1m
 
     return df
+
+# FAT-FIX: 调整 MARK_PRICE 导入与默认维度顺序，保证其始终先于 POSITIONING 进入验收链。

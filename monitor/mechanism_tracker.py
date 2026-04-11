@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,10 @@ from pathlib import Path
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+_FORCE_REGISTRY_PATH = Path(__file__).parent.parent / "alpha" / "output" / "force_registry.json"
+_APPROVED_RULES_PATH = Path(__file__).parent.parent / "alpha" / "output" / "approved_rules.json"
+_dynamic_family_mechanism_map: dict[str, str] = {}
+_dynamic_family_map_mtimes: tuple[float, float] = (-1.0, -1.0)
 
 
 @dataclass
@@ -117,6 +122,56 @@ def _resolve_entry_feature(entry_snapshot: dict) -> tuple[str, float | None]:
     return feature, value
 
 
+def _load_dynamic_family_mechanism_map() -> dict[str, str]:
+    """Load approved/live Alpha family -> mechanism mappings with mtime caching."""
+    global _dynamic_family_mechanism_map, _dynamic_family_map_mtimes
+
+    current_mtimes: list[float] = []
+    for path in (_FORCE_REGISTRY_PATH, _APPROVED_RULES_PATH):
+        try:
+            current_mtimes.append(path.stat().st_mtime)
+        except OSError:
+            current_mtimes.append(-1.0)
+    mtime_key = tuple(current_mtimes)
+    if mtime_key == _dynamic_family_map_mtimes:
+        return _dynamic_family_mechanism_map
+
+    mapping: dict[str, str] = {}
+
+    try:
+        payload = json.loads(_FORCE_REGISTRY_PATH.read_text(encoding="utf-8"))
+        for force_payload in payload.get("forces", {}).values():
+            strategies = force_payload.get("strategies", {}) if isinstance(force_payload, dict) else {}
+            if not isinstance(strategies, dict):
+                continue
+            for strategy_payload in strategies.values():
+                if not isinstance(strategy_payload, dict):
+                    continue
+                family = str(strategy_payload.get("family") or "").strip()
+                mechanism_type = str(strategy_payload.get("mechanism_type") or "").strip()
+                if family and mechanism_type:
+                    mapping[family] = mechanism_type
+    except Exception:
+        pass
+
+    try:
+        approved_payload = json.loads(_APPROVED_RULES_PATH.read_text(encoding="utf-8"))
+        if isinstance(approved_payload, list):
+            for card in approved_payload:
+                if not isinstance(card, dict):
+                    continue
+                family = str(card.get("family") or "").strip()
+                mechanism_type = str(card.get("mechanism_type") or "").strip()
+                if family and mechanism_type:
+                    mapping[family] = mechanism_type
+    except Exception:
+        pass
+
+    _dynamic_family_mechanism_map = mapping
+    _dynamic_family_map_mtimes = mtime_key
+    return _dynamic_family_mechanism_map
+
+
 # ── 大类描述词典 ─────────────────────────────────────────────────────────────
 MECHANISM_CATEGORIES: dict[str, str] = {
     "leverage_cost_imbalance": (
@@ -201,6 +256,14 @@ def resolve_mechanism_type(signal_name: str, direction: str = "", family: str = 
         for key, mech in SIGNAL_MECHANISM_MAP.items():
             if family.startswith(key) or key.startswith(family):
                 return mech
+        dynamic_mechanism = _load_dynamic_family_mechanism_map().get(family, "")
+        if dynamic_mechanism:
+            return dynamic_mechanism
+
+    # signal_name 也尝试动态映射（A5-xxx 直接以 signal_name 形式传入时）
+    dynamic_by_sname = _load_dynamic_family_mechanism_map().get(signal_name, "")
+    if dynamic_by_sname:
+        return dynamic_by_sname
 
     # signal_name 精确匹配（P1 系列走这条路径）
     mechanism = SIGNAL_MECHANISM_MAP.get(signal_name, "")
@@ -1232,7 +1295,15 @@ _FAMILY_TO_MECHANISM: dict[str, str] = {
 
 def get_mechanism_for_family(family: str) -> str:
     """Map strategy family to its primary mechanism ID. Falls back to 'generic_alpha'."""
-    return _FAMILY_TO_MECHANISM.get(family, "generic_alpha")
+    family_text = str(family or "").strip()
+    if not family_text:
+        return "generic_alpha"
+    if family_text in _FAMILY_TO_MECHANISM:
+        return _FAMILY_TO_MECHANISM[family_text]
+    dynamic_mechanism = _load_dynamic_family_mechanism_map().get(family_text, "")
+    if dynamic_mechanism:
+        return dynamic_mechanism
+    return "generic_alpha"
 
 
 def get_force_category(mechanism: str) -> str:
@@ -1812,6 +1883,8 @@ def _load_custom_mechanisms() -> None:
 
 # Load custom mechanisms on module import
 _load_custom_mechanisms()
+
+# FAT-FIX: 增加 approved_rules/force_registry 动态家族映射，确保 A5-xxx 能解析到真实 mechanism_type。
 
 
 __all__ = [

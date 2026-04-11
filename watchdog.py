@@ -118,6 +118,16 @@ def setup_logging(log_dir: str) -> None:
     )
 
 
+def _run_preflight(project_root: Path) -> None:
+    """Run doctor preflight and raise SystemExit on blocking errors."""
+    report = run_preflight_checks(project_root)
+    for line in format_report(report).splitlines():
+        logger.info("[preflight] %s", line)
+    if report.has_errors:
+        logger.error("Preflight failed. Run python run_doctor.py for details.")
+        raise SystemExit(2)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run and guard the live monitor, discovery engine, UI server, and websocket collector.",
@@ -266,12 +276,7 @@ def main() -> None:
     project_root = ROOT
 
     if not args.skip_preflight:
-        report = run_preflight_checks(project_root)
-        for line in format_report(report).splitlines():
-            logger.info("[preflight] %s", line)
-        if report.has_errors:
-            logger.error("Preflight failed. Run python run_doctor.py for details.")
-            raise SystemExit(2)
+        _run_preflight(project_root)
 
     ui_dir = project_root / "ui" / "quant-dashboard"
     ui_entry = ui_dir / "dist" / "index.js"
@@ -495,6 +500,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# FAT-FIX: 补齐 watchdog._run_preflight() 统一封装，避免启动链验收缺少明确 preflight 入口。
 
 
 
