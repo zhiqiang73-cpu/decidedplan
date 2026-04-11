@@ -30,7 +30,8 @@ class FundingRateDetector(SignalDetector):
 
     name      = "P0-2_资金费率套利"
     direction = "short"
-    hold_bars = 30
+    research_horizon_bars = 30
+    hold_bars = research_horizon_bars
     # Runner-level cooldown: 5 min (dedup lock prevents double-entry while position open)
     runner_cooldown_ms = 5 * 60 * 1000
 
@@ -132,6 +133,7 @@ class FundingRateDetector(SignalDetector):
             return None
 
         direction = "short" if short_fire else "long"
+        research_horizon = self.resolved_research_horizon_bars()
 
         logger.info(
             "[P0-2 FR ARBI] %s | %s=%.6f | minutes_to_funding=%.0f",
@@ -145,7 +147,8 @@ class FundingRateDetector(SignalDetector):
             "phase": "P1",
             "name": self.name,
             "direction": direction,
-            "horizon": self.hold_bars,
+            "horizon": research_horizon,
+            "research_horizon_bars": research_horizon,
             "timestamp_ms": latest_ts,
             "desc": (
                 f"[{self.name}] {mode_label}={display_val:.6f} "
@@ -167,6 +170,7 @@ class FundingRateDetector(SignalDetector):
             "trigger_count": trigger_count,
             "trigger_rate":  round(trigger_count / max(len(df), 1) * 100, 3),
             "fee_pct":       fee_pct,
+            "research_horizon_bars": self.resolved_research_horizon_bars(),
         }
         if trigger_count == 0:
             return base
@@ -174,13 +178,14 @@ class FundingRateDetector(SignalDetector):
         trigger_idx = np.where(signals.values)[0]
         close = df["close"].values
         returns = []
+        research_horizon_bars = self.resolved_research_horizon_bars()
 
         short_mask = self._last_short_mask.values
         long_mask  = self._last_long_mask.values
 
         for idx in trigger_idx:
             entry_idx = idx              # 与实时执行口径一致
-            exit_idx  = idx + self.hold_bars
+            exit_idx  = idx + research_horizon_bars
             if exit_idx >= len(close):
                 continue
             ep = close[entry_idx]

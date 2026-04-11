@@ -82,7 +82,8 @@ class RegimeTransitionDetector(SignalDetector):
     """
     name             = "P1-RT_regime_transition"
     direction        = "long"
-    hold_bars        = 30
+    research_horizon_bars = 30
+    hold_bars        = research_horizon_bars
     required_columns = [
         "amplitude_ma20", "volume_vs_ma20", "spread_vs_ma20",
         "oi_change_rate_1h", "position_in_range_24h", "timestamp",
@@ -158,6 +159,7 @@ class RegimeTransitionDetector(SignalDetector):
             # Fire signal
             self._cooldown = COOLDOWN_BARS
             ts_ms = int(_safe_get(row, "timestamp", default=0) or 0)
+            research_horizon = self.resolved_research_horizon_bars()
             logger.info(
                 "[P1-RT] RANGE->TREND transition: vol=%.3f range_pos=%.3f", vol, range_pos
             )
@@ -165,7 +167,8 @@ class RegimeTransitionDetector(SignalDetector):
                 "phase":         "P1",
                 "name":          self.name,
                 "direction":     "long",
-                "horizon":       self.hold_bars,
+                "horizon":       research_horizon,
+                "research_horizon_bars": research_horizon,
                 "timestamp_ms":  ts_ms,
                 "desc":          (
                     f"RANGE->TREND transition: momentum consensus forming "

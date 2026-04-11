@@ -41,6 +41,7 @@ _APPROVED_FILE = ROOT / "alpha" / "output" / "approved_rules.json"
 _REJECTED_FILE = ROOT / "alpha" / "output" / "rejected_rules.json"
 _REVIEW_FILE = ROOT / "alpha" / "output" / "review_queue.json"
 _HTML_FILE = ROOT / "ui" / "alpha_dashboard.html"
+_DISCOVERY_LOG_FILE = ROOT / "alpha" / "output" / "discovery.log"
 
 
 def _read_json(path: Path, default=None):
@@ -76,6 +77,104 @@ def _get_promoter():
         return _promoter_instance
 
 
+# ── KIMI 摘要 ────────────────────────────────────────────────────────────────
+
+def _get_ai_summary() -> dict:
+    """
+    读取 engine_state.json 最近决策，调用 KIMI API 生成自然语言摘要。
+    KIMI 不可达时返回 error 字段，前端显示"KIMI 未连接"。
+    """
+    from datetime import datetime, timezone
+
+    state = _read_json(_ENGINE_STATE_FILE, {})
+    stats = state.get("stats", {})
+    decisions = state.get("recent_decisions", [])
+
+    approved_count = stats.get("last_run_summary", {}).get("approved", 0)
+    rejected_count = stats.get("last_run_summary", {}).get("rejected", 0)
+    review_count = stats.get("last_run_summary", {}).get("review", 0)
+
+    # 构造决策摘要文字（最近 5 条）
+    decision_lines = []
+    for d in decisions[-5:]:
+        rule_id = str(d.get("id", ""))[:30]
+        direction = d.get("direction", "?")
+        oos_wr = d.get("oos_wr", "?")
+        mechanism = d.get("mechanism_type", "?")
+        decision_lines.append(f"  - {rule_id} | {direction} | WR={oos_wr}% | {mechanism}")
+    decisions_text = "\n".join(decision_lines) if decision_lines else "  (本次无决策)"
+
+    prompt = (
+        f"你是一个量化策略引擎的助手。引擎最近完成扫描，结果如下：\n"
+        f"- 审批通过：{approved_count} 条  拒绝：{rejected_count} 条  待人工审查：{review_count} 条\n"
+        f"- 最近决策：\n{decisions_text}\n\n"
+        f"请用 2-3 句话总结本次扫描结果，指出发现了什么类型的策略信号，以及值得关注的地方。"
+        f"回答用中文，不超过 100 字。"
+    )
+
+    try:
+        promoter = _get_promoter()
+        if promoter is None:
+            return {"summary": "", "error": "AutoPromoter 未初始化"}
+        summary_text = promoter._llm_chat(prompt)
+        if not summary_text:
+            return {"summary": "", "error": "LLM 返回空"}
+        return {
+            "summary": summary_text.strip(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.debug("[Dashboard] KIMI 摘要失败: %s", exc)
+        return {"summary": "", "error": str(exc)[:80]}
+
+
+
+
+# ── KIMI 策略发现会话摘要 ────────────────────────────────────────────────────
+
+def _get_kimi_sessions() -> dict:
+    """
+    汇总 Kimi 策略发现引擎的产出数据。
+    - 从 approved_rules.json / pending_rules.json 提取 origin==kimi_researcher 的卡片
+    - 从 discovery.log 提取最近 [KIMI] 日志行
+    - 统计累计假设数（全量 [KIMI] 行数）和累计批准数
+    """
+    # 过滤 kimi 来源的已批准策略
+    approved_all = _read_json(_APPROVED_FILE, [])
+    approved_kimi = [r for r in approved_all if r.get("origin") == "kimi_researcher"]
+
+    # 过滤 kimi 来源的待审核候选
+    pending_all = _read_json(_PENDING_FILE, [])
+    pending_kimi = [r for r in pending_all if r.get("origin") == "kimi_researcher"]
+
+    # engine_state 中的最后运行时间
+    state = _read_json(_ENGINE_STATE_FILE, {})
+    last_run_at = state.get("last_run_at", "")
+
+    # 读取 discovery.log 最近的 [KIMI] 行
+    recent_log_lines: list[str] = []
+    total_hypotheses = 0
+    if _DISCOVERY_LOG_FILE.exists():
+        try:
+            # 文件可能很大，只读末尾 5000 字节来获取最近日志，减少 IO
+            with open(_DISCOVERY_LOG_FILE, encoding="utf-8", errors="replace") as fh:
+                # 全量扫描计数 total_hypotheses
+                all_lines = fh.readlines()
+            kimi_lines = [ln.strip() for ln in all_lines if "[KIMI]" in ln]
+            total_hypotheses = len(kimi_lines)
+            # 取最近 50 条 [KIMI] 日志
+            recent_log_lines = kimi_lines[-50:]
+        except Exception as exc:
+            logger.debug("[Dashboard] 读取 discovery.log 失败: %s", exc)
+
+    return {
+        "approved_kimi": approved_kimi,
+        "pending_kimi": pending_kimi,
+        "recent_log_lines": recent_log_lines,
+        "last_run_at": last_run_at,
+        "total_hypotheses": total_hypotheses,
+        "total_approved": len(approved_kimi),
+    }
 # ── HTTP 处理器 ───────────────────────────────────────────────────────────────
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -142,6 +241,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/rejected":
             self._send_json(_read_json(_REJECTED_FILE, []))
+
+        elif path == "/api/ai_summary":
+            self._send_json(_get_ai_summary())
+
+        elif path == "/api/kimi_sessions":
+            # 返回 Kimi 引擎发现的策略和日志摘要
+            self._send_json(_get_kimi_sessions())
 
         else:
             self._send_json({"error": "not found"}, 404)

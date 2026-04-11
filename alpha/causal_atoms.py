@@ -2,7 +2,7 @@
 因果原子 (Causal Atoms): 可解释的单条件预测规则
 
 CausalAtom 的形式:
-  IF feature {>|<} threshold THEN 持仓 direction N bars
+  IF feature {>|<} threshold THEN 方向 direction 在研究观察窗 horizon 内具有可预测偏移
 
 挖掘流程:
   1. 对 scanner 排名靠前的特征，扫描分位数阈值（10th~90th，步长5%）
@@ -42,7 +42,7 @@ class CausalAtom:
         operator:      '>' 或 '<'
         threshold:     触发阈值
         direction:     入场方向 'long' | 'short'
-        horizon:       持仓 K 线数
+        horizon:       研究观察窗 K 线数（不是 live 固定离场承诺）
         ic:            平均日 IC
         icir:          IC 信息比率
         win_rate:      胜率（正收益比例）
@@ -265,19 +265,19 @@ class AtomMiner:
         for _, row in top.iterrows():
             feature = row["feature"]
             horizon = int(row["horizon"])
-            preferred = "long" if row["IC"] > 0 else "short"
 
-            logger.info(f"挖掘原子: {feature} @ horizon={horizon} ...")
-            atom = self.mine_feature(df, feature, horizon, preferred)
-            if atom is not None:
-                atoms.append(atom)
-                logger.info(
-                    f"  -> {atom.rule_str()} | ICIR={atom.icir:.3f}"
-                    f" WR={atom.win_rate*100:.1f}% PF={atom.profit_factor:.2f}"
-                    f" n={atom.n_triggers}"
-                )
-            else:
-                logger.info(f"  -> 未找到满足条件的原子（触发不足或 ICIR<{self.min_icir}）")
+            # 双向挖掘: 对每个 (feature, horizon) 同时挖 long 和 short,
+            # 让数据决定哪个方向有预测力, 消除 IC 符号导致的 SHORT 偏差。
+            logger.info(f"挖掘原子: {feature} @ horizon={horizon} (双向)...")
+            for direction in ("long", "short"):
+                atom = self.mine_feature(df, feature, horizon, direction)
+                if atom is not None:
+                    atoms.append(atom)
+                    logger.info(
+                        f"  -> {atom.rule_str()} | ICIR={atom.icir:.3f}"
+                        f" WR={atom.win_rate*100:.1f}% PF={atom.profit_factor:.2f}"
+                        f" n={atom.n_triggers} dir={direction}"
+                    )
 
         atoms.sort(key=lambda a: abs(a.icir), reverse=True)
         return atoms

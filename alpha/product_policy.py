@@ -82,13 +82,18 @@ def infer_product_family(card: dict[str, Any]) -> str:
 
 _next_auto_id = 1
 
+
+def _load_card_pool(path: Path) -> list[dict[str, Any]]:
+    payload = read_json_file(path, default=[])
+    return payload if isinstance(payload, list) else []
+
 def _auto_assign_family(card: dict[str, Any], entry_feature: str, confirm_feature: str, direction: str) -> str:
     """为通过统计门槛的新候选自动分配 family。"""
     global _next_auto_id
     # 从已有 approved/pending 中找最大编号
     import re
     for pool_path in (_APPROVED_PATH, _PENDING_PATH):
-        existing = read_json_file(pool_path) or []
+        existing = _load_card_pool(pool_path)
         for rule in existing:
             fam = str(rule.get("family") or "")
             m = re.match(r"A5-(\d+)", fam)
@@ -556,7 +561,8 @@ def sync_product_candidate_pool() -> list[dict[str, Any]]:
         approved_cards = []
 
     board = build_product_candidate_board(approved_cards)
-    write_json_atomic(_APPROVED_PATH, board, ensure_ascii=False, indent=2)
+    # 不覆盖 approved_rules.json -- board 只含已知产品家族,
+    # 覆盖会删除新发现的 A5 等策略卡片。只写 candidate 文件供 dashboard。
     write_json_atomic(_CANDIDATE_PATH, board, ensure_ascii=False, indent=2)
 
     for path in (_PENDING_PATH, _REVIEW_PATH):

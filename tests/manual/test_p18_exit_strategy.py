@@ -219,7 +219,7 @@ if __name__ == "__main__":
 
         combos = LONG_COMBOS if direction == "long" else SHORT_COMBOS
 
-        print(f"\n  Baselines (fixed hold):")
+        print(f"\n  Legacy baselines (fixed hold benchmark only):")
         for hold_bars in [35, 90]:
             results = []
             for _, trade in sub_trades.iterrows():
@@ -245,7 +245,7 @@ if __name__ == "__main__":
                 wins = rdf[rdf["net_pnl"] > 0]["net_pnl"].sum()
                 losses = abs(rdf[rdf["net_pnl"] <= 0]["net_pnl"].sum())
                 pf = wins / losses if losses > 0 else float("inf")
-                print(f"    Fixed {hold_bars}bar: WR={wr:.1f}%, total={total_net:.4f}%, PF={pf:.2f}")
+                print(f"    Legacy fixed-hold {hold_bars}bar: WR={wr:.1f}%, total={total_net:.4f}%, PF={pf:.2f}")
 
         print(f"\n  Combo strategy (earliest trigger):")
         result = test_exit_strategy(sub_trades, combos)

@@ -89,12 +89,12 @@ export default function AlphaEngine() {
   });
   const promoterReject = trpc.alphaEngine.promoterReject.useMutation({
     onSuccess: () => {
-      toast.success("已从 review queue 移出");
+      toast.success("已从复核队列移出");
       refetchReview();
     },
   });
 
-  // -- 新增: 心跳 + LLM 配置 + discovery log --
+  // -- 新增: 心跳 + 大模型配置 + 发现日志 --
   const { data: heartbeat } = trpc.alphaEngine.getHeartbeat.useQuery(undefined, { refetchInterval: 15_000 });
   const { data: llmConfig } = trpc.alphaEngine.getLLMConfig.useQuery(undefined, { refetchInterval: 60_000 });
   const { data: discoveryLogLines = [] } = trpc.alphaEngine.getDiscoveryLog.useQuery({ lines: 30 }, { refetchInterval: 30_000 });
@@ -130,7 +130,7 @@ export default function AlphaEngine() {
         ...current.slice(-79),
         {
           ts: new Date().toLocaleTimeString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }),
-          message: `[${alphaProgress.symbol}] ${alphaProgress.phase} ${alphaProgress.progress}% - ${alphaProgress.message}`,
+          message: `[${alphaProgress.symbol}] ${formatProgressPhase(alphaProgress.phase)} ${alphaProgress.progress}% - ${translateVisibleText(alphaProgress.message)}`,
           level,
         },
       ];
@@ -145,21 +145,21 @@ export default function AlphaEngine() {
           <div>
             <div className="flex items-center gap-2">
               <Zap size={20} style={{ color: "#f0b90b" }} />
-              <h1 className="text-xl font-bold" style={{ color: "#eaecef" }}>{"Alpha 引擎"}</h1>
+              <h1 className="text-xl font-bold" style={{ color: "#eaecef" }}>{"阿尔法引擎"}</h1>
             </div>
             <p className="text-sm mt-0.5" style={{ color: "#848e9c" }}>
-              {"统一展示 discovery 状态、候选规则、review queue 和运行记录。"}
+              {"统一展示发现状态、候选规则、复核队列和运行记录。"}
             </p>
           </div>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg" style={{ backgroundColor: "#1e2329", color: hbColor }}>
               <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: hbColor, boxShadow: hbAge < 120 ? `0 0 6px ${hbColor}` : "none", animation: hbAge < 120 ? "pulse 2s infinite" : "none" }} />
               <span>{hbLabel}</span>
-              {llmConfig && <span style={{ color: "#848e9c", marginLeft: 4 }}>{`| ${llmConfig.model}`}</span>}
+              {llmConfig && <span style={{ color: "#848e9c", marginLeft: 4 }}>{`| 大模型：${llmConfig.model}`}</span>}
             </div>
             <div className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg" style={{ backgroundColor: "#1e2329", color: connected ? "#0ecb81" : "#848e9c" }}>
               {connected ? <Activity size={14} /> : <Clock3 size={14} />}
-              <span>{connected ? "WebSocket 已连接" : "WebSocket 重连中"}</span>
+              <span>{connected ? "实时连接已建立" : "实时连接重连中"}</span>
             </div>
           </div>
         </div>
@@ -169,7 +169,7 @@ export default function AlphaEngine() {
             <HealthCard label={"数据层"} status={health.layers.data.status} detail={`${health.layers.data.websocket.connected}/4 实时流`} />
             <HealthCard label={"特征层"} status={health.layers.features.status} detail={`${health.layers.features.computed}/52 特征`} />
             <HealthCard label={"信号层"} status={health.layers.signals.status} detail={`${health.layers.signals.p1Running} P1 + ${health.layers.signals.p2Running} P2`} />
-            <HealthCard label={"执行层"} status={health.layers.execution.status} detail={`fill rate ${(health.layers.execution.fillRate * 100).toFixed(0)}%`} />
+            <HealthCard label={"执行层"} status={health.layers.execution.status} detail={`成交率 ${(health.layers.execution.fillRate * 100).toFixed(0)}%`} />
           </div>
         )}
 
@@ -205,10 +205,10 @@ export default function AlphaEngine() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-              <ParamField label="IC threshold" value={params.icThreshold} step={0.01} onChange={(value) => setParams((current) => ({ ...current, icThreshold: value }))} />
-              <ParamField label="OOS win rate" value={params.oosWinRateMin} step={0.01} onChange={(value) => setParams((current) => ({ ...current, oosWinRateMin: value }))} />
-              <ParamField label="Max conditions" value={params.maxConditions} step={1} onChange={(value) => setParams((current) => ({ ...current, maxConditions: Math.max(1, Math.round(value)) }))} />
-              <ParamField label="Lookback days" value={params.lookbackDays} step={1} onChange={(value) => setParams((current) => ({ ...current, lookbackDays: Math.max(30, Math.round(value)) }))} />
+              <ParamField label="相关性阈值" value={params.icThreshold} step={0.01} onChange={(value) => setParams((current) => ({ ...current, icThreshold: value }))} />
+              <ParamField label="样本外最低胜率" value={params.oosWinRateMin} step={0.01} onChange={(value) => setParams((current) => ({ ...current, oosWinRateMin: value }))} />
+              <ParamField label="最多条件数" value={params.maxConditions} step={1} onChange={(value) => setParams((current) => ({ ...current, maxConditions: Math.max(1, Math.round(value)) }))} />
+              <ParamField label="回看天数" value={params.lookbackDays} step={1} onChange={(value) => setParams((current) => ({ ...current, lookbackDays: Math.max(30, Math.round(value)) }))} />
             </div>
 
             <div className="rounded-xl p-4" style={{ backgroundColor: "#161a1e", border: "1px solid #2b3139" }}>
@@ -216,7 +216,7 @@ export default function AlphaEngine() {
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
                 <SummaryCell label={"引擎状态"} value={isRunning ? "运行中" : "已停止"} valueColor={isRunning ? "#0ecb81" : "#848e9c"} />
                 <SummaryCell label={"总运行次数"} value={String(globalStatus?.totalRuns ?? 0)} />
-                <SummaryCell label={"最新 run"} value={latestRun?.runId ?? "--"} />
+                <SummaryCell label={"最新运行编号"} value={latestRun?.runId ?? "--"} />
                 <SummaryCell label={"最新候选"} value={String(pendingCandidates.length)} />
               </div>
             </div>
@@ -225,17 +225,17 @@ export default function AlphaEngine() {
           <div className="card-q p-5 space-y-3">
             <div className="flex items-center gap-2">
               <Brain size={15} style={{ color: "#f0b90b" }} />
-              <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>{"Review Queue"}</h3>
+              <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>{"复核队列"}</h3>
             </div>
             <SummaryCell label={"待复核"} value={String(reviewQueue.length)} />
             <SummaryCell label={"已批准候选"} value={String(approvedCandidates.length)} />
-            <SummaryCell label={"当前连接"} value={connected ? "WS online" : "WS reconnecting"} valueColor={connected ? "#0ecb81" : "#848e9c"} />
+            <SummaryCell label={"当前连接"} value={connected ? "实时连接正常" : "实时连接重连中"} valueColor={connected ? "#0ecb81" : "#848e9c"} />
             {llmConfig && (
               <div className="rounded-lg p-3 text-xs leading-6" style={{ backgroundColor: "#161a1e" }}>
-                <div style={{ color: "#bc8cff" }}>{"LLM 审核引擎"}</div>
+                <div style={{ color: "#bc8cff" }}>{"大模型审核引擎"}</div>
                 <div style={{ color: "#eaecef" }}>{`模型: ${llmConfig.model}`}</div>
-                <div style={{ color: "#848e9c" }}>{`API: ${llmConfig.baseUrl || "--"}`}</div>
-                <div style={{ color: "#848e9c" }}>{`Key: ${llmConfig.apiKeyMasked}`}</div>
+                <div style={{ color: "#848e9c" }}>{`接口: ${llmConfig.baseUrl || "--"}`}</div>
+                <div style={{ color: "#848e9c" }}>{`密钥: ${llmConfig.apiKeyMasked}`}</div>
               </div>
             )}
           </div>
@@ -253,7 +253,7 @@ export default function AlphaEngine() {
               <table className="w-full">
                 <thead>
                   <tr style={{ borderBottom: "1px solid #1e2329" }}>
-                    {["规则", "方向", "OOS WR", "样本", "LLM 评估", "状态", "操作"].map((heading) => (
+                    {["规则", "方向", "样本外胜率", "样本数", "大模型评估", "状态", "操作"].map((heading) => (
                       <th key={heading} className="px-4 py-2.5 text-left text-xs font-medium" style={{ color: "#848e9c" }}>{heading}</th>
                     ))}
                   </tr>
@@ -266,7 +266,7 @@ export default function AlphaEngine() {
                     return (
                     <tr key={candidate.candidateId} style={{ borderBottom: index < todayCandidates.length - 1 ? "1px solid #1e2329" : "none" }}>
                       <td className="px-4 py-3">
-                        <div className="text-xs font-mono" style={{ color: "#f0b90b" }}>{candidate.fullExpression}</div>
+                        <div className="text-xs" style={{ color: "#f0b90b" }}>{formatRuleExpression(candidate.fullExpression)}</div>
                       </td>
                       <td className="px-4 py-3 text-sm" style={{ color: candidate.direction === "LONG" ? "#0ecb81" : "#f6465d" }}>{candidate.direction === "LONG" ? "做多" : "做空"}</td>
                       <td className="px-4 py-3 text-sm font-num" style={{ color: scoreColor(candidate.oosWinRate) }}>{formatPercent(candidate.oosWinRate)}</td>
@@ -274,7 +274,7 @@ export default function AlphaEngine() {
                       <td className="px-4 py-3">
                         {llmR ? (
                           <div>
-                            <div className="text-xs" style={{ color: "#bc8cff" }}>{llmR.mechanism_display_name ?? "--"}</div>
+                            <div className="text-xs" style={{ color: "#bc8cff" }}>{formatMechanismType(llmR.mechanism_display_name ?? llmR.mechanism_type)}</div>
                             {!llmR.is_valid && llmR.rejection_reason && (
                               <div className="text-xs mt-0.5" style={{ color: "#f6465d" }}>{llmR.rejection_reason}</div>
                             )}
@@ -311,26 +311,26 @@ export default function AlphaEngine() {
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           <div className="card-q overflow-hidden">
             <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: "1px solid #2b3139" }}>
-              <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>{"Review Queue"}</h3>
+              <h3 className="text-sm font-semibold" style={{ color: "#eaecef" }}>{"复核队列"}</h3>
               <span className="text-xs" style={{ color: "#848e9c" }}>{`${reviewQueue.length} 条`}</span>
             </div>
             {reviewQueue.length === 0 ? (
-              <div className="px-4 py-6 text-sm" style={{ color: "#848e9c" }}>{"暂无 review queue 条目。"}</div>
+              <div className="px-4 py-6 text-sm" style={{ color: "#848e9c" }}>{"暂无复核队列条目。"}</div>
             ) : (
               <div className="divide-y" style={{ borderColor: "#1e2329" }}>
                 {reviewQueue.map((item) => (
                   <div key={item.candidateId} className="px-4 py-3 flex items-center justify-between gap-3">
                     <div>
-                      <div className="text-sm" style={{ color: "#eaecef" }}>{item.fullExpression ?? item.candidateId}</div>
+                      <div className="text-sm" style={{ color: "#eaecef" }}>{formatRuleExpression(item.fullExpression ?? item.candidateId)}</div>
                       <div className="text-xs mt-1" style={{ color: "#848e9c" }}>
-                        {`${formatDirection(item.direction)} / ${item.mechanismType ?? "generic"} / ${formatPercent(item.oosWinRate)}`}
+                        {`${formatDirection(item.direction)} / ${formatMechanismType(item.mechanismType)} / ${formatPercent(item.oosWinRate)}`}
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5">
                       <Button size="sm" onClick={() => promoterApprove.mutate({ candidateId: item.candidateId })} className="h-7 px-2 text-xs" style={{ backgroundColor: "rgba(14,203,129,0.15)", color: "#0ecb81", border: "1px solid rgba(14,203,129,0.3)" }}>
                         {"写入"}
                       </Button>
-                      <Button size="sm" onClick={() => promoterReject.mutate({ candidateId: item.candidateId, reason: "manual_review" })} className="h-7 px-2 text-xs" style={{ backgroundColor: "rgba(246,70,93,0.12)", color: "#f6465d", border: "1px solid rgba(246,70,93,0.25)" }}>
+                      <Button size="sm" onClick={() => promoterReject.mutate({ candidateId: item.candidateId, reason: "人工复核移出" })} className="h-7 px-2 text-xs" style={{ backgroundColor: "rgba(246,70,93,0.12)", color: "#f6465d", border: "1px solid rgba(246,70,93,0.25)" }}>
                         {"移出"}
                       </Button>
                     </div>
@@ -351,8 +351,8 @@ export default function AlphaEngine() {
               ) : (
                 [...(discoveryLogLines as string[]).map((line, i) => ({
                   ts: line.slice(0, 8),
-                  message: line.slice(10),
-                  level: (line.includes("ERROR") ? "warn" : line.includes("合格") ? "success" : "info") as "info" | "success" | "warn",
+                  message: translateVisibleText(line.slice(10)),
+                  level: (line.includes("ERROR") || line.includes("WARNING") ? "warn" : line.includes("合格") ? "success" : "info") as "info" | "success" | "warn",
                   key: `dl-${i}`,
                 })), ...logs.map((l, i) => ({ ...l, key: `ws-${i}` }))].slice(-50).map((log) => (
                   <div key={(log as any).key ?? log.ts} className="rounded-lg p-3 text-xs font-mono" style={{ backgroundColor: "#161a1e", color: log.level === "success" ? "#0ecb81" : log.level === "warn" ? "#f0b90b" : "#c9d1d9" }}>
@@ -377,7 +377,7 @@ function HealthCard({ label, status, detail }: { label: string; status: string; 
         <span className="text-xs" style={{ color: "#848e9c" }}>{label}</span>
         <span className="inline-flex items-center gap-1 text-xs" style={{ color }}>
           <AlertCircle size={12} />
-          {status}
+          {formatHealthStatus(status)}
         </span>
       </div>
       <div className="text-sm" style={{ color: "#eaecef" }}>{detail}</div>
@@ -408,6 +408,128 @@ function SummaryCell({ label, value, valueColor = "#eaecef" }: { label: string; 
       <div className="text-sm font-num font-medium" style={{ color: valueColor }}>{value}</div>
     </div>
   );
+}
+
+function formatHealthStatus(status: string) {
+  const map: Record<string, string> = {
+    healthy: "正常",
+    warning: "预警",
+    error: "异常",
+    offline: "离线",
+    running: "运行中",
+    idle: "待机",
+  };
+  return map[status] ?? translateVisibleText(status);
+}
+
+function formatProgressPhase(phase?: string | null) {
+  const map: Record<string, string> = {
+    loading: "加载数据",
+    feature_engineering: "计算特征",
+    scanning: "扫描信号",
+    scan: "扫描信号",
+    seed_mining: "挖掘种子",
+    walk_forward: "滚动验证",
+    validation: "验证候选",
+    promotion: "审核晋升",
+    completed: "已完成",
+    error: "异常",
+  };
+  return map[String(phase ?? "")] ?? translateVisibleText(phase);
+}
+
+function formatMechanismType(value?: string | null) {
+  const map: Record<string, string> = {
+    compression_release: "压缩释放",
+    vwap_reversion: "均价回归",
+    seller_impulse: "卖压冲击",
+    buyer_impulse: "买方冲击",
+    liquidation_cascade: "清算级联",
+    funding_divergence: "资金费率背离",
+    oi_divergence: "持仓量背离",
+    generic: "通用机制",
+    generic_alpha: "通用阿尔法",
+  };
+  if (!value) return "未识别机制";
+  return map[value] ?? translateVisibleText(value);
+}
+
+function formatRuleExpression(value?: string | null) {
+  if (!value) return "未配置规则";
+  const replacements: Array<[RegExp, string]> = [
+    [/price_compression_blocks_5m/g, "五分钟价格压缩块数"],
+    [/price_compression_blocks_10m/g, "十分钟价格压缩块数"],
+    [/vol_drought_blocks_5m/g, "五分钟量能枯竭块数"],
+    [/vol_drought_blocks_10m/g, "十分钟量能枯竭块数"],
+    [/spread_vs_ma20/g, "价差相对二十均值"],
+    [/volume_acceleration/g, "成交量加速度"],
+    [/vwap_deviation/g, "成交均价偏离"],
+    [/taker_buy_sell_ratio/g, "主动买卖比"],
+    [/volume_vs_ma20/g, "成交量相对二十均值"],
+    [/btc_liq_net_pressure/g, "清算净压力"],
+    [/direction_net_1m/g, "一分钟主动方向净值"],
+    [/large_trade_buy_ratio/g, "大额成交买入占比"],
+    [/trade_burst_index/g, "成交突增指数"],
+    [/quote_imbalance/g, "盘口报价失衡"],
+    [/bid_depth_ratio/g, "买盘深度占比"],
+    [/mark_basis/g, "标记价基差"],
+    [/funding_rate/g, "资金费率"],
+    [/oi_change_rate_5m/g, "五分钟持仓变化率"],
+    [/oi_change_rate_1h/g, "一小时持仓变化率"],
+    [/dist_to_24h_high/g, "距二十四小时高点"],
+    [/dist_to_24h_low/g, "距二十四小时低点"],
+    [/position_in_range_24h/g, "二十四小时区间位置"],
+    [/position_in_range_4h/g, "四小时区间位置"],
+    [/\bAND\b/g, "且"],
+    [/->\s*long\s*(\d+)bars/gi, "，方向：做多，周期：$1 根"],
+    [/->\s*short\s*(\d+)bars/gi, "，方向：做空，周期：$1 根"],
+    [/\blong\b/gi, "做多"],
+    [/\bshort\b/gi, "做空"],
+  ];
+  return replacements.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), value);
+}
+
+function translateVisibleText(value?: string | null) {
+  if (!value) return "";
+  const replacements: Array<[RegExp, string]> = [
+    [/Review Queue/gi, "复核队列"],
+    [/review queue/gi, "复核队列"],
+    [/Discovery/gi, "发现流程"],
+    [/discovery/gi, "发现流程"],
+    [/Promoter/gi, "晋升器"],
+    [/promoter/gi, "晋升器"],
+    [/Candidate/gi, "候选"],
+    [/candidate/gi, "候选"],
+    [/Pending/gi, "待审"],
+    [/pending/gi, "待审"],
+    [/Approved/gi, "已批准"],
+    [/approved/gi, "已批准"],
+    [/Rejected/gi, "已拒绝"],
+    [/rejected/gi, "已拒绝"],
+    [/running/gi, "运行中"],
+    [/completed/gi, "已完成"],
+    [/warning/gi, "预警"],
+    [/error/gi, "错误"],
+    [/healthy/gi, "正常"],
+    [/offline/gi, "离线"],
+    [/online/gi, "在线"],
+    [/WebSocket/gi, "实时连接"],
+    [/LLM/gi, "大模型"],
+    [/OOS WR/gi, "样本外胜率"],
+    [/WR/gi, "胜率"],
+    [/PF/gi, "利润因子"],
+    [/DEFER/gi, "延期"],
+    [/AUTO_APPROVE/gi, "自动批准"],
+    [/AUTO_REJECT/gi, "自动拒绝"],
+    [/Connection error/gi, "连接失败"],
+    [/generic_alpha/gi, "通用阿尔法"],
+    [/generic/gi, "通用机制"],
+    [/compression_release/gi, "压缩释放"],
+    [/vwap_reversion/gi, "均价回归"],
+    [/seller_impulse/gi, "卖压冲击"],
+    [/buyer_impulse/gi, "买方冲击"],
+  ];
+  return replacements.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), value);
 }
 
 function scoreColor(value: number | null | undefined) {

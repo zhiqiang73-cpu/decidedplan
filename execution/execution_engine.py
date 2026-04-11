@@ -64,6 +64,10 @@ class PendingEntry:
     entry_snapshot: dict[str, Any]
     dynamic_exit_enabled: bool
 
+    @property
+    def research_horizon_min(self) -> int:
+        return self.horizon_min
+
 
 @dataclass
 class OpenPosition:
@@ -85,6 +89,10 @@ class OpenPosition:
     entry_regime: str = ""
     entry_flow_type: str = ""
     mechanism_type: str = ""
+
+    @property
+    def research_horizon_min(self) -> int:
+        return self.horizon_min
 
 
 class ExecutionEngine:
@@ -289,7 +297,7 @@ class ExecutionEngine:
                 self._entry_confirm_pending.pop(confirm_key, None)
             return
 
-        # Alpha 信号也必须通过白名单 -- 防止 approved_rules.json 绕过 live_catalog 暂停
+        # Alpha 淇″彿涔熷繀椤婚€氳繃鐧藉悕鍗?-- 闃叉 approved_rules.json 缁曡繃 live_catalog 鏆傚仠
         if (family, direction) not in EXECUTION_WHITELIST:
             logger.info("[EXEC] Rejected %s %s: not in whitelist (alpha=%s)", family, direction, is_alpha)
             self._log_blocked(signal_name, family, direction, "whitelist",
@@ -338,7 +346,10 @@ class ExecutionEngine:
                     signal_name, int(elapsed),
                 )
 
-        horizon_min = max(1, self._safe_int(alert.get("horizon"), 1))
+        horizon_min = max(
+            1,
+            self._safe_int(alert.get("research_horizon_bars", alert.get("horizon")), 1),
+        )
         signal_time = self._extract_alert_time(alert)
         entry_snapshot = build_entry_snapshot(alert, latest_features)
         mechanism_type = str(
@@ -348,7 +359,7 @@ class ExecutionEngine:
         )
         if latest_features is None:
             logger.warning(
-                "[EXEC] %s: no live features; dynamic exit may fall back to stop/time only",
+                "[EXEC] %s: no live features; dynamic exit may fall back to stop/safety_cap only",
                 signal_name,
             )
 
@@ -381,7 +392,7 @@ class ExecutionEngine:
             alert_mechanism = mechanism_type
             alert_force_cat = get_force_category(alert_mechanism)
 
-            # Rule 1: same force category + same direction → max 1 position
+            # Rule 1: same force category + same direction 鈫?max 1 position
             # Check BOTH open positions AND pending entries (limit orders not yet filled)
             same_dir_force_count = sum(
                 1 for pos in self._open_positions.values()
@@ -399,7 +410,7 @@ class ExecutionEngine:
                 )
                 return
 
-            # Rule 2: same force category has a losing position → don't add
+            # Rule 2: same force category has a losing position 鈫?don't add
             close_price = self._extract_close(latest_features)
             if close_price is not None:
                 for pos in self._open_positions.values():
@@ -416,7 +427,7 @@ class ExecutionEngine:
                         )
                         return
 
-            # Rule 3: total across all directions per force category → max 2
+            # Rule 3: total across all directions per force category 鈫?max 2
             force_count = sum(
                 1 for pos in self._open_positions.values()
                 if get_force_category(get_mechanism_for_family(pos.family)) == alert_force_cat
@@ -461,7 +472,7 @@ class ExecutionEngine:
             except OrderManagerError as exc:
                 logger.warning("[EXEC] get_open_positions failed: %s", exc)
 
-            # ── Conviction Engine: entry scoring (shadow mode) ──
+            # 鈹€鈹€ Conviction Engine: entry scoring (shadow mode) 鈹€鈹€
             if self._conviction_engine is not None:
                 try:
                     _fv = float(alert.get("feature_value") or 0.0)
@@ -498,7 +509,7 @@ class ExecutionEngine:
                 attempt_plan = self._build_entry_attempt(direction, attempt=1)
                 # QUIET_TREND uses a smaller position (5% vs 8% default).
                 # 11 of 12 losses in the 15h audit occurred in QUIET_TREND;
-                # same stop % → smaller notional = smaller dollar loss per trade.
+                # same stop % 鈫?smaller notional = smaller dollar loss per trade.
                 _QUIET_POSITION_PCT = 0.05
                 _COUNTER_TREND_PCT = 0.04  # half position for counter-trend shorts
                 effective_pct = (
@@ -511,7 +522,7 @@ class ExecutionEngine:
                     effective_pct = min(effective_pct, _COUNTER_TREND_PCT)
                 if effective_pct != self.position_pct:
                     logger.debug(
-                        "[EXEC] %s regime=%s: position_pct %.0f%% → %.0f%%",
+                        "[EXEC] %s regime=%s: position_pct %.0f%% 鈫?%.0f%%",
                         signal_name, self._current_regime,
                         self.position_pct * 100, effective_pct * 100,
                     )
@@ -746,9 +757,12 @@ class ExecutionEngine:
 
             due_position: OpenPosition | None = None
             exit_reason = "filled_timeout"
+            runtime_state = position.runtime_state
 
-            if position.dynamic_exit_enabled and close_price is not None:
-                runtime_state = position.runtime_state
+            if runtime_state.get("close_pending"):
+                due_position = position
+                exit_reason = str(runtime_state.get("close_pending_reason") or "close_retry")
+            elif position.dynamic_exit_enabled and close_price is not None:
                 runtime_state["bars_held"] = int(runtime_state.get("bars_held", 0) or 0) + 1
                 update_mfe_mae(
                     runtime_state,
@@ -771,7 +785,7 @@ class ExecutionEngine:
                 runtime_state["confidence"] = position.confidence
                 runtime_state["entry_regime"] = position.entry_regime
 
-                # ── Conviction Engine: per-bar hold scoring (shadow mode) ──
+                # 鈹€鈹€ Conviction Engine: per-bar hold scoring (shadow mode) 鈹€鈹€
                 if self._conviction_engine is not None:
                     try:
                         entry_snap = position.entry_snapshot or {}
@@ -845,6 +859,7 @@ class ExecutionEngine:
                         "direction": position.direction,
                         "entry_price": position.entry_price,
                         "hold_bars": position.horizon_min,
+                        "research_horizon_bars": position.horizon_min,
                         "entry_snapshot": position.entry_snapshot,
                     },
                     close=close_price,
@@ -1099,6 +1114,44 @@ class ExecutionEngine:
         )
         self._save_positions_state()
 
+    def _handle_close_failure(
+        self,
+        position: OpenPosition,
+        exit_reason: str,
+        failure_reason: str,
+    ) -> None:
+        max_attempts = 3
+        runtime_state = position.runtime_state
+        attempts = int(runtime_state.get("close_attempts", 0) or 0) + 1
+        runtime_state["close_attempts"] = attempts
+        runtime_state["close_pending"] = True
+        runtime_state["close_pending_reason"] = exit_reason
+        runtime_state["close_last_error"] = failure_reason
+
+        pos_key = f"{position.family}|{position.direction}"
+        if attempts >= max_attempts:
+            with self._lock:
+                self._open_positions.pop(pos_key, None)
+            logger.critical(
+                "[EXEC][ALERT] Close failed %s after %d attempts; removing %s from tracking and assuming exchange handled it. last_error=%s",
+                position.signal_name,
+                attempts,
+                pos_key,
+                failure_reason,
+            )
+            self._save_positions_state()
+            return
+
+        logger.warning(
+            "[EXEC] Close attempt %d/%d failed %s: %s; marked close_pending for retry on next bar",
+            attempts,
+            max_attempts,
+            position.signal_name,
+            failure_reason,
+        )
+        self._save_positions_state()
+
+
     def _close_position(self, position: OpenPosition, exit_reason: str) -> None:
         if self.order_manager is None:
             return
@@ -1106,11 +1159,11 @@ class ExecutionEngine:
         try:
             result = self.order_manager.close_position(position.direction, position.qty)
         except OrderManagerError as exc:
-            logger.warning("[EXEC] Close failed %s: %s", position.signal_name, exc)
+            self._handle_close_failure(position, exit_reason, str(exc))
             return
 
         if result.get("status") != "closed":
-            logger.warning("[EXEC] Close rejected %s: %s", position.signal_name, result)
+            self._handle_close_failure(position, exit_reason, str(result))
             return
 
         # Verify no dust remnant left on exchange after close
@@ -1195,7 +1248,7 @@ class ExecutionEngine:
             except Exception as exc:
                 logger.warning("[EXEC] Adaptive cooldown feedback failed: %s", exc)
 
-        # ── Conviction Engine: learn from closed trade ──
+        # 鈹€鈹€ Conviction Engine: learn from closed trade 鈹€鈹€
         # Use GROSS return (same as bar snapshots) to avoid net/gross mismatch.
         # Bar snapshots record gross unrealized P&L; final label must match.
         if self._conviction_engine is not None:
@@ -1223,7 +1276,7 @@ class ExecutionEngine:
 
         # Extended cooldown after adverse exits (hard_stop or ANY mechanism decay).
         # Prevents loss-loops where a "sticky" condition keeps re-entering.
-        # Only applies to actual losses — profitable hard_stop exits (MFE ratchet)
+        # Only applies to actual losses 鈥?profitable hard_stop exits (MFE ratchet)
         # should not waste cooldown time since the trade was managed correctly.
         _HARD_STOP_REASONS = {"hard_stop"}
         _MECHANISM_DECAY_PREFIX = "mechanism_decay_"
@@ -1250,15 +1303,15 @@ class ExecutionEngine:
                     position.signal_name, exit_reason, gross_ret * 100,
                 )
 
-        # After time_cap on A2 cards, apply 15-min cooldown.
+        # After safety_cap on A2 cards, apply 15-min cooldown.
         # If 60 bars elapsed without the trend materialising the setup is
         # structurally exhausted; immediate re-entry risks the same dead market.
         _TIMECAP_COOLDOWN_S = 900  # 15 minutes
-        if exit_reason == "time_cap" and position.family.startswith("A2"):
+        if exit_reason in {"time_cap", "safety_cap"} and position.family.startswith("A2"):
             cooldown_key = f"{position.family}|{position.direction}"
             self._signal_cooldown[cooldown_key] = time.time() + _TIMECAP_COOLDOWN_S
             logger.info(
-                "[EXEC] A2 time_cap cooldown: %s blocked for 15min",
+                "[EXEC] A2 safety_cap cooldown: %s blocked for 15min",
                 cooldown_key,
             )
 

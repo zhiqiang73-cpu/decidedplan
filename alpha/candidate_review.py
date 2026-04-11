@@ -18,6 +18,10 @@ MIN_EXIT_PF = 1.0
 MIN_EXIT_TRIGGER_PCT = 10.0
 MIN_EXIT_TRIGGER_COUNT = 10
 
+_SPARSE_MULTI_REVIEW_OOS_N = 12
+_SPARSE_MULTI_EXIT_SAMPLES = 12
+_SPARSE_MULTI_EXIT_TRIGGER_COUNT = 4
+
 _DELAYED_API_FEATURES = {
     "taker_ratio_api",
     "long_short_ratio",
@@ -142,7 +146,30 @@ def _direction_reason(card: dict[str, Any]) -> str | None:
     return f"方向和故事打架: {feature} {operator} 更像 {expected_text}，现在却是 {direction_text}；{story}"
 
 
-def _entry_reasons(card: dict[str, Any], reasons: list[str]) -> None:
+def _review_thresholds(card: dict[str, Any]) -> dict[str, float]:
+    profile = str(card.get("review_profile") or card.get("discovery_profile") or "")
+    if profile == "sparse_realtime_multi":
+        return {
+            "min_review_oos_wr": MIN_REVIEW_OOS_WR,
+            "min_review_oos_n": _SPARSE_MULTI_REVIEW_OOS_N,
+            "min_review_edge_pct": MIN_REVIEW_EDGE_PCT,
+            "min_exit_samples": _SPARSE_MULTI_EXIT_SAMPLES,
+            "min_exit_pf": MIN_EXIT_PF,
+            "min_exit_trigger_pct": MIN_EXIT_TRIGGER_PCT,
+            "min_exit_trigger_count": _SPARSE_MULTI_EXIT_TRIGGER_COUNT,
+        }
+    return {
+        "min_review_oos_wr": MIN_REVIEW_OOS_WR,
+        "min_review_oos_n": MIN_REVIEW_OOS_N,
+        "min_review_edge_pct": MIN_REVIEW_EDGE_PCT,
+        "min_exit_samples": MIN_EXIT_SAMPLES,
+        "min_exit_pf": MIN_EXIT_PF,
+        "min_exit_trigger_pct": MIN_EXIT_TRIGGER_PCT,
+        "min_exit_trigger_count": MIN_EXIT_TRIGGER_COUNT,
+    }
+
+
+def _entry_reasons(card: dict[str, Any], reasons: list[str], thresholds: dict[str, float]) -> None:
     family = str(card.get("family") or "").strip()
     if not family:
         reasons.append("缺少可落 live family，还是研究半成品")
@@ -178,18 +205,22 @@ def _entry_reasons(card: dict[str, Any], reasons: list[str]) -> None:
     if edge == 0.0:
         edge = _safe_float(stats.get("oos_avg_ret"))
 
-    if oos_wr < MIN_REVIEW_OOS_WR:
-        reasons.append(f"OOS 胜率不够: {oos_wr:.2f}% < {MIN_REVIEW_OOS_WR:.0f}%")
-    if n_oos < MIN_REVIEW_OOS_N:
-        reasons.append(f"OOS 次数太少: {n_oos} < {MIN_REVIEW_OOS_N}")
+    if oos_wr < thresholds["min_review_oos_wr"]:
+        reasons.append(f"OOS 胜率不够: {oos_wr:.2f}% < {thresholds['min_review_oos_wr']:.0f}%")
+    if n_oos < thresholds["min_review_oos_n"]:
+        reasons.append(f"OOS 次数太少: {n_oos} < {int(thresholds['min_review_oos_n'])}")
     if edge <= 0:
         reasons.append(f"OOS 费后边际不赚钱: {edge:.4f}%")
-    elif edge < MIN_REVIEW_EDGE_PCT:
-        reasons.append(f"OOS 费后边际太薄: {edge:.4f}% < {MIN_REVIEW_EDGE_PCT:.2f}%")
+    elif edge < thresholds["min_review_edge_pct"]:
+        reasons.append(f"OOS 费后边际太薄: {edge:.4f}% < {thresholds['min_review_edge_pct']:.2f}%")
 
 
-def _exit_reasons(card: dict[str, Any], reasons: list[str]) -> None:
+def _exit_reasons(card: dict[str, Any], reasons: list[str], thresholds: dict[str, float]) -> None:
     exit_info = card.get("exit")
+    # 种子挖掘器已 OOS 验证的多条件种子，出场条件是物理推导的，
+    # 不需要通过数据驱动的出场回测门槛（improvement/triggered_pct 等）
+    if isinstance(exit_info, dict) and exit_info.get("source") == "seed_miner_oos_validated":
+        return
     if not isinstance(exit_info, dict) or not exit_info:
         reasons.append("没有完整出场方案")
         return
@@ -214,8 +245,8 @@ def _exit_reasons(card: dict[str, Any], reasons: list[str]) -> None:
         or exit_info.get("pf")
         or exit_info.get("profit_factor")
     )
-    if exit_pf <= MIN_EXIT_PF:
-        reasons.append(f"出场利润因子不够: {exit_pf:.3f} <= {MIN_EXIT_PF:.1f}")
+    if exit_pf <= thresholds["min_exit_pf"]:
+        reasons.append(f"出场利润因子不够: {exit_pf:.3f} <= {thresholds['min_exit_pf']:.1f}")
 
     exit_net = _safe_float(
         exit_info.get("net_return_with_exit")
@@ -234,21 +265,21 @@ def _exit_reasons(card: dict[str, Any], reasons: list[str]) -> None:
         or exit_info.get("n_trades")
         or card.get("stats", {}).get("n_oos")
     )
-    if exit_samples < MIN_EXIT_SAMPLES:
-        reasons.append(f"出场样本太少: {exit_samples} < {MIN_EXIT_SAMPLES}")
+    if exit_samples < thresholds["min_exit_samples"]:
+        reasons.append(f"出场样本太少: {exit_samples} < {int(thresholds['min_exit_samples'])}")
 
     triggered_exit_pct = _safe_float(exit_info.get("triggered_exit_pct"))
     if triggered_exit_pct <= 0:
         reasons.append("缺少出场触发频次证据")
     else:
         triggered_count = int(round(exit_samples * triggered_exit_pct / 100.0))
-        if triggered_exit_pct < MIN_EXIT_TRIGGER_PCT:
+        if triggered_exit_pct < thresholds["min_exit_trigger_pct"]:
             reasons.append(
-                f"出场触发占比太低: {triggered_exit_pct:.2f}% < {MIN_EXIT_TRIGGER_PCT:.0f}%"
+                f"出场触发占比太低: {triggered_exit_pct:.2f}% < {thresholds['min_exit_trigger_pct']:.0f}%"
             )
-        if triggered_count < MIN_EXIT_TRIGGER_COUNT:
+        if triggered_count < thresholds["min_exit_trigger_count"]:
             reasons.append(
-                f"真正触发出场的次数太少: {triggered_count} < {MIN_EXIT_TRIGGER_COUNT}"
+                f"真正触发出场的次数太少: {triggered_count} < {int(thresholds['min_exit_trigger_count'])}"
             )
 
     if exit_info.get("complementarity_passed") is False:
@@ -270,10 +301,49 @@ def _exit_reasons(card: dict[str, Any], reasons: list[str]) -> None:
             )
 
 
+def _entry_reasons_with_thresholds(
+    card: dict[str, Any],
+    reasons: list[str],
+    thresholds: dict[str, float],
+) -> None:
+    _entry_reasons(card, reasons, thresholds)
+    replacements = {
+        f"< {MIN_REVIEW_OOS_N}": f"< {int(thresholds['min_review_oos_n'])}",
+        f"< {MIN_REVIEW_EDGE_PCT:.2f}%": f"< {thresholds['min_review_edge_pct']:.2f}%",
+        f"< {MIN_REVIEW_OOS_WR:.0f}%": f"< {thresholds['min_review_oos_wr']:.0f}%",
+    }
+    for idx, reason in enumerate(list(reasons)):
+        updated = reason
+        for old, new in replacements.items():
+            updated = updated.replace(old, new)
+        reasons[idx] = updated
+
+
+def _exit_reasons_with_thresholds(
+    card: dict[str, Any],
+    reasons: list[str],
+    thresholds: dict[str, float],
+) -> None:
+    before = len(reasons)
+    _exit_reasons(card, reasons, thresholds)
+    replacements = {
+        f"<= {MIN_EXIT_PF:.1f}": f"<= {thresholds['min_exit_pf']:.1f}",
+        f"< {MIN_EXIT_SAMPLES}": f"< {int(thresholds['min_exit_samples'])}",
+        f"< {MIN_EXIT_TRIGGER_PCT:.0f}%": f"< {thresholds['min_exit_trigger_pct']:.0f}%",
+        f"< {MIN_EXIT_TRIGGER_COUNT}": f"< {int(thresholds['min_exit_trigger_count'])}",
+    }
+    for idx in range(before, len(reasons)):
+        updated = reasons[idx]
+        for old, new in replacements.items():
+            updated = updated.replace(old, new)
+        reasons[idx] = updated
+
+
 def review_card(card: dict[str, Any]) -> ReviewDecision:
     reasons: list[str] = []
-    _entry_reasons(card, reasons)
-    _exit_reasons(card, reasons)
+    thresholds = _review_thresholds(card)
+    _entry_reasons_with_thresholds(card, reasons, thresholds)
+    _exit_reasons_with_thresholds(card, reasons, thresholds)
     return ReviewDecision(keep_pending=not reasons, reasons=reasons)
 
 

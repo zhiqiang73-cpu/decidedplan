@@ -49,7 +49,8 @@ COOLDOWN_BARS = 60
 class PositionCompressionDetector(SignalDetector):
     name = "P1-9_position_compression"
     direction = "both"
-    hold_bars = 30
+    research_horizon_bars = 30
+    hold_bars = research_horizon_bars
     required_columns = [
         "position_in_range_24h", "position_in_range_4h",
         "dist_to_24h_high", "vwap_deviation",
@@ -80,13 +81,14 @@ class PositionCompressionDetector(SignalDetector):
         comp5,  _ = compute_state_blocks(df, 5)
 
         ts = int(latest.get("timestamp", 0))
+        research_horizon = self.resolved_research_horizon_bars()
 
         # ── SHORT-A: 24h 范围高位 + 10min 压缩 ───────────────────────────
         if (not pd.isna(r24h) and r24h > _RANGE24H_SHORT_THR
                 and comp10 >= _COMP_SHORT_10M_MIN):
             conf = 3 if comp10 >= 10 else 2
             logger.info("[P1-9 SHORT-A] r24h=%.3f comp10=%d", r24h, comp10)
-            return _alert("short", self.hold_bars, ts, conf,
+            return _alert("short", research_horizon, ts, conf,
                           f"range24h={r24h:.3f} comp10={comp10}blk", "position_in_range_24h", r24h)
 
         # ── SHORT-B: 4h 范围高位 + 5min 压缩 ────────────────────────────
@@ -94,7 +96,7 @@ class PositionCompressionDetector(SignalDetector):
                 and comp5 >= _COMP_SHORT_5M_MIN):
             conf = 3 if comp5 >= 9 else 2
             logger.info("[P1-9 SHORT-B] r4h=%.3f comp5=%d", r4h, comp5)
-            return _alert("short", self.hold_bars, ts, conf,
+            return _alert("short", research_horizon, ts, conf,
                           f"range4h={r4h:.3f} comp5={comp5}blk", "position_in_range_4h", r4h)
 
         # ── LONG-A: 价格在 24h 底部 + 10min 压缩 ────────────────────────
@@ -102,7 +104,7 @@ class PositionCompressionDetector(SignalDetector):
                 and comp10 >= _COMP_LONG_10M_MIN):
             conf = 3 if comp10 >= 10 else 2
             logger.info("[P1-9 LONG-A] dist_hi=%.4f comp10=%d", d_hi, comp10)
-            return _alert("long", self.hold_bars, ts, conf,
+            return _alert("long", research_horizon, ts, conf,
                           f"dist_24h_high={d_hi:.4f} comp10={comp10}blk", "dist_to_24h_high", d_hi)
 
         # ── LONG-B: VWAP 下方 + 10min 压缩 ─────────────────────────────
@@ -110,7 +112,7 @@ class PositionCompressionDetector(SignalDetector):
                 and comp10 >= _COMP_LONG_10M_VWAP):
             conf = 3 if comp10 >= 9 else 2
             logger.info("[P1-9 LONG-B] vwap=%.4f comp10=%d", vwap, comp10)
-            return _alert("long", self.hold_bars, ts, conf,
+            return _alert("long", research_horizon, ts, conf,
                           f"vwap_dev={vwap:.4f} comp10={comp10}blk", "vwap_deviation", vwap)
 
         return None
@@ -124,6 +126,7 @@ def _alert(direction: str, horizon: int, ts: int, conf: int,
         "name":             "P1-9_position_compression",
         "direction":        direction,
         "horizon":          horizon,
+        "research_horizon_bars": horizon,
         "timestamp_ms":     ts,
         "desc":             f"[P1-9 {direction.upper()}] spring-load at extreme ({detail})",
         "confidence":       conf,

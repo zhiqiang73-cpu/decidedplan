@@ -44,7 +44,8 @@ COOLDOWN_BARS = 30
 class HighPosFundingDetector(SignalDetector):
     name = "P1-11_high_pos_funding"
     direction = "short"
-    hold_bars = 30
+    research_horizon_bars = 30
+    hold_bars = research_horizon_bars
     required_columns = [
         "position_in_range_4h",
         "funding_rate",
@@ -68,6 +69,7 @@ class HighPosFundingDetector(SignalDetector):
         r4h     = _get("position_in_range_4h")
         funding = _get("funding_rate")
         ts      = int(latest.get("timestamp", 0))
+        research_horizon = self.resolved_research_horizon_bars()
 
         if pd.isna(r4h) or pd.isna(funding):
             return None
@@ -80,7 +82,7 @@ class HighPosFundingDetector(SignalDetector):
             )
             return _alert(
                 ts=ts,
-                horizon=self.hold_bars,
+                horizon=research_horizon,
                 conf=3,
                 detail=f"r4h={r4h:.4f} funding={funding:.6f}",
                 feature="funding_rate",
@@ -95,7 +97,7 @@ class HighPosFundingDetector(SignalDetector):
             )
             return _alert(
                 ts=ts,
-                horizon=self.hold_bars,
+                horizon=research_horizon,
                 conf=2,
                 detail=f"r4h={r4h:.4f} funding={funding:.6f}",
                 feature="funding_rate",
@@ -113,6 +115,7 @@ def _alert(ts: int, horizon: int, conf: int,
         "name":             "P1-11_high_pos_funding",
         "direction":        "short",
         "horizon":          horizon,
+        "research_horizon_bars": horizon,
         "timestamp_ms":     ts,
         "desc":             f"[P1-11 SHORT] high 4h pos + negative funding ({detail})",
         "confidence":       conf,

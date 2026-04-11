@@ -46,7 +46,8 @@ const FORCE_CATEGORY_LABELS: Record<string, string> = {
 const EXIT_REASON_LABELS: Record<string, string> = {
   hard_stop: "硬止损",
   logic_complete: "机制完成",
-  time_cap: "时间到期",
+  time_cap: "安全网上限",
+  safety_cap: "安全网上限",
   take_profit: "止盈",
   not_filled: "未成交",
   trailing_stop: "追踪止损",

@@ -10,6 +10,7 @@ from typing import Optional
 import pandas as pd
 from monitor.live_catalog import live_strategy_families
 from monitor.mechanism_tracker import get_mechanism_for_family
+from monitor.strategy_contracts import extract_card_exit_contract_tokens, has_physical_exit_contract
 from utils.file_io import read_json_file
 
 logger = logging.getLogger(__name__)
@@ -190,7 +191,15 @@ def _collect_approved_card_issues(
         if not family:
             card_issues.append("missing family")
         elif family not in live_families:
-            card_issues.append(f"unknown family={family}")
+            # A5-xxx 是 Alpha 管道自动发现的新家族（尚未晋升为 live strategy），
+            # 允许它们存在于 approved_rules.json，不阻止系统启动。
+            import re as _re
+            if not _re.match(r"^A\d+-\d+$", family):
+                card_issues.append(f"unknown family={family}")
+
+        exit_contract = extract_card_exit_contract_tokens(card)
+        if not has_physical_exit_contract(exit_contract):
+            card_issues.append("missing physical exit contract (vs_entry / mechanism_decay)")
 
         existing_card_id = seen_card_ids.get(card_id)
         if existing_card_id is not None:
@@ -416,6 +425,7 @@ class AlphaRuleChecker:
                 "op": op,
                 "direction": direction,
                 "horizon": horizon,
+                "research_horizon_bars": horizon,
                 "timestamp_ms": timestamp_ms,
                 "physical_confirms": list(confirms),
                 "confidence": confidence,
@@ -432,12 +442,12 @@ class AlphaRuleChecker:
                 "trade_ready": bool(rule.get("trade_ready")),
                 "desc": (
                     f"[{name}] {feature}={value:.5f} {op} {threshold:.5f} "
-                    f"| {direction.upper()} {horizon}bars | conf={confidence}({label})"
+                    f"| {direction.upper()} obs={horizon}bar | conf={confidence}({label})"
                 ),
             }
             triggered.append(alert)
             logger.info(
-                "[Alpha SIGNAL] %s | %s=%.5f %s %.5f | %s %dbars | confidence=%d(%s) | physical: [%s]",
+                "[Alpha SIGNAL] %s | %s=%.5f %s %.5f | %s obs=%dbar | confidence=%d(%s) | physical: [%s]",
                 name,
                 feature,
                 value,

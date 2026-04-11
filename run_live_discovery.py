@@ -86,6 +86,11 @@ def parse_args() -> argparse.Namespace:
         default="both",
         help="Discovery direction filter: long, short, or both (default: both)",
     )
+    parser.add_argument(
+        "--kimi",
+        action="store_true",
+        help="Use Kimi-driven 7-phase pipeline",
+    )
     return parser.parse_args()
 
 
@@ -199,7 +204,10 @@ def run_once(args: argparse.Namespace) -> int:
         min_triggers=args.min_triggers,
         direction_filter=args.direction,
     )
-    cards = engine.run_once(data_days=args.data_days)
+    if args.kimi:
+        cards = engine.run_once_kimi(data_days=args.data_days)
+    else:
+        cards = engine.run_once(data_days=args.data_days)
     if cards:
         try:
             _write_discovery_alert(cards)

@@ -57,7 +57,8 @@ COOLDOWN_BARS = 30
 class TakerExhaustionLowDetector(SignalDetector):
     name = "P1-10_taker_exhaustion_low"
     direction = "both"   # LONG(A/B) + SHORT(C/D 待验证)
-    hold_bars = 30
+    research_horizon_bars = 30
+    hold_bars = research_horizon_bars
     required_columns = [
         "dist_to_24h_low",
         "position_in_range_24h",
@@ -84,6 +85,7 @@ class TakerExhaustionLowDetector(SignalDetector):
         r24h     = _get("position_in_range_24h")
         taker    = _get("taker_buy_sell_ratio")
         ts       = int(latest.get("timestamp", 0))
+        research_horizon = self.resolved_research_horizon_bars()
 
         # Variant A: 低位 + 主动卖单极少
         if not pd.isna(dist_low) and dist_low < _DIST_LOW_THR_A:
@@ -98,7 +100,8 @@ class TakerExhaustionLowDetector(SignalDetector):
                     "phase":            "P1",
                     "name":             self.name,
                     "direction":        "long",
-                    "horizon":          self.hold_bars,
+                    "horizon":          research_horizon,
+                    "research_horizon_bars": research_horizon,
                     "timestamp_ms":     ts,
                     "desc":             (
                         f"[P1-10] seller exhaustion at bottom "
@@ -127,7 +130,8 @@ class TakerExhaustionLowDetector(SignalDetector):
                         "phase":            "P1",
                         "name":             self.name,
                         "direction":        "long",
-                        "horizon":          self.hold_bars,
+                        "horizon":          research_horizon,
+                        "research_horizon_bars": research_horizon,
                         "timestamp_ms":     ts,
                         "desc":             (
                             f"[P1-10] buyer surge at bottom "
@@ -191,6 +195,7 @@ class TakerExhaustionLowDetector(SignalDetector):
                         "name":             self.name,
                         "direction":        "short",
                         "horizon":          _HOLD_BARS_SHORT,
+                        "research_horizon_bars": _HOLD_BARS_SHORT,
                         "timestamp_ms":     ts,
                         "desc":             (
                             f"[P1-10 D] VWAP overextended + buyer collapse "

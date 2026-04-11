@@ -137,10 +137,10 @@ class OrderManager:
         if norm_qty < self.filters.min_qty:
             norm_qty = self.filters.min_qty
 
-        # For closing LONG (sell): place at ask - 1 tick (maker)
-        # For closing SHORT (buy): place at bid + 1 tick (maker)
-        close_direction = "short" if direction.lower() == "long" else "long"
-        price = self.get_best_price(close_direction)
+        # Reuse the passive entry-side pricing helper:
+        # LONG close (SELL) should rest near the bid side,
+        # SHORT close (BUY) should rest near the ask side.
+        price = self.get_best_price(direction)
         norm_price = self._normalize_price(price)
 
         params = {

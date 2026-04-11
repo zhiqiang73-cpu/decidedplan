@@ -7,7 +7,7 @@ P1-2: VWAP/TWAP 拆单痕迹 (VWAP/TWAP Slicing)
     B. 整刻钟时点且 volume_vs_ma20 > 1.5
     C. avg_trade_size_cv_10m < 0.30
 
-持有期: 30 bars
+研究观察窗: 30 bars（仅用于统计基线与 safety_cap 估算）
 Runner 冷却: 5 min
 """
 
@@ -24,7 +24,8 @@ class VWAPTWAPDetector(SignalDetector):
 
     name = "P1-2_VWAP/TWAP拆单"
     direction = "long"
-    hold_bars = 30
+    research_horizon_bars = 30
+    hold_bars = research_horizon_bars
     # Runner-level cooldown: 5 min (dedup lock prevents double-entry while position open)
     runner_cooldown_ms = 5 * 60 * 1000
 
@@ -109,12 +110,14 @@ class VWAPTWAPDetector(SignalDetector):
             cv,
             score,
         )
+        research_horizon = self.resolved_research_horizon_bars()
 
         return {
             "phase": "P1",
             "name": self.name,
             "direction": "long",
-            "horizon": self.hold_bars,
+            "horizon": research_horizon,
+            "research_horizon_bars": research_horizon,
             "timestamp_ms": latest_ts,
             "desc": (
                 f"[{self.name}] autocorr={ac:.3f} vol={vol:.1f}x cv={cv:.3f} score={score}/3"

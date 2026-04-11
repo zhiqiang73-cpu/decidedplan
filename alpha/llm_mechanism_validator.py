@@ -57,6 +57,7 @@ class LLMValidationResult:
     daily_frequency: str = ""              # 每天重复出现频率估计
     trend_safe: bool = True                # 在单边趋势中是否不会反复误触发（false=无效）
     exit_captures_decay: bool = True       # vs_entry 出场是否能捕捉力的消失
+    transient_failure: bool = False        # 网络/API/依赖失败，不应被当成策略无效
 
     def to_dict(self) -> dict:
         return {
@@ -85,6 +86,7 @@ class LLMValidationResult:
             "daily_frequency": self.daily_frequency,
             "trend_safe": self.trend_safe,
             "exit_captures_decay": self.exit_captures_decay,
+            "transient_failure": self.transient_failure,
         }
 
 
@@ -335,6 +337,7 @@ class LLMMechanismValidator:
                 confidence=0.0,
                 mechanism_type="generic",
                 rejection_reason="API key 未配置",
+                transient_failure=True,
             )
 
         # 构建 prompt
@@ -377,6 +380,7 @@ class LLMMechanismValidator:
                         mechanism_type="generic",
                         rejection_reason=f"LLM 调用失败: {exc}",
                         raw_response=raw,
+                        transient_failure=True,
                     )
 
         return self._parse_response(raw, candidate)

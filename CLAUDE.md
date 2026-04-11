@@ -16,7 +16,10 @@
 | TIME 维度特征（`hour_in_day`、`minutes_to_funding`、`day_of_week`）禁止作为 Alpha 种子或确认因子 | 时间季节性是统计伪相关，不是物理因果 |
 | 入场只用限价单（Maker 0.02%x2=0.04% 来回） | Taker 0.05%x2=0.10% 来回会吃掉全部利润，系统正期望依赖 Maker 费率 |
 | 所有回测/报告收益必须扣除手续费 | 不扣费的胜率和收益是假的 |
-| 禁止用固定持仓 N 根 K 线作为出场逻辑 | 出场必须基于机制衰竭或 vs_entry 变化量，时间上限只是最后安全网 |
+| 禁止用固定持仓 N 根 K 线作为出场逻辑 | 出场必须基于机制衰竭或 vs_entry 变化量，`safety_cap` 只是最后安全网 |
+| `horizon/hold_bars` 是研究观察窗，不是出场时间 | 代码中严格分离：`horizon` 用于 IC 扫描和 WalkForward 窗口期，`safety_cap` 用于时间兜底。混淆这二者会导致把”数据挖掘窗”误当成”离场契机” |
+| 禁止说”根据策略卡片的 horizon 出场” | 正确说法是”根据 vs_entry 出场，safety_cap 作最后保障”。horizon 只决定研究时窗，不决定实盘离场 |
+| 禁止在回测开始时写死止损参数 | 止损值必须通过网格扫描或数据优化得出，不能人为预设一个固定值 |
 | 禁止 emoji | Windows GBK 控制台会崩溃 |
 | API 密钥只能从 `.env` 文件读取，禁止硬编码 | 安全要求 |
 | Parquet 存储必须 Hive 分区：`year=/month=/day=/` | `FeatureEngine.load_date_range()` 依赖此结构 |
@@ -55,11 +58,19 @@
 | 1 | 硬止损 | 亏损达阈值（0.30%~1.50%，因家族而异），无条件出场 |
 | 2 | 止盈（如配置） | 收益达 take_profit_pct，立即出场 |
 | 3 | 利润保护 | 浮盈峰值(MFE)达启动阈值后激活 trailing floor，回撤到 floor 以下锁利 |
-| 4 | 时间上限（安全网） | base_horizon x max_hold_factor，仅当所有动态条件均未触发时兜底 |
-| 5 | 最低持仓保护 | 未到最低持仓时间(min_hold_bars)，强制继续持有 |
-| 6 | 机制生命周期追踪 | 主因衰竭+辅助确认，衰竭分 >= 0.6 出场，>= 0.3 收紧保护 |
-| 7 | 智能出场（vs_entry 核心层） | 基于入场快照对比当前值的 Top-3 出场组合。亏损时不出场，等止损或转盈 |
-| 8 | 出场确认防抖 | 需要确认的统计退出按 exit_confirm_bars 做防抖（当前核心家族=1，不等待） |
+| 4 | 最低持仓保护 | 未到 min_hold_bars，强制继续持有 |
+| 5 | 机制生命周期追踪 | 主因衰竭+辅助确认，衰竭分 >= 0.6 出场，>= 0.3 收紧保护 |
+| 6 | 智能出场（vs_entry 核心层） | 基于入场快照对比当前值的 Top-3 出场组合。亏损时不出场，等止损或转盈 |
+| 7 | 出场确认防抖 | 需要确认的统计退出按 exit_confirm_bars 做防抖 |
+| 8 | `safety_cap`（时间安全网） | 只有以上逻辑全未触发才兜底，是最后一根救命稻草 |
+
+### 运行时守卫（不是主离场因果）
+
+| 守卫 | 作用 |
+|---|---|
+| `min_hold_bars` | 入场后前几 bar 不允许动态离场，防止噪声抖动 |
+| `exit_confirm_bars` | 对统计退出做防抖确认 |
+| 家族例外包装 | 个别家族可有临时 TP/SL 外壳，但不能改写全局 doctrine |
 
 ### vs_entry 具体例子
 
@@ -299,7 +310,8 @@ TREND_UP / TREND_DOWN / TREND_NEUTRAL
 class MyDetector(SignalDetector):
     name = "P1-XX_my_signal"
     direction = "long"          # "long" / "short" / "both"
-    hold_bars = 30
+    research_horizon_bars = 30
+    hold_bars = research_horizon_bars  # legacy alias
     required_columns = ["feature_a", "feature_b"]
     runner_cooldown_ms = 90_000  # SignalRunner 层冷却（毫秒）
 
@@ -346,7 +358,7 @@ def compute_xxx(df: pd.DataFrame) -> pd.DataFrame:
 | 2 | 在 SignalRunner 导入并注册 | `monitor/signal_runner.py` |
 | 3 | 添加 `LiveStrategySpec` | `monitor/live_catalog.py` |
 | 4 | 定义物理机制和衰竭条件 | `monitor/mechanism_tracker.py` 的 `MECHANISM_CATALOG` |
-| 5 | 配置出场参数（止损/保护/时间上限） | `monitor/exit_policy_config.py` |
+| 5 | 配置出场参数（止损/保护/安全网上限） | `monitor/exit_policy_config.py` |
 | 6 | 添加 vs_entry 出场条件 | `monitor/smart_exit_policy.py` |
 | 7 | Walk-Forward 验证通过准入门槛 | OOS WR > 65%, n >= 30, 降级比 > 0.5 |
 | 8 | 跑回归测试 | `run_regression.ps1` |
@@ -369,7 +381,7 @@ def compute_xxx(df: pd.DataFrame) -> pd.DataFrame:
 | `monitor/live_catalog.py` | **策略注册表（唯一真值来源）** |
 | `monitor/smart_exit_policy.py` | vs_entry 出场逻辑 |
 | `monitor/mechanism_tracker.py` | 机制生命周期追踪（衰竭评分） |
-| `monitor/exit_policy_config.py` | 出场参数（止损/保护/时间上限） |
+| `monitor/exit_policy_config.py` | 出场参数（止损/保护/安全网上限） |
 | `monitor/regime_detector.py` | 5 种市场制度检测 |
 | `monitor/flow_classifier.py` | 4 种流分类 |
 | `monitor/signal_health.py` | 信号健康度生命周期 |

@@ -78,3 +78,9 @@
 {"card_id": "A4-PIR", "direction": "short", "net_return_pct": 0.08411111917818961, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T18:35:11.177545+00:00"}
 {"card_id": "A4-PIR", "direction": "short", "net_return_pct": -0.04503546338616405, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T19:03:28.167990+00:00"}
 {"card_id": "A2-26", "direction": "short", "net_return_pct": -0.5416438356164344, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T20:31:24.179032+00:00"}
+{"card_id": "P1-11", "direction": "short", "net_return_pct": -0.08481884577808238, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T20:49:04.650697+00:00"}
+{"card_id": "A2-26", "direction": "short", "net_return_pct": 0.21196156388613593, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T22:39:24.358925+00:00"}
+{"card_id": "P1-8", "direction": "short", "net_return_pct": 0.22426104450076764, "flow_type": "LIQUIDATION", "regime": "QUIET_TREND", "ts": "2026-04-10T22:40:12.476382+00:00"}
+{"card_id": "P1-10", "direction": "short", "net_return_pct": 0.5197213685720179, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-10T23:09:24.977692+00:00"}
+{"card_id": "P1-11", "direction": "short", "net_return_pct": 0.027949104876869718, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-11T12:31:42.212242+00:00"}
+{"card_id": "P1-11", "direction": "short", "net_return_pct": -0.04438956271724507, "flow_type": "PASSIVE", "regime": "QUIET_TREND", "ts": "2026-04-11T12:55:31.730050+00:00"}

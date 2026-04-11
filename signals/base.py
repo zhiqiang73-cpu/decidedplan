@@ -6,7 +6,9 @@
   - report(df)  → dict              触发统计 + 初步胜率
 
 胜率计算说明:
-  对每个触发点，按 hold_bars 根K线后的收益衡量胜负。
+  对每个触发点，按 research_horizon_bars 根K线后的收益衡量胜负。
+  这只是 legacy fixed-hold baseline，用来衡量入场判断方向对不对；
+  live 出场仍然必须看 vs_entry / 机制衰竭 / safety_cap。
   方向由子类的 direction 属性决定 ("long" or "short")。
 """
 
@@ -32,8 +34,15 @@ class SignalDetector(ABC):
     required_columns: List[str] = []
     direction: str = "long"   # 入场方向，用于胜率计算
 
-    # 持仓时间 (K线数)，子类可覆盖
-    hold_bars: int = 15
+    # 研究观察窗（K线数）。仅用于 legacy baseline 和 safety_cap 估算。
+    research_horizon_bars: int = 15
+    hold_bars: int = 15  # legacy alias，避免旧调用点失效
+
+    def resolved_research_horizon_bars(self) -> int:
+        value = getattr(self, "research_horizon_bars", None)
+        if value is None:
+            value = getattr(self, "hold_bars", 15)
+        return int(value)
 
     def detect(self, df: pd.DataFrame) -> pd.Series:
         """
@@ -94,8 +103,8 @@ class SignalDetector(ABC):
 
         入场口径说明:
           entry_price = close[idx]（信号触发 bar 的收盘价）。
-          exit_price  = close[idx + hold_bars]。
-          这与 execution 交易日志的记录口径一致。
+          exit_price  = close[idx + research_horizon_bars]。
+          注意：这里是 legacy fixed-hold baseline，不代表 live 会在固定 N bar 后离场。
           注意：真实执行会在下一 bar 的市价成交，存在约 0~1 bar 的滑点，
                 因此实际表现可能比统计数字差。
         """
@@ -103,12 +112,14 @@ class SignalDetector(ABC):
         trigger_idx = np.where(signals)[0]
         trigger_count = len(trigger_idx)
         trigger_rate  = trigger_count / max(len(df), 1)
+        research_horizon_bars = self.resolved_research_horizon_bars()
 
         result = {
             "name":                self.name,
             "trigger_count":       trigger_count,
             "trigger_rate":        round(trigger_rate * 100, 3),
             "fee_pct":             fee_pct,
+            "research_horizon_bars": research_horizon_bars,
             "win_rate":            None,
             "profit_factor":       None,
             "avg_return_gross_pct": None,
@@ -118,13 +129,13 @@ class SignalDetector(ABC):
         if trigger_count == 0:
             return result
 
-        # ── 简单固定持仓回测 ──────────────────────────────────────────────
+        # ── Legacy fixed-hold baseline（只用于研究入场方向，不是 live 出场）────
         close = df["close"].values
         returns_gross = []
 
         for idx in trigger_idx:
             entry_idx = idx              # 信号 bar 收盘入场（与实时执行口径一致）
-            exit_idx  = idx + self.hold_bars
+            exit_idx  = idx + research_horizon_bars
             if exit_idx >= len(close):
                 continue
 

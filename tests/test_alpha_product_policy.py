@@ -83,7 +83,7 @@ class AlphaProductPolicyTests(unittest.TestCase):
                 "improvement": 0.03,
                 "n_samples": 42,
                 "triggered_exit_pct": 30.0,
-                "exit_reason_counts": {"hard_stop": 4, "time_cap": 20},
+                "exit_reason_counts": {"hard_stop": 4, "safety_cap": 20},
             },
             "stop_pct": 0.55,
             "stop_logic": {"type": "mechanism_hard_stop"},

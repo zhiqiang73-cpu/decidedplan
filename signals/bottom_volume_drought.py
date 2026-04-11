@@ -55,7 +55,8 @@ _VARIANTS = (
 class BottomVolumeDroughtDetector(SignalDetector):
     name = "P1-6_bottom_volume_drought"
     direction = "long"
-    hold_bars = 30
+    research_horizon_bars = 30
+    hold_bars = research_horizon_bars
     required_columns = ["dist_to_24h_low", "position_in_range_24h", "volume_vs_ma20"]
 
     def detect(self, df: pd.DataFrame) -> pd.Series:
@@ -82,6 +83,7 @@ class BottomVolumeDroughtDetector(SignalDetector):
         range_pos = float(latest["position_in_range_24h"])
         vol_ratio = float(latest["volume_vs_ma20"])
         variant_names = ",".join(matched)
+        research_horizon = self.resolved_research_horizon_bars()
 
         logger.info(
             "[BOTTOM VOL DROUGHT] LONG | variants=%s | dist_low=%.5f | "
@@ -96,7 +98,8 @@ class BottomVolumeDroughtDetector(SignalDetector):
             "phase": "P1",
             "name": self.name,
             "direction": self.direction,
-            "horizon": self.hold_bars,
+            "horizon": research_horizon,
+            "research_horizon_bars": research_horizon,
             "timestamp_ms": latest_ts,
             "desc": (
                 f"[{self.name}] seller exhaustion rebound "

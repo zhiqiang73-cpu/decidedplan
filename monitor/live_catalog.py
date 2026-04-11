@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Callable, Optional
 
+from monitor.strategy_contracts import validate_live_specs
+
 
 @dataclass(frozen=True)
 class LiveStrategySpec:
@@ -20,6 +22,7 @@ class LiveStrategySpec:
     live_wired: bool = True
     oos_win_rate: Optional[float] = None
     mechanism_type: str = ""
+    exit_contract: tuple[str, ...] = ("vs_entry", "mechanism_decay")
 
 
 LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
@@ -113,6 +116,7 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         uses_card_exit=True,
         oos_win_rate=75.0,
         mechanism_type="near_high_distribution",
+        exit_contract=("vs_entry",),
     ),
     LiveStrategySpec(
         phase="P2",
@@ -124,6 +128,7 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         uses_card_exit=True,
         oos_win_rate=72.0,
         mechanism_type="near_high_distribution",
+        exit_contract=("vs_entry",),
     ),
     LiveStrategySpec(
         phase="P2",
@@ -135,6 +140,7 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         uses_card_exit=True,
         oos_win_rate=None,
         mechanism_type="oi_divergence",
+        exit_contract=("vs_entry",),
     ),
     LiveStrategySpec(
         phase="P2",
@@ -146,6 +152,7 @@ LIVE_STRATEGIES: tuple[LiveStrategySpec, ...] = (
         uses_card_exit=True,
         oos_win_rate=68.75,
         mechanism_type="oi_divergence",
+        exit_contract=("vs_entry",),
     ),
     LiveStrategySpec(
         phase="P1",
@@ -294,6 +301,10 @@ def live_strategy_families() -> tuple[str, ...]:
     return tuple(spec.family for spec in LIVE_STRATEGIES)
 
 
+def validate_live_strategy_specs() -> list[str]:
+    return validate_live_specs(LIVE_STRATEGIES)
+
+
 def build_strategy_status_rows(
     has_exit_params: Callable[[str, str], bool],
 ) -> list[dict]:
@@ -338,6 +349,7 @@ def build_strategy_status_rows(
                 "execution_whitelist": whitelisted,
                 "exit_params": exit_ready,
                 "trade_ready": trade_ready,
+                "exit_contract": list(spec.exit_contract),
                 "notes": notes,
             }
         )

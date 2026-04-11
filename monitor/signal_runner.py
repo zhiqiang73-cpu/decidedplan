@@ -510,8 +510,9 @@ class SignalRunner:
                 "mechanism_type": mechanism_type,
                 "direction": direction,
                 "horizon": horizon,
+                "research_horizon_bars": horizon,
                 "timestamp_ms": first["timestamp_ms"],
-                "desc": f"[P2 {label}] {group} ({len(members)} rules) {direction.upper()} {horizon}bars",
+                "desc": f"[P2 {label}] {group} ({len(members)} rules) {direction.upper()} obs={horizon}bar",
                 "feature": first["feature"],
                 "feature_value": first["feature_value"],
                 "threshold": first["threshold"],
@@ -571,7 +572,7 @@ class SignalRunner:
             confirms_str = ", ".join(sorted(confirms)) if confirms else "none"
             logger.info(
                 f"[P2 COMPOSITE] {candidate.get('confidence_label','LOW')}(conf={candidate.get('confidence',1)}) | "
-                f"{str(candidate.get('direction','')).upper()} {candidate.get('horizon')}bars | "
+                f"{str(candidate.get('direction','')).upper()} obs={candidate.get('horizon')}bar | "
                 f"group={candidate.get('group')} [{candidate.get('name')}] | physical: [{confirms_str}]"
             )
 

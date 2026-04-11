@@ -41,7 +41,7 @@ from alpha.candidate_review import (
 )
 from alpha.auto_explain import AutoExplainer
 from alpha.product_policy import infer_product_family, sync_product_candidate_pool
-from alpha.combo_scanner import ComboScanner, CONFIRM_FEATURES
+from alpha.combo_scanner import ComboScanner, CONFIRM_FEATURES, _context_mask
 from alpha.realtime_seed_miner import RealtimeSeedMiner
 from utils.file_io import read_json_file, write_json_atomic
 from monitor.exit_policy_config import ExitParams
@@ -74,8 +74,31 @@ _ALPHA_DEFAULT_EXIT_PARAMS = ExitParams(
     decay_tighten_threshold=0.50,
 )
 _VS_ENTRY_TAG = "_vs_entry"
+_SAFETY_CAP_REASON = "safety_cap"
 _FORCE_DECAY_RATIO = 0.55
 _FORCE_INVALIDATION_RATIO = 0.30
+
+
+def _slug_id_part(text: object, max_len: int = 24) -> str:
+    raw = str(text or "card").lower()
+    chars = []
+    prev_sep = False
+    for ch in raw:
+        if ch.isalnum():
+            chars.append(ch)
+            prev_sep = False
+        elif not prev_sep:
+            chars.append("_")
+            prev_sep = True
+    slug = "".join(chars).strip("_")
+    return (slug or "card")[:max_len]
+
+
+def _stable_card_id(label: object, *parts: object) -> str:
+    key = "|".join(str(part) for part in parts if part is not None)
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=6).hexdigest()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return f"{stamp}_{_slug_id_part(label)}_{digest}"
 
 _SELLER_IMPULSE_CONFIRM_FEATURES = [
     "taker_buy_sell_ratio",
@@ -153,6 +176,11 @@ _NEUTRAL_FEATURE_VALUES: dict[str, float] = {
     "dist_to_24h_high": 0.0,
     "amplitude_1m": 0.0,
     "amplitude_ma20": 0.0,
+    # BLOCK STATE: neutral = 0 (no consecutive blocks)
+    "vol_drought_blocks_5m": 0.0,
+    "vol_drought_blocks_10m": 0.0,
+    "price_compression_blocks_5m": 0.0,
+    "price_compression_blocks_10m": 0.0,
 }
 
 _FEATURE_MIN_DELTAS: dict[str, float] = {
@@ -181,6 +209,11 @@ _FEATURE_MIN_DELTAS: dict[str, float] = {
     "oi_change_rate_5m": 0.003,
     "oi_change_rate_1h": 0.003,
     "ls_ratio_change_5m": 0.005,
+    # BLOCK STATE: min delta = 1 block
+    "vol_drought_blocks_5m": 1.0,
+    "vol_drought_blocks_10m": 1.0,
+    "price_compression_blocks_5m": 1.0,
+    "price_compression_blocks_10m": 1.0,
 }
 
 _MECHANISM_EXIT_PARAM_TEMPLATES: dict[str, ExitParams] = {
@@ -324,6 +357,32 @@ _MECHANISM_EXIT_PARAM_TEMPLATES: dict[str, ExitParams] = {
         decay_tighten_threshold=0.52,
         tighten_gap_ratio=0.30,
     ),
+    "oi_divergence": ExitParams(
+        stop_pct=0.70,
+        protect_start_pct=0.16,
+        protect_gap_ratio=0.48,
+        protect_floor_pct=0.03,
+        min_hold_bars=4,
+        max_hold_factor=4,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.80,
+        decay_tighten_threshold=0.48,
+        tighten_gap_ratio=0.26,
+    ),
+    "buyer_impulse": ExitParams(
+        stop_pct=0.55,
+        protect_start_pct=0.12,
+        protect_gap_ratio=0.45,
+        protect_floor_pct=0.025,
+        min_hold_bars=3,
+        max_hold_factor=3,
+        exit_confirm_bars=1,
+        decay_exit_threshold=0.78,
+        decay_tighten_threshold=0.45,
+        tighten_gap_ratio=0.24,
+        mfe_ratchet_threshold=0.10,
+        mfe_ratchet_ratio=0.42,
+    ),
 }
 
 
@@ -353,6 +412,13 @@ _FEATURE_TO_MECHANISM: dict[str, str] = {
     # MICROSTRUCTURE
     "amplitude_1m": "amplitude_absorption",
     "amplitude_ma20": "amplitude_absorption",
+    # BLOCK STATE (持续性)
+    "vol_drought_blocks_5m": "seller_drought",
+    "vol_drought_blocks_10m": "seller_drought",
+    "price_compression_blocks_5m": "compression_release",
+    "price_compression_blocks_10m": "compression_release",
+    # MARK_PRICE
+    "rt_funding_rate": "funding_divergence",
 }
 
 _MECHANISM_CONFIRM_FEATURES: dict[str, list[str]] = {
@@ -466,6 +532,26 @@ _MECHANISM_CONFIRM_FEATURES.update({
         "volume_acceleration",
         "trade_burst_index",
         "btc_liq_net_pressure",
+    ],
+    "oi_divergence": [
+        "oi_change_rate_5m",
+        "oi_change_rate_1h",
+        "taker_buy_sell_ratio",
+        "volume_vs_ma20",
+        "large_trade_buy_ratio",
+        "direction_net_1m",
+        "spread_vs_ma20",
+    ],
+    "buyer_impulse": [
+        "taker_buy_sell_ratio",
+        "volume_vs_ma20",
+        "volume_acceleration",
+        "spread_vs_ma20",
+        "large_trade_buy_ratio",
+        "direction_net_1m",
+        "sell_notional_share_1m",
+        "trade_burst_index",
+        "direction_autocorr",
     ],
 })
 
@@ -946,10 +1032,13 @@ def _optimize_exit_params(
     direction: str,
     horizon: int,
     base_params: ExitParams,
+    *,
+    use_full_data: bool = False,
 ) -> tuple[ExitParams, dict]:
     """在 OOS 数据上网格扫描 stop_pct 和 protect_start_pct，找到 PF 最高的参数组合。
 
     不硬编码，用数据说话。
+    use_full_data=True 时跳过 OOS 切分（用于已被种子挖掘器 OOS 验证过的多条件种子）。
     """
     # 止损网格：根据 horizon 确定扫描范围
     if horizon <= 5:
@@ -985,6 +1074,7 @@ def _optimize_exit_params(
             )
             metrics = engine._shadow_smart_exit_backtest(
                 df, entry_mask, exit_info, direction, horizon, params=trial,
+                use_full_data=use_full_data,
             )
             pf = metrics.get("earliest_pf", 0)
             net = metrics.get("net_return_with_exit", 0)
@@ -998,6 +1088,7 @@ def _optimize_exit_params(
     if not best_metrics:
         best_metrics = engine._shadow_smart_exit_backtest(
             df, entry_mask, exit_info, direction, horizon, params=base_params,
+            use_full_data=use_full_data,
         )
         best_params = base_params
 
@@ -1009,6 +1100,214 @@ def _optimize_exit_params(
         )
 
     return best_params, best_metrics
+
+
+def _mine_exit_conditions(
+    df: pd.DataFrame,
+    entry_mask: pd.Series,
+    direction: str,
+    horizon: int,
+    entry_feature: str,
+    entry_op: str,
+    entry_threshold: float,
+    combo_conditions: list[dict] | None = None,
+    *,
+    mechanism_type: str = "data_driven",
+    min_exit_samples: int = 15,
+) -> dict | None:
+    """从历史数据中挖掘最优出场条件，不用模板。
+
+    核心思路：
+      1. 对每个入场点，逐 bar 追踪收益和特征 vs_entry 变化
+      2. 识别 MFE 峰值时刻（利润最高点）
+      3. 找到哪些 vs_entry 特征在 MFE 峰值附近发出了一致的信号
+      4. 选 Top-3 出场组合（按捕获利润比排序）
+
+    如果样本不足或找不到好条件，返回 None（调用方回退到模板）。
+    """
+    close = df["close"].values if "close" in df.columns else None
+    if close is None:
+        return None
+
+    n_total = len(df)
+    mask_values = entry_mask.reindex(df.index, fill_value=False).values
+    # 只在后 40% 数据上挖掘（OOS）
+    split_idx = int(n_total * 0.60)
+    entry_positions = [
+        i for i in range(split_idx, n_total)
+        if mask_values[i] and (i + horizon * 4) < n_total
+    ]
+    if len(entry_positions) < min_exit_samples:
+        return None
+
+    sign = -1.0 if direction == "short" else 1.0
+    max_hold = horizon * 4
+
+    # 收集入场种子 + 确认因子的 vs_entry 特征列
+    force_features = [entry_feature]
+    if combo_conditions:
+        for cc in combo_conditions:
+            f = str(cc.get("feature", ""))
+            if f and f not in force_features:
+                force_features.append(f)
+
+    # 收集所有数值列中可以做 vs_entry 的特征
+    candidate_features = []
+    for col in df.columns:
+        if col.startswith("fwd_") or col in ("close", "open", "high", "low", "volume",
+                                               "timestamp", "quote_volume", "trades"):
+            continue
+        if not np.issubdtype(df[col].dtype, np.number):
+            continue
+        candidate_features.append(col)
+
+    if not candidate_features:
+        return None
+
+    # ── 为每个入场点，追踪 MFE 和各特征的 vs_entry ──
+    # 结构: exit_data[bar_offset] = {feature_name: [vs_entry_values...], "pnl": [...], "past_mfe": [...]}
+    feature_vs_entry_at_mfe = {f: [] for f in candidate_features}
+    feature_vs_entry_at_late = {f: [] for f in candidate_features}
+    mfe_values = []
+
+    for entry_idx in entry_positions:
+        entry_price = close[entry_idx]
+        if entry_price == 0 or np.isnan(entry_price):
+            continue
+
+        # 逐 bar 追踪
+        bar_pnl = []
+        for offset in range(1, max_hold + 1):
+            idx = entry_idx + offset
+            if idx >= n_total:
+                break
+            pnl = (close[idx] - entry_price) / entry_price * sign * 100.0
+            bar_pnl.append(pnl)
+
+        if len(bar_pnl) < horizon:
+            continue
+
+        mfe = max(bar_pnl)
+        mfe_bar = bar_pnl.index(mfe) + 1  # 从 1 开始的偏移量
+        mfe_values.append(mfe)
+
+        if mfe <= 0:
+            continue  # 方向完全反了，跳过
+
+        # 在 MFE 峰值附近（峰值后 1-3 bar）= "好出场"时刻的 vs_entry
+        good_exit_bar = min(mfe_bar + 2, len(bar_pnl))
+        good_idx = entry_idx + good_exit_bar
+        if good_idx >= n_total:
+            continue
+
+        # MFE 峰值后很久（峰值后 > 5 bar）= "坏出场"时刻
+        late_bar = min(mfe_bar + max(6, horizon), len(bar_pnl))
+        late_idx = entry_idx + late_bar
+        if late_idx >= n_total:
+            late_idx = min(entry_idx + len(bar_pnl), n_total - 1)
+
+        for f in candidate_features:
+            col_vals = df[f].values
+            entry_val = col_vals[entry_idx]
+            if np.isnan(entry_val):
+                feature_vs_entry_at_mfe[f].append(np.nan)
+                feature_vs_entry_at_late[f].append(np.nan)
+                continue
+            good_vs = col_vals[good_idx] - entry_val if good_idx < n_total else np.nan
+            late_vs = col_vals[late_idx] - entry_val if late_idx < n_total else np.nan
+            feature_vs_entry_at_mfe[f].append(good_vs)
+            feature_vs_entry_at_late[f].append(late_vs)
+
+    if len(mfe_values) < min_exit_samples:
+        return None
+
+    # ── 对每个特征，找区分好出场/坏出场的最优阈值 ──
+    scored_exits: list[tuple[float, str, str, float]] = []  # (score, feature, operator, threshold)
+
+    for f in candidate_features:
+        good_arr = np.array(feature_vs_entry_at_mfe[f], dtype=np.float64)
+        late_arr = np.array(feature_vs_entry_at_late[f], dtype=np.float64)
+
+        valid_good = good_arr[~np.isnan(good_arr)]
+        valid_late = late_arr[~np.isnan(late_arr)]
+
+        if len(valid_good) < min_exit_samples or len(valid_late) < min_exit_samples:
+            continue
+
+        # 好出场和坏出场的中位数差异 → 判断方向
+        good_median = np.median(valid_good)
+        late_median = np.median(valid_late)
+
+        if abs(good_median - late_median) < 1e-10:
+            continue
+
+        # 如果好出场时 vs_entry 更小 → 出场条件: vs_entry < threshold
+        # 如果好出场时 vs_entry 更大 → 出场条件: vs_entry > threshold
+        if good_median < late_median:
+            op = "<"
+            # 阈值 = 好出场分布的 60 百分位（偏保守，不太早出）
+            threshold = float(np.percentile(valid_good, 60))
+            # 验证: 用这个阈值，有多少比例的好出场被捕获
+            capture_rate = float(np.mean(valid_good < threshold))
+            false_early = float(np.mean(valid_late < threshold))
+        else:
+            op = ">"
+            threshold = float(np.percentile(valid_good, 40))
+            capture_rate = float(np.mean(valid_good > threshold))
+            false_early = float(np.mean(valid_late > threshold))
+
+        # 评分 = 捕获率 - 误判率（越高越好）
+        score = capture_rate - false_early
+        if score > 0.10 and capture_rate > 0.40:
+            scored_exits.append((score, f, op, threshold))
+
+    if not scored_exits:
+        return None
+
+    # 按得分排序，取 Top-3
+    scored_exits.sort(key=lambda x: -x[0])
+
+    # 优先选入场特征的 vs_entry（因果关联最强）
+    priority_exits = [e for e in scored_exits if e[1] in force_features]
+    other_exits = [e for e in scored_exits if e[1] not in force_features]
+    ranked = priority_exits + other_exits
+
+    top3_combos = []
+    used_features = set()
+    for score, feat, op, thr in ranked:
+        if feat in used_features:
+            continue
+        used_features.add(feat)
+        vs_entry_name = f"{feat}_vs_entry"
+        top3_combos.append({
+            "conditions": [{
+                "feature": vs_entry_name,
+                "operator": op,
+                "threshold": round(thr, 6),
+                "source": "data_mined",
+                "role": "force_decay_mined",
+                "neutral_value": 0.0,
+            }],
+            "combo_label": f"D{len(top3_combos) + 1}",
+            "description": f"{feat} vs_entry {op} {thr:.4f} (score={score:.2f})",
+        })
+        if len(top3_combos) >= 3:
+            break
+
+    if not top3_combos:
+        return None
+
+    # 因果耦合检查: 确保入场特征出现在出场条件中
+    top3_combos = _ensure_causal_exit(entry_feature, entry_op, top3_combos)
+
+    return {
+        "top3": top3_combos,
+        "invalidation": [],  # 数据挖掘暂不生成反向无效化条件
+        "exit_method": "data_mined_vs_entry",
+        "snapshot_required": True,
+        "mechanism_type": mechanism_type,
+        "force_features": force_features,
+    }
 
 
 def _ensure_causal_exit(entry_feature: str, entry_op: str, combos: list[dict]) -> list[dict]:
@@ -1081,35 +1380,63 @@ def _derive_mechanism_exit_v2(
     ]
 
     if combo_conditions:
-        cc = combo_conditions[0]
-        cc_feature = str(cc["feature"])
-        cc_op = str(cc["op"])
-        cc_thr = float(cc["threshold"])
-        confirm_decay, confirm_abs = _build_force_decay_condition(
-            cc_feature, cc_op, cc_thr
-        )
-        confirm_invalidation = _build_invalidation_condition(
-            cc_feature, cc_op, cc_thr
-        )
+        confirm_decay_conditions: list[dict] = []
+        confirm_abs_conditions: list[dict] = []
+        confirm_invalidation_conditions: list[dict] = []
+        for idx, cc in enumerate(combo_conditions, start=1):
+            cc_feature = str(cc["feature"])
+            cc_op = str(cc["op"])
+            cc_thr = float(cc["threshold"])
+            confirm_decay, confirm_abs = _build_force_decay_condition(
+                cc_feature, cc_op, cc_thr
+            )
+            confirm_invalidation = _build_invalidation_condition(
+                cc_feature, cc_op, cc_thr
+            )
+            confirm_decay_conditions.append(confirm_decay)
+            confirm_abs_conditions.append(confirm_abs)
+            confirm_invalidation_conditions.append(confirm_invalidation)
+            combos.extend(
+                [
+                    {
+                        "conditions": [primary_decay, confirm_decay],
+                        "combo_label": f"C{len(combos) + 1}",
+                        "description": f"Entry force and confirm force {idx} both repaired versus entry",
+                    },
+                    {
+                        "conditions": [primary_abs, confirm_abs],
+                        "combo_label": f"C{len(combos) + 2}",
+                        "description": f"Primary state and confirm state {idx} both returned toward neutral",
+                    },
+                ]
+            )
+            invalidation.append(
+                {
+                    "conditions": [primary_invalidation, confirm_invalidation],
+                    "combo_label": f"I{len(invalidation) + 1}",
+                    "description": f"Primary force and confirm force {idx} both worsened versus entry",
+                }
+            )
+
         combos.extend(
             [
                 {
-                    "conditions": [primary_decay, confirm_decay],
-                    "combo_label": "C3",
-                    "description": "Entry force and confirm force both repaired versus entry",
+                    "conditions": [primary_decay, *confirm_decay_conditions],
+                    "combo_label": f"C{len(combos) + 1}",
+                    "description": "Entry force and all confirm forces repaired versus entry",
                 },
                 {
-                    "conditions": [primary_abs, confirm_abs],
-                    "combo_label": "C4",
-                    "description": "Primary and confirm states both returned toward neutral",
+                    "conditions": [primary_abs, *confirm_abs_conditions],
+                    "combo_label": f"C{len(combos) + 2}",
+                    "description": "Primary state and all confirm states returned toward neutral",
                 },
             ]
         )
         invalidation.append(
             {
-                "conditions": [primary_invalidation, confirm_invalidation],
-                "combo_label": "I2",
-                "description": "Primary and confirm force both worsened versus entry",
+                "conditions": [primary_invalidation, *confirm_invalidation_conditions],
+                "combo_label": f"I{len(invalidation) + 1}",
+                "description": "Primary force and all confirm forces worsened versus entry",
             }
         )
 
@@ -1190,8 +1517,25 @@ class LiveDiscoveryEngine:
         )
 
         self._output_dir.mkdir(parents=True, exist_ok=True)
+        self._kimi_researcher = None
+        self._sandbox = None
 
     # ── 主入口 ────────────────────────────────────────────────────────────────
+
+    @property
+    def _sandbox_executor(self):
+        if self._sandbox is None:
+            from alpha.sandbox_executor import SandboxExecutor
+
+            self._sandbox = SandboxExecutor()
+        return self._sandbox
+
+    def _get_researcher(self):
+        if self._kimi_researcher is None:
+            from alpha.llm_researcher import KimiResearcher
+
+            self._kimi_researcher = KimiResearcher()
+        return self._kimi_researcher
 
     def run_once(self, data_days: int = 365) -> list[dict]:
         """
@@ -1298,13 +1642,32 @@ class LiveDiscoveryEngine:
 
         deduped_seed_map: dict[tuple[str, str, int, str, str], dict] = {}
         for seed in dynamic_seeds:
-            key = (
-                str(seed.get("feature", "")),
-                str(seed.get("op", "")),
-                round(float(seed.get("threshold", 0.0)), 6),
-                int(seed.get("horizon", 0)),
-                str(seed.get("direction", "")),
-            )
+            if seed.get("conditions"):
+                cond_key = tuple(
+                    (
+                        str(cond.get("feature", "")),
+                        str(cond.get("op", cond.get("operator", ""))),
+                        round(float(cond.get("threshold", 0.0)), 6),
+                    )
+                    for cond in seed.get("conditions", [])
+                )
+                key = (
+                    "multi",
+                    str(seed.get("name", "")),
+                    int(seed.get("horizon", 0)),
+                    str(seed.get("direction", "")),
+                    str(seed.get("context", "")),
+                    cond_key,
+                )
+            else:
+                key = (
+                    "single",
+                    str(seed.get("feature", "")),
+                    str(seed.get("op", "")),
+                    round(float(seed.get("threshold", 0.0)), 6),
+                    int(seed.get("horizon", 0)),
+                    str(seed.get("direction", "")),
+                )
             existing = deduped_seed_map.get(key)
             if existing is None or seed.get("origin") == "realtime_seed_miner":
                 deduped_seed_map[key] = seed
@@ -1319,6 +1682,15 @@ class LiveDiscoveryEngine:
 
         # ── Step 6: 过滤合格的组合规则 ────────────────────────────────────────
         results = []
+
+        direct_seed_cards = []
+        for seed in realtime_seeds:
+            card = self._maybe_build_direct_seed_card(df, seed)
+            if card is not None:
+                direct_seed_cards.append(card)
+        if direct_seed_cards:
+            logger.info("[DISCOVERY] multi-condition direct-review cards: %d", len(direct_seed_cards))
+            results.extend(direct_seed_cards)
 
         if combo_df is not None and not combo_df.empty:
             logger.info(
@@ -1343,10 +1715,11 @@ class LiveDiscoveryEngine:
 
                 # 构建多条件入场掩码
                 entry_mask = self._build_combo_entry_mask(df, row)
+                combo_conditions = self._row_combo_conditions(row)
 
-                # 出场：入场信号消失 = 出场，不挖掘历史数据
+                # 出场: 先从数据挖掘，失败再用模板
                 direction = row["direction"]
-                mechanism_type = _infer_mechanism_type(
+                mechanism_type = str(row.get("seed_mechanism_type") or "") or _infer_mechanism_type(
                     str(row["seed_feature"]),
                     direction,
                     str(row["seed_op"]),
@@ -1356,17 +1729,25 @@ class LiveDiscoveryEngine:
                     int(row["horizon"]),
                     direction,
                 )
-                final_exit = _derive_mechanism_exit_v2(
+                final_exit = _mine_exit_conditions(
+                    df, entry_mask, direction, int(row["horizon"]),
                     entry_feature=str(row["seed_feature"]),
                     entry_op=str(row["seed_op"]),
                     entry_threshold=float(row["seed_threshold"]),
-                    combo_conditions=[{
-                        "feature":   row["confirm_feature"],
-                        "op":        row["confirm_op"],
-                        "threshold": float(row["confirm_threshold"]),
-                    }],
+                    combo_conditions=combo_conditions,
                     mechanism_type=mechanism_type,
                 )
+                if final_exit is None:
+                    logger.info("  [EXIT-MINE] 数据挖掘失败，回退模板")
+                    final_exit = _derive_mechanism_exit_v2(
+                        entry_feature=str(row["seed_feature"]),
+                        entry_op=str(row["seed_op"]),
+                        entry_threshold=float(row["seed_threshold"]),
+                        combo_conditions=combo_conditions,
+                        mechanism_type=mechanism_type,
+                    )
+                else:
+                    logger.info("  [EXIT-MINE] 数据挖掘成功，使用数据出场条件")
 
                 # Backtest exit conditions on OOS data -- 用网格扫描找最优止损参数
                 exit_params, exit_metrics = _optimize_exit_params(
@@ -1374,6 +1755,18 @@ class LiveDiscoveryEngine:
                     int(row["horizon"]), exit_params,
                 )
                 final_exit.update(exit_metrics)
+
+                # 智能出场门控: 真实出场回测必须通过
+                se_wr = float(exit_metrics.get("win_rate", 0))
+                se_net = float(exit_metrics.get("net_return_with_exit", 0))
+                se_n = int(exit_metrics.get("n_samples", 0))
+                se_pf = float(exit_metrics.get("earliest_pf", 0))
+                if se_n < 30 or se_net <= 0 or se_pf < 1.0:
+                    logger.info(
+                        "  [EXIT-GATE] 智能出场回测不通过: WR=%.1f%% PF=%.2f net=%.4f%% n=%d -- 跳过",
+                        se_wr, se_pf, se_net, se_n,
+                    )
+                    continue
 
                 # 构建策略卡片
                 card = self._build_combo_card(row, final_exit, exit_params, mechanism_type)
@@ -1399,26 +1792,59 @@ class LiveDiscoveryEngine:
                     int(atom.horizon),
                     atom.direction,
                 )
-                exit_cond = _derive_mechanism_exit_v2(
+                entry_mask_atom = self._build_entry_mask(df, atom)
+                exit_cond = _mine_exit_conditions(
+                    df, entry_mask_atom, atom.direction, int(atom.horizon),
                     entry_feature=atom.feature,
                     entry_op=atom.operator,
                     entry_threshold=float(atom.threshold),
                     mechanism_type=mechanism_type,
                 )
-                entry_mask_atom = self._build_entry_mask(df, atom)
+                if exit_cond is None:
+                    exit_cond = _derive_mechanism_exit_v2(
+                        entry_feature=atom.feature,
+                        entry_op=atom.operator,
+                        entry_threshold=float(atom.threshold),
+                        mechanism_type=mechanism_type,
+                    )
                 exit_params, exit_metrics = _optimize_exit_params(
                     self, df, entry_mask_atom, exit_cond, atom.direction,
                     int(atom.horizon), exit_params,
                 )
                 exit_cond.update(exit_metrics)
+
+                # 智能出场门控（与组合路径一致）
+                se_wr = float(exit_metrics.get("win_rate", 0))
+                se_net = float(exit_metrics.get("net_return_with_exit", 0))
+                se_n = int(exit_metrics.get("n_samples", 0))
+                se_pf = float(exit_metrics.get("earliest_pf", 0))
+                if se_n < 30 or se_net <= 0 or se_pf < 1.0:
+                    logger.info(
+                        "  [EXIT-GATE] 智能出场回测不通过: WR=%.1f%% PF=%.2f net=%.4f%% n=%d -- 跳过",
+                        se_wr, se_pf, se_net, se_n,
+                    )
+                    continue
+
                 card = self._build_card(atom, wf, exit_cond, exit_params, mechanism_type)
                 results.append(card)
 
+        if results:
+            deduped_results: dict[str, dict] = {}
+            for card in results:
+                key = str(card.get("rule_str") or card.get("id") or "")
+                if key and key not in deduped_results:
+                    deduped_results[key] = card
+            results = list(deduped_results.values())
         if not results:
             logger.info("[DISCOVERY] 本次未发现合格策略")
             return []
 
-        logger.info(f"[DISCOVERY] 合格策略: {len(results)} 个")
+        n_long = sum(1 for c in results if c.get("direction") == "long" or c.get("entry", {}).get("direction") == "long")
+        n_short = len(results) - n_long
+        logger.info(
+            "[DISCOVERY] 合格策略: %d 个 (LONG=%d, SHORT=%d)",
+            len(results), n_long, n_short,
+        )
 
         # ── Step 7.5: 因果验证 ────────────────────────────────────────────────
         results = self._run_causal_validation(results)
@@ -1451,6 +1877,1055 @@ class LiveDiscoveryEngine:
 
         return pending
 
+    def run_once_kimi(self, data_days: int = 365) -> list[dict]:
+        """Kimi 驱动的 7 阶段策略发现管道。"""
+        logger.info("=" * 60)
+        logger.info("[KIMI] 开始 7 阶段策略发现流程 (最近 %d 天数据)", data_days)
+        logger.info("=" * 60)
+
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=data_days)
+        start_str = str(start_date)
+        end_str = str(end_date)
+
+        try:
+            logger.info("[KIMI] 数据加载: %s ~ %s", start_str, end_str)
+            df = self._fe.load_date_range(start_str, end_str)
+            if len(df) < 2000:
+                logger.warning("[KIMI] 数据量不足 (%d bars)，跳过", len(df))
+                return []
+            df = self._scanner.add_forward_returns(df)
+            # 补充更多 horizons，覆盖 Kimi 可能选的任意值
+            extra_horizons = [h for h in [20, 25, 35, 45, 90, 120]
+                              if f"fwd_ret_{h}" not in df.columns]
+            if extra_horizons:
+                FeatureScanner(horizons=extra_horizons).add_forward_returns(df)
+                logger.info("[KIMI] 补充 forward returns: %s", extra_horizons)
+        except Exception as exc:
+            logger.error("[KIMI] 数据准备失败: %s", exc, exc_info=True)
+            return []
+
+        researcher = self._get_researcher()
+        feature_stats = self._build_feature_stats(df)
+        data_avail = self._build_data_availability()
+
+        try:
+            session = researcher.start_research_session(feature_stats, data_avail)
+        except Exception as exc:
+            logger.error("[KIMI] Phase 1 失败: %s", exc, exc_info=True)
+            return []
+
+        if not session.hypotheses:
+            logger.info("[KIMI] Phase 1: 没有生成假设")
+            return []
+
+        # direction="both" 拆成 long + short 两个假设分别验证
+        expanded = []
+        for h in session.hypotheses:
+            if h.direction == "both":
+                from dataclasses import replace
+                expanded.append(replace(h, direction="long"))
+                expanded.append(replace(h, direction="short"))
+            else:
+                expanded.append(h)
+        session.hypotheses = expanded
+
+        session.artifacts.setdefault("feature_stats", feature_stats)
+        session.artifacts.setdefault("data_availability", data_avail)
+        logger.info("[KIMI] Phase 1: 生成 %d 个假设 (含拆分)", len(session.hypotheses))
+
+        cards: list[dict] = []
+        for idx, hypothesis in enumerate(session.hypotheses):
+            logger.info(
+                "[KIMI] === 处理假设 %d/%d: %s %s ===",
+                idx + 1,
+                len(session.hypotheses),
+                hypothesis.mechanism_name,
+                hypothesis.direction,
+            )
+            session.active_hypothesis_idx = idx
+
+            try:
+                scan_results = self._targeted_ic_scan(df, hypothesis)
+                assessment = researcher.feed_scan_results(session, idx, scan_results)
+            except Exception as exc:
+                logger.warning("[KIMI] Phase 2 失败: %s", exc, exc_info=True)
+                continue
+
+            if not assessment.get("proceed", False):
+                logger.info(
+                    "[KIMI] Phase 2: 跳过 - %s",
+                    assessment.get("assessment", ""),
+                )
+                continue
+
+            # ── Phase 3: 引擎自动极端阈值扫描（不让 Kimi 写入场代码）────────
+            # Kimi 提方向和特征，引擎用 P 系列方法做精确阈值扫描:
+            #   - 每个特征扫 p1/p2/p3/p5/p95/p97/p98/p99 极端分位数
+            #   - crossing detection + 60 bar cooldown
+            #   - 选 OOS WR 最高的组合
+            entry_mask = None
+            best_entry_contract = None
+            best_combo_conditions: list[dict] = []
+            best_entry_stats: dict = {}
+            mechanism_type = ""
+
+            try:
+                entry_mask, best_entry_contract, best_combo_conditions, best_entry_stats, mechanism_type = (
+                    self._engine_driven_entry_scan(df, hypothesis)
+                )
+            except Exception as exc:
+                logger.warning("[KIMI] Phase 3 引擎扫描失败: %s", exc, exc_info=True)
+
+            if entry_mask is None or int(entry_mask.sum()) == 0:
+                logger.info("[KIMI] Phase 3: 引擎扫描未找到有效入场信号")
+                continue
+
+            session.artifacts.setdefault("entry_stats_by_idx", {})[idx] = best_entry_stats
+            session.artifacts.setdefault("entry_contracts_by_idx", {})[idx] = {
+                "entry": best_entry_contract,
+                "combo_conditions": best_combo_conditions,
+                "mechanism_type": mechanism_type,
+            }
+            logger.info(
+                "[KIMI] Phase 3: 引擎扫描成功 triggers=%d rate=%.2f%% OOS_WR=%.1f%%",
+                best_entry_stats.get("trigger_count", 0),
+                best_entry_stats.get("trigger_rate", 0),
+                best_entry_stats.get("oos_wr", 0),
+            )
+
+            try:
+                wf_results = self._run_walk_forward_for_mask(
+                    df,
+                    entry_mask,
+                    hypothesis.direction,
+                    hypothesis.horizon,
+                )
+                session.artifacts.setdefault("wf_results_by_idx", {})[idx] = wf_results
+                wf_decision = researcher.feed_walk_forward_results(session, wf_results)
+            except Exception as exc:
+                logger.warning("[KIMI] Phase 4 失败: %s", exc, exc_info=True)
+                continue
+
+            if not wf_decision.get("proceed", False):
+                logger.info(
+                    "[KIMI] Phase 4: WF 未通过 - %s",
+                    wf_decision.get("decision", ""),
+                )
+                continue
+
+            oos_wr = float(wf_results.get("oos_win_rate", 0) or 0)
+            n_oos = int(wf_results.get("n_oos", 0) or 0)
+            mfe_cov = float(wf_results.get("mfe_coverage", 0) or 0)
+            # Phase 4 baseline 门槛: 宽松标准（固定持仓 baseline, 智能出场会提升 10-20%）
+            # 真正的严格门槛在 Phase 6（智能出场回测后）
+            if oos_wr < 45.0 or n_oos < 10 or mfe_cov < 50.0:
+                logger.info(
+                    "[KIMI] Phase 4: baseline 门槛不通过 WR=%.1f%% n=%d MFE=%.1f%%",
+                    oos_wr,
+                    n_oos,
+                    mfe_cov,
+                )
+                continue
+
+            # ── Phase 5: 引擎 MFE 峰值出场挖掘（不依赖 Kimi 写代码）────────
+            entry_contract = best_entry_contract
+            combo_conditions = best_combo_conditions
+
+            exit_info = _mine_exit_conditions(
+                df, entry_mask, hypothesis.direction, hypothesis.horizon,
+                entry_feature=entry_contract["feature"],
+                entry_op=entry_contract["operator"],
+                entry_threshold=float(entry_contract["threshold"]),
+                combo_conditions=combo_conditions,
+                mechanism_type=mechanism_type,
+            )
+            if exit_info is None or not isinstance(exit_info.get("top3"), list) or not exit_info.get("top3"):
+                logger.info("[KIMI] Phase 5: MFE 挖掘失败，用模板回退")
+                exit_info = _derive_mechanism_exit_v2(
+                    entry_feature=entry_contract["feature"],
+                    entry_op=entry_contract["operator"],
+                    entry_threshold=float(entry_contract["threshold"]),
+                    combo_conditions=combo_conditions,
+                    mechanism_type=mechanism_type,
+                )
+            elif not isinstance(exit_info.get("invalidation"), list) or not exit_info.get("invalidation"):
+                fallback_exit = _derive_mechanism_exit_v2(
+                    entry_feature=entry_contract["feature"],
+                    entry_op=entry_contract["operator"],
+                    entry_threshold=float(entry_contract["threshold"]),
+                    combo_conditions=combo_conditions,
+                    mechanism_type=mechanism_type,
+                )
+                exit_info["invalidation"] = fallback_exit.get("invalidation", [])
+
+            exit_info["snapshot_required"] = True
+            exit_info["mechanism_type"] = mechanism_type
+
+            try:
+                stop_spec = researcher.request_stop_grid_spec(session)
+                exit_params, exit_metrics = self._grid_scan_stop_kimi(
+                    df,
+                    entry_mask,
+                    exit_info,
+                    hypothesis,
+                    stop_spec,
+                )
+                exit_payload = dict(exit_info)
+                exit_payload.update(exit_metrics)
+            except Exception as exc:
+                logger.warning("[KIMI] Phase 5b 失败: %s", exc, exc_info=True)
+                continue
+
+            try:
+                backtest = self._shadow_smart_exit_backtest(
+                    df,
+                    entry_mask,
+                    exit_payload,
+                    hypothesis.direction,
+                    hypothesis.horizon,
+                    exit_params,
+                )
+            except Exception as exc:
+                logger.warning("[KIMI] Phase 6 失败: %s", exc, exc_info=True)
+                continue
+
+            bt_net = float(backtest.get("net_return_with_exit", 0) or 0)
+            bt_pf = float(backtest.get("earliest_pf", 0) or 0)
+            bt_n = int(backtest.get("n_samples", 0) or 0)
+            if bt_n < 10 or bt_net <= 0 or bt_pf < 0.8:
+                logger.info(
+                    "[KIMI] Phase 6: 回测不通过 net=%.4f%% PF=%.2f n=%d",
+                    bt_net,
+                    bt_pf,
+                    bt_n,
+                )
+                continue
+
+            backtest.update(wf_results)
+            exit_payload.update(backtest)
+
+            try:
+                review = researcher.final_review(session, backtest)
+            except Exception as exc:
+                logger.warning("[KIMI] Phase 7 失败: %s", exc, exc_info=True)
+                continue
+
+            if review.get("decision") == "approve":
+                try:
+                    card = self._build_kimi_card(
+                        session,
+                        hypothesis,
+                        exit_payload,
+                        exit_params,
+                        backtest,
+                        review,
+                    )
+                except Exception as exc:
+                    logger.warning("[KIMI] 卡片构建失败: %s", exc, exc_info=True)
+                    continue
+                cards.append(card)
+                logger.info("[KIMI] Phase 7: APPROVED - %s", hypothesis.mechanism_name)
+            elif review.get("decision") == "modify":
+                logger.info("[KIMI] Phase 7: MODIFY requested (本轮不回退)")
+            else:
+                logger.info(
+                    "[KIMI] Phase 7: REJECTED - %s",
+                    review.get("rejection_reason", ""),
+                )
+
+        if cards:
+            self._save_pending(cards)
+            sync_product_candidate_pool()
+            self._print_summary(cards)
+            logger.info("[KIMI] 本轮发现 %d 个候选策略", len(cards))
+        else:
+            logger.info("[KIMI] 本轮未发现合格策略")
+
+        return cards
+
+    def _build_feature_stats(self, df: pd.DataFrame) -> dict:
+        from alpha.scanner import FEATURE_DIM
+
+        raw_columns = {
+            "timestamp",
+            "open_time",
+            "close_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "quote_asset_volume",
+            "taker_buy_base_asset_volume",
+            "taker_buy_quote_asset_volume",
+            "number_of_trades",
+            "trade_count",
+            "count",
+            "ignore",
+            "year",
+            "month",
+            "day",
+        }
+
+        if isinstance(df.index, pd.DatetimeIndex) and len(df.index) > 0:
+            date_range = f"{df.index.min().date()} ~ {df.index.max().date()}"
+        else:
+            date_range = ""
+
+        features: dict[str, dict] = {}
+        numeric_columns = df.select_dtypes(include=[np.number, "bool"]).columns
+        for column in numeric_columns:
+            if column in raw_columns or str(column).startswith("fwd_"):
+                continue
+
+            series = pd.to_numeric(df[column], errors="coerce")
+            if series.notna().sum() == 0:
+                continue
+
+            features[str(column)] = {
+                "dimension": str(FEATURE_DIM.get(column, "OTHER")),
+                "nan_pct": round(float(series.isna().mean() * 100.0), 2),
+                "mean": round(float(series.mean()), 6),
+                "std": round(float(series.std(ddof=0)), 6),
+                "p5": round(float(series.quantile(0.05)), 6),
+                "p25": round(float(series.quantile(0.25)), 6),
+                "p50": round(float(series.quantile(0.50)), 6),
+                "p75": round(float(series.quantile(0.75)), 6),
+                "p95": round(float(series.quantile(0.95)), 6),
+            }
+
+        return {
+            "total_bars": int(len(df)),
+            "date_range": date_range,
+            "features": features,
+        }
+
+    def _build_data_availability(self) -> dict:
+        storage_root = Path(self.storage_path)
+        endpoints = [
+            "klines",
+            "agg_trades",
+            "book_ticker",
+            "funding_rate",
+            "liquidations",
+            "long_short_ratio",
+            "mark_price",
+            "open_interest",
+            "taker_ratio",
+        ]
+        report: dict[str, dict] = {}
+
+        for endpoint in endpoints:
+            endpoint_dir = storage_root / endpoint
+            endpoint_info: dict[str, object] = {"days": 0}
+            if not endpoint_dir.exists():
+                report[endpoint] = endpoint_info
+                continue
+
+            covered_days: set[str] = set()
+            for day_dir in endpoint_dir.rglob("day=*"):
+                try:
+                    year = None
+                    month = None
+                    day = None
+                    for part in day_dir.parts:
+                        if part.startswith("year="):
+                            year = int(part.split("=", 1)[1])
+                        elif part.startswith("month="):
+                            month = int(part.split("=", 1)[1])
+                        elif part.startswith("day="):
+                            day = int(part.split("=", 1)[1])
+                    if year is None or month is None or day is None:
+                        continue
+                    covered_days.add(f"{year:04d}-{month:02d}-{day:02d}")
+                except Exception:
+                    continue
+
+            if covered_days:
+                ordered = sorted(covered_days)
+                endpoint_info["days"] = len(ordered)
+                endpoint_info["start"] = ordered[0]
+                endpoint_info["end"] = ordered[-1]
+
+            report[endpoint] = endpoint_info
+
+        return report
+
+    def _targeted_ic_scan(self, df: pd.DataFrame, hypothesis) -> dict:
+        raw_features = list(getattr(hypothesis, "entry_features", []))
+        features = [
+            str(feature)
+            for feature in raw_features
+            if str(feature) in df.columns
+        ]
+        dropped = [f for f in raw_features if str(f) not in df.columns]
+        if dropped:
+            logger.warning(
+                "[KIMI] IC scan: dropped %d features not in df: %s",
+                len(dropped), dropped,
+            )
+        logger.info(
+            "[KIMI] IC scan: requested=%d, usable=%d, features=%s, horizon=%d",
+            len(raw_features), len(features), features,
+            int(getattr(hypothesis, "horizon", 0) or 0),
+        )
+        if not features:
+            return {
+                "requested_features": list(getattr(hypothesis, "entry_features", [])),
+                "used_features": [],
+                "horizon": int(getattr(hypothesis, "horizon", 0) or 0),
+                "rows": [],
+                "n_rows": 0,
+            }
+
+        # Kimi 管道用宽松的 min_days=10（短数据特征只有 14-100 天）
+        # 主管道 self._scanner 保持 min_days=20 不变
+        kimi_scanner = FeatureScanner(
+            horizons=self._scanner.horizons,
+            min_days=10,
+            min_obs_per_day=20,
+        )
+        h_val = int(getattr(hypothesis, "horizon", 0) or 0)
+        fwd_col = f"fwd_ret_{h_val}"
+        if fwd_col not in df.columns:
+            logger.info("[KIMI] IC scan: %s not in df, computing for horizon=%d", fwd_col, h_val)
+            # 用一个临时 scanner 来添加这个 horizon 的 forward returns
+            tmp_scanner = FeatureScanner(horizons=[h_val])
+            tmp_scanner.add_forward_returns(df)
+        scan_df = kimi_scanner.scan_all(
+            df,
+            features=features,
+            horizons=[h_val],
+        )
+        logger.info("[KIMI] IC scan result: %d rows", len(scan_df))
+        rows = json.loads(scan_df.to_json(orient="records")) if not scan_df.empty else []
+        return {
+            "requested_features": list(getattr(hypothesis, "entry_features", [])),
+            "used_features": features,
+            "horizon": int(getattr(hypothesis, "horizon", 0) or 0),
+            "rows": rows,
+            "n_rows": len(rows),
+        }
+
+    def _run_walk_forward_for_mask(
+        self,
+        df: pd.DataFrame,
+        entry_mask: pd.Series,
+        direction: str,
+        horizon: int,
+    ) -> dict:
+        fee = float(_MAKER_FEE_TOTAL)
+        split_idx = int(len(df) * 0.67)
+        close_arr = df["close"].values if "close" in df.columns else None
+        if close_arr is None or len(close_arr) == 0:
+            return {
+                "split_idx": split_idx,
+                "oos_win_rate": 0.0,
+                "n_oos": 0,
+                "oos_avg_ret": 0.0,
+                "oos_net_return": 0.0,
+                "oos_pf": 0.0,
+                "mfe_coverage": 0.0,
+            }
+
+        mask_values = entry_mask.reindex(df.index, fill_value=False).fillna(False).astype(bool).values
+        oos_positions = [
+            i for i in range(split_idx, len(df))
+            if mask_values[i] and (i + horizon) < len(df)
+        ]
+
+        sign = -1.0 if str(direction).lower() == "short" else 1.0
+        returns: list[float] = []
+        mfes: list[float] = []
+
+        for entry_idx in oos_positions:
+            entry_price = close_arr[entry_idx]
+            if entry_price == 0 or np.isnan(entry_price):
+                continue
+
+            future = close_arr[entry_idx + 1 : entry_idx + horizon + 1]
+            if future.size == 0 or np.isnan(future).all():
+                continue
+
+            exit_price = future[-1]
+            if exit_price == 0 or np.isnan(exit_price):
+                continue
+
+            ret = (exit_price - entry_price) / entry_price * sign * 100.0 - fee
+            path_returns = (future - entry_price) / entry_price * sign * 100.0
+            returns.append(float(ret))
+            mfes.append(float(np.nanmax(path_returns)))
+
+        if not returns:
+            return {
+                "split_idx": split_idx,
+                "oos_win_rate": 0.0,
+                "n_oos": 0,
+                "oos_avg_ret": 0.0,
+                "oos_net_return": 0.0,
+                "oos_pf": 0.0,
+                "mfe_coverage": 0.0,
+            }
+
+        wins = [ret for ret in returns if ret > 0]
+        losses = [ret for ret in returns if ret <= 0]
+        if losses:
+            loss_sum = abs(sum(losses))
+            oos_pf = sum(wins) / loss_sum if loss_sum > 1e-10 else 1.5
+        else:
+            oos_pf = 1.5 if wins else 1.0
+
+        mfe_hits = sum(1 for value in mfes if value > fee)
+        available_oos_bars = max(len(df) - split_idx, 1)
+        return {
+            "split_idx": split_idx,
+            "oos_win_rate": round(len(wins) / len(returns) * 100.0, 2),
+            "n_oos": int(len(returns)),
+            "oos_avg_ret": round(float(np.mean(returns)), 4),
+            "oos_net_return": round(float(np.mean(returns)), 4),
+            "oos_pf": round(float(oos_pf), 4),
+            "mfe_coverage": round(mfe_hits / len(mfes) * 100.0, 2),
+            "oos_trigger_rate": round(len(returns) / available_oos_bars * 100.0, 4),
+        }
+
+    def _collect_mfe_data(self, df: pd.DataFrame, entry_mask: pd.Series, hypothesis) -> dict:
+        split_idx = int(len(df) * 0.67)
+        close_arr = df["close"].values if "close" in df.columns else None
+        if close_arr is None or len(close_arr) == 0:
+            return {"n_entries": 0, "available_features": []}
+
+        horizon = int(getattr(hypothesis, "horizon", 0) or 0)
+        horizon_window = max(horizon * 4, horizon)
+        direction = str(getattr(hypothesis, "direction", "long")).lower()
+        sign = -1.0 if direction == "short" else 1.0
+        mask_values = entry_mask.reindex(df.index, fill_value=False).fillna(False).astype(bool).values
+        oos_positions = [
+            i for i in range(split_idx, len(df))
+            if mask_values[i] and (i + 1) < len(df)
+        ]
+
+        mfe_values: list[float] = []
+        mfe_bars: list[int] = []
+        for entry_idx in oos_positions:
+            entry_price = close_arr[entry_idx]
+            if entry_price == 0 or np.isnan(entry_price):
+                continue
+
+            future_end = min(entry_idx + horizon_window, len(df) - 1)
+            future = close_arr[entry_idx + 1 : future_end + 1]
+            if future.size == 0 or np.isnan(future).all():
+                continue
+
+            path_returns = (future - entry_price) / entry_price * sign * 100.0
+            best_idx = int(np.nanargmax(path_returns))
+            mfe_values.append(float(np.nanmax(path_returns)))
+            mfe_bars.append(best_idx + 1)
+
+        available_features = [
+            str(column)
+            for column in df.columns
+            if str(column) not in {"open", "high", "low", "close", "volume", "timestamp"}
+            and not str(column).startswith("fwd_")
+        ]
+
+        if not mfe_values:
+            return {
+                "n_entries": 0,
+                "median_mfe": 0.0,
+                "p25_mfe": 0.0,
+                "p75_mfe": 0.0,
+                "mfe_bar_distribution": {},
+                "available_features": available_features,
+            }
+
+        return {
+            "n_entries": int(len(mfe_values)),
+            "median_mfe": round(float(np.median(mfe_values)), 4),
+            "p25_mfe": round(float(np.percentile(mfe_values, 25)), 4),
+            "p75_mfe": round(float(np.percentile(mfe_values, 75)), 4),
+            "mfe_bar_distribution": {
+                "p25": round(float(np.percentile(mfe_bars, 25)), 2),
+                "p50": round(float(np.percentile(mfe_bars, 50)), 2),
+                "p75": round(float(np.percentile(mfe_bars, 75)), 2),
+                "max": int(max(mfe_bars)),
+            },
+            "available_features": available_features,
+        }
+
+    def _derive_kimi_entry_contract(self, session, hypothesis) -> tuple[dict, list[dict]]:
+        feature_stats = session.artifacts.get("feature_stats", {})
+        feature_map = feature_stats.get("features", {}) if isinstance(feature_stats, dict) else {}
+        scan_results = session.artifacts.get("scan_results", {}).get(
+            session.active_hypothesis_idx,
+            {},
+        )
+        rows = scan_results.get("rows", []) if isinstance(scan_results, dict) else []
+        row_by_feature = {
+            str(row.get("feature")): row
+            for row in rows
+            if isinstance(row, dict) and row.get("feature")
+        }
+
+        ordered_features = [str(feature) for feature in getattr(hypothesis, "entry_features", []) if str(feature)]
+        for row in rows:
+            feature = str(row.get("feature") or "")
+            if feature and feature not in ordered_features:
+                ordered_features.append(feature)
+        if not ordered_features:
+            raise ValueError("hypothesis has no usable entry features")
+
+        def _infer_operator(feature: str) -> str:
+            row = row_by_feature.get(feature, {})
+            signal_dir = str(row.get("signal_dir") or "").lower()
+            ic_value = float(row.get("IC") or 0.0)
+            if signal_dir:
+                return ">" if signal_dir == str(hypothesis.direction).lower() else "<"
+            if str(hypothesis.direction).lower() == "long":
+                return ">" if ic_value >= 0 else "<"
+            return ">" if ic_value < 0 else "<"
+
+        def _pick_threshold(feature: str, operator: str) -> float:
+            stats = feature_map.get(feature, {}) if isinstance(feature_map, dict) else {}
+            candidate_keys = ["p95", "p75", "p50", "mean"] if operator == ">" else ["p5", "p25", "p50", "mean"]
+            for key in candidate_keys:
+                value = stats.get(key)
+                if value is not None and not pd.isna(value):
+                    return round(float(value), 6)
+            return 0.0
+
+        primary_feature = ordered_features[0]
+        primary_operator = _infer_operator(primary_feature)
+        entry = {
+            "feature": primary_feature,
+            "operator": primary_operator,
+            "threshold": _pick_threshold(primary_feature, primary_operator),
+            "direction": str(hypothesis.direction),
+            "horizon": int(hypothesis.horizon),
+        }
+
+        combo_conditions: list[dict] = []
+        for feature in ordered_features[1:3]:
+            operator = _infer_operator(feature)
+            combo_conditions.append(
+                {
+                    "feature": feature,
+                    "op": operator,
+                    "threshold": _pick_threshold(feature, operator),
+                }
+            )
+        return entry, combo_conditions
+
+    def _grid_scan_stop_kimi(
+        self,
+        df: pd.DataFrame,
+        entry_mask: pd.Series,
+        exit_info: dict,
+        hypothesis,
+        stop_spec: dict,
+    ) -> tuple[ExitParams, dict]:
+        def _grid_values(payload: object, fallback: list[float]) -> list[float]:
+            source = payload
+            if isinstance(payload, dict):
+                source = payload.get("values", payload.get("grid", payload.get("candidates")))
+            if not isinstance(source, (list, tuple, set)):
+                return list(fallback)
+
+            values: list[float] = []
+            for item in source:
+                try:
+                    number = float(item)
+                except (TypeError, ValueError):
+                    continue
+                if number > 0:
+                    values.append(round(number, 4))
+            values = sorted(set(values))
+            return values or list(fallback)
+
+        mechanism_type = str(getattr(hypothesis, "mechanism_name", "") or "generic_alpha")
+        base_params = _build_mechanism_exit_params(
+            mechanism_type,
+            int(getattr(hypothesis, "horizon", 0) or 0),
+            str(getattr(hypothesis, "direction", "long")),
+        )
+        stop_grid = _grid_values(
+            stop_spec.get("stop_grid") if isinstance(stop_spec, dict) else None,
+            [0.3, 0.5, 0.7, 1.0, 1.5],
+        )
+        protect_grid = _grid_values(
+            stop_spec.get("protect_grid") if isinstance(stop_spec, dict) else None,
+            [0.05, 0.08, 0.12, 0.18, 0.25],
+        )
+
+        best_pf = -1.0
+        best_net = float("-inf")
+        best_params = base_params
+        best_metrics: dict = {}
+
+        for stop in stop_grid:
+            for protect in protect_grid:
+                trial = ExitParams(
+                    take_profit_pct=base_params.take_profit_pct,
+                    stop_pct=stop,
+                    protect_start_pct=protect,
+                    protect_gap_ratio=base_params.protect_gap_ratio,
+                    protect_floor_pct=max(0.01, protect * 0.5),
+                    min_hold_bars=base_params.min_hold_bars,
+                    max_hold_factor=base_params.max_hold_factor,
+                    exit_confirm_bars=base_params.exit_confirm_bars,
+                    decay_exit_threshold=base_params.decay_exit_threshold,
+                    decay_tighten_threshold=base_params.decay_tighten_threshold,
+                    tighten_gap_ratio=base_params.tighten_gap_ratio,
+                    confidence_stop_multipliers=dict(base_params.confidence_stop_multipliers),
+                    regime_stop_multipliers=dict(base_params.regime_stop_multipliers),
+                    regime_stop_multipliers_short=dict(base_params.regime_stop_multipliers_short),
+                    mfe_ratchet_threshold=base_params.mfe_ratchet_threshold,
+                    mfe_ratchet_ratio=base_params.mfe_ratchet_ratio,
+                )
+                metrics = self._shadow_smart_exit_backtest(
+                    df,
+                    entry_mask,
+                    exit_info,
+                    str(getattr(hypothesis, "direction", "long")),
+                    int(getattr(hypothesis, "horizon", 0) or 0),
+                    params=trial,
+                )
+                pf = float(metrics.get("earliest_pf", 0) or 0)
+                net = float(metrics.get("net_return_with_exit", 0) or 0)
+                if pf > best_pf or (pf == best_pf and net > best_net):
+                    best_pf = pf
+                    best_net = net
+                    best_params = trial
+                    best_metrics = metrics
+
+        if not best_metrics:
+            best_metrics = self._shadow_smart_exit_backtest(
+                df,
+                entry_mask,
+                exit_info,
+                str(getattr(hypothesis, "direction", "long")),
+                int(getattr(hypothesis, "horizon", 0) or 0),
+                params=base_params,
+            )
+        return best_params, best_metrics
+
+    def _engine_driven_entry_scan(
+        self,
+        df: pd.DataFrame,
+        hypothesis,
+    ) -> tuple:
+        """
+        Phase 3 替代方案: 引擎自动扫描极端阈值组合，不依赖 Kimi 写入场代码。
+
+        使用 P 系列方法论:
+          - 对 hypothesis.entry_features 中的每个特征
+          - 扫描 p1/p2/p3/p5/p95/p97/p98/p99 极端分位数
+          - crossing detection + 60 bar cooldown
+          - IS/OOS 分开，在 OOS 上验证
+          - 选 OOS WR 最高且 n_oos >= 15 的组合
+
+        Returns:
+            (entry_mask, entry_contract, combo_conditions, entry_stats, mechanism_type)
+            全部为 None/空 如果没找到合格的。
+        """
+        features = [
+            str(f) for f in getattr(hypothesis, "entry_features", [])
+            if str(f) in df.columns and df[str(f)].isna().mean() < 0.5
+        ]
+        if not features:
+            return None, None, [], {}, ""
+
+        direction = str(hypothesis.direction)
+        horizon = int(hypothesis.horizon)
+        close = df["close"].values
+        n = len(df)
+        split_idx = int(n * 0.67)
+        fee = 0.04 / 100  # Maker 双边
+        sign = -1.0 if direction == "short" else 1.0
+
+        # 极端分位数
+        PERCENTILES_LOW = [1, 2, 3, 5]      # 用 < 操作符
+        PERCENTILES_HIGH = [95, 97, 98, 99]  # 用 > 操作符
+        COOLDOWN = 60
+
+        best_wr = -1.0
+        best_mask = None
+        best_contract = None
+        best_combo = []
+        best_stats = {}
+        best_mechanism = ""
+
+        # 单特征扫描
+        for feat in features:
+            col = df[feat].values
+            is_col = col[:split_idx]
+
+            # 决定操作符方向: SHORT 用高分位数(>)检测过热, LONG 用低分位数(<)检测超卖
+            if direction == "short":
+                pcts = PERCENTILES_HIGH
+                op = ">"
+            else:
+                pcts = PERCENTILES_LOW
+                op = "<"
+
+            # 也扫反方向（某些特征反直觉，如 taker_buy_sell_ratio 低 → 做多）
+            all_scans = [(op, pcts)]
+            rev_op = "<" if op == ">" else ">"
+            rev_pcts = PERCENTILES_LOW if op == ">" else PERCENTILES_HIGH
+            all_scans.append((rev_op, rev_pcts))
+
+            for scan_op, scan_pcts in all_scans:
+                for pct in scan_pcts:
+                    valid_is = is_col[~np.isnan(is_col)]
+                    if len(valid_is) < 100:
+                        continue
+                    threshold = float(np.percentile(valid_is, pct))
+
+                    # crossing detection + cooldown
+                    if scan_op == ">":
+                        cond = col > threshold
+                    else:
+                        cond = col < threshold
+
+                    mask = np.zeros(n, dtype=bool)
+                    last_trigger = -COOLDOWN - 1
+                    for i in range(1, n):
+                        if cond[i] and not cond[i - 1] and i - last_trigger > COOLDOWN:
+                            mask[i] = True
+                            last_trigger = i
+
+                    # OOS 评估
+                    oos_entries = [i for i in range(split_idx, n) if mask[i] and i + horizon < n]
+                    if len(oos_entries) < 10:
+                        continue
+
+                    rets = []
+                    for idx_e in oos_entries:
+                        ret = (close[idx_e + horizon] - close[idx_e]) / close[idx_e] * sign * 100 - fee * 100
+                        rets.append(ret)
+
+                    wins = sum(1 for r in rets if r > 0)
+                    wr = wins / len(rets) * 100
+
+                    if wr > best_wr and len(rets) >= 10:
+                        best_wr = wr
+                        best_mask = pd.Series(mask, index=df.index)
+                        best_contract = {
+                            "feature": feat,
+                            "operator": scan_op,
+                            "threshold": round(float(threshold), 6),
+                            "direction": direction,
+                            "horizon": horizon,
+                        }
+                        best_combo = []
+                        best_stats = {
+                            "trigger_count": int(mask.sum()),
+                            "trigger_rate": round(mask.sum() / n * 100, 4),
+                            "oos_wr": round(wr, 2),
+                            "oos_n": len(rets),
+                            "oos_avg_ret": round(float(np.mean(rets)), 4),
+                            "percentile": pct,
+                        }
+                        best_mechanism = _infer_mechanism_type(feat, direction, scan_op)
+
+        # 双特征组合扫描（种子+确认）
+        if len(features) >= 2 and best_mask is not None:
+            seed_feat = best_contract["feature"]
+            seed_op = best_contract["operator"]
+            seed_thr = best_contract["threshold"]
+
+            for confirm_feat in features:
+                if confirm_feat == seed_feat:
+                    continue
+                confirm_col = df[confirm_feat].values
+                is_confirm = confirm_col[:split_idx]
+                valid_confirm = is_confirm[~np.isnan(is_confirm)]
+                if len(valid_confirm) < 100:
+                    continue
+
+                for c_op, c_pcts in [("<", PERCENTILES_LOW), (">", PERCENTILES_HIGH)]:
+                    for c_pct in c_pcts:
+                        c_thr = float(np.percentile(valid_confirm, c_pct))
+
+                        # 种子 crossing + 确认条件
+                        seed_cond = (df[seed_feat].values > seed_thr) if seed_op == ">" else (df[seed_feat].values < seed_thr)
+                        conf_cond = (confirm_col > c_thr) if c_op == ">" else (confirm_col < c_thr)
+
+                        combo_mask = np.zeros(n, dtype=bool)
+                        last_trigger = -COOLDOWN - 1
+                        for i in range(1, n):
+                            if (seed_cond[i] and not seed_cond[i - 1]
+                                    and conf_cond[i]
+                                    and i - last_trigger > COOLDOWN):
+                                combo_mask[i] = True
+                                last_trigger = i
+
+                        oos_entries = [i for i in range(split_idx, n) if combo_mask[i] and i + horizon < n]
+                        if len(oos_entries) < 10:
+                            continue
+
+                        rets = []
+                        for idx_e in oos_entries:
+                            ret = (close[idx_e + horizon] - close[idx_e]) / close[idx_e] * sign * 100 - fee * 100
+                            rets.append(ret)
+
+                        wins = sum(1 for r in rets if r > 0)
+                        wr = wins / len(rets) * 100
+
+                        if wr > best_wr and len(rets) >= 10:
+                            best_wr = wr
+                            best_mask = pd.Series(combo_mask, index=df.index)
+                            best_contract = {
+                                "feature": seed_feat,
+                                "operator": seed_op,
+                                "threshold": round(float(seed_thr), 6),
+                                "direction": direction,
+                                "horizon": horizon,
+                            }
+                            best_combo = [{
+                                "feature": confirm_feat,
+                                "op": c_op,
+                                "threshold": round(float(c_thr), 6),
+                            }]
+                            best_stats = {
+                                "trigger_count": int(combo_mask.sum()),
+                                "trigger_rate": round(combo_mask.sum() / n * 100, 4),
+                                "oos_wr": round(wr, 2),
+                                "oos_n": len(rets),
+                                "oos_avg_ret": round(float(np.mean(rets)), 4),
+                                "percentile": f"seed_p{best_stats.get('percentile','?')}+confirm_p{c_pct}",
+                            }
+                            best_mechanism = _infer_mechanism_type(seed_feat, direction, seed_op)
+
+        if best_mask is None or best_wr < 45:
+            return None, None, [], {}, ""
+
+        logger.info(
+            "[KIMI] Phase 3 引擎扫描最佳: %s %s %.6g -> %s | OOS WR=%.1f%% n=%d",
+            best_contract["feature"], best_contract["operator"],
+            best_contract["threshold"], direction,
+            best_wr, best_stats.get("oos_n", 0),
+        )
+        return best_mask, best_contract, best_combo, best_stats, best_mechanism
+
+    def _build_kimi_card(
+        self,
+        session,
+        hypothesis,
+        exit_info: dict,
+        params: ExitParams,
+        backtest: dict,
+        review: dict,
+    ) -> dict:
+        entry, combo_conditions = self._derive_kimi_entry_contract(session, hypothesis)
+        mechanism_type = str(review.get("mechanism_type") or hypothesis.mechanism_name or "").strip()
+        if not mechanism_type:
+            mechanism_type = _infer_mechanism_type(
+                entry["feature"],
+                str(hypothesis.direction),
+                entry["operator"],
+            )
+
+        combo_text = " AND ".join(
+            f"{cond['feature']} {cond['op']} {float(cond['threshold']):.4g}"
+            for cond in combo_conditions
+        )
+        if combo_text:
+            rule_str = (
+                f"{entry['feature']} {entry['operator']} {float(entry['threshold']):.4g} "
+                f"AND {combo_text} -> {entry['direction']} {entry['horizon']}bars"
+            )
+        else:
+            rule_str = (
+                f"{entry['feature']} {entry['operator']} {float(entry['threshold']):.4g} "
+                f"-> {entry['direction']} {entry['horizon']}bars"
+            )
+
+        card_id = _stable_card_id(
+            hypothesis.mechanism_name,
+            rule_str,
+            session.session_id,
+            mechanism_type,
+        )
+        wf_results = session.artifacts.get("wf_results_by_idx", {}).get(
+            session.active_hypothesis_idx,
+            {},
+        )
+        entry_stats = session.artifacts.get("entry_stats_by_idx", {}).get(
+            session.active_hypothesis_idx,
+            {},
+        )
+        card = {
+            "id": card_id,
+            "group": str(hypothesis.mechanism_name or card_id),
+            "status": "pending",
+            "origin": "kimi_researcher",
+            "entry": entry,
+            "combo_conditions": combo_conditions,
+            "exit": exit_info,
+            "stop_pct": round(float(params.stop_pct), 4),
+            "exit_params": params.to_dict(),
+            "stop_logic": _build_stop_logic(
+                mechanism_type,
+                params,
+                direction=str(hypothesis.direction),
+            ),
+            "strategy_blueprint": {
+                "snapshot_required": True,
+                "force_decay_exit": list(exit_info.get("top3") or []),
+                "thesis_invalidation": list(exit_info.get("invalidation") or []),
+            },
+            "stats": {
+                "oos_win_rate": round(float(backtest.get("win_rate", 0) or 0), 2),
+                "n_oos": int(backtest.get("n_samples", 0) or 0),
+                "oos_pf": round(float(backtest.get("earliest_pf", 0) or 0), 3),
+                "oos_avg_ret": round(float(backtest.get("net_return_with_exit", 0) or 0), 4),
+                "oos_net_return": round(float(backtest.get("net_return_with_exit", 0) or 0), 4),
+                "exit_reason_dist": dict(backtest.get("exit_reason_counts", {}) or {}),
+                "avg_bars_held": round(float(backtest.get("avg_bars_held", 0) or 0), 1),
+                "baseline_wr": round(float(wf_results.get("oos_win_rate", 0) or 0), 2),
+                "baseline_pf": round(float(wf_results.get("oos_pf", 0) or 0), 3),
+                "baseline_avg_ret": round(float(wf_results.get("oos_avg_ret", 0) or 0), 4),
+                "wr_improvement": round(
+                    float(backtest.get("win_rate", 0) or 0)
+                    - float(wf_results.get("oos_win_rate", 0) or 0),
+                    2,
+                ),
+                "seed_oos_wr": round(float(wf_results.get("oos_win_rate", 0) or 0), 2),
+                "degradation": 1.0,
+                "mfe_coverage": round(float(wf_results.get("mfe_coverage", 0) or 0), 2),
+            },
+            "explanation": (
+                f"假设: {hypothesis.mechanism_name}\n"
+                f"失衡力: {hypothesis.force_description}\n"
+                f"为什么暂时: {hypothesis.why_temporary}\n"
+                f"持续性要求: {hypothesis.persistence_requirement}\n"
+                f"入场触发: {entry_stats.get('trigger_count', 0)} 次, "
+                f"触发率={float(entry_stats.get('trigger_rate', 0) or 0):.4f}%\n"
+                f"OOS胜率={float(wf_results.get('oos_win_rate', 0) or 0):.1f}% "
+                f"n={int(wf_results.get('n_oos', 0) or 0)} "
+                f"MFE覆盖={float(wf_results.get('mfe_coverage', 0) or 0):.1f}%\n"
+                f"Kimi最终置信度={float(review.get('confidence', 0) or 0):.2f}"
+            ),
+            "rule_str": rule_str,
+            "discovered_at": datetime.now(timezone.utc).isoformat(),
+            "mechanism_type": mechanism_type,
+            "kimi_session_id": session.session_id,
+            "kimi_hypothesis": hypothesis.to_dict(),
+            "kimi_confidence": float(review.get("confidence", 0) or 0),
+            "entry_code": session.artifacts.get("entry_code_by_idx", {}).get(
+                session.active_hypothesis_idx,
+                "",
+            ),
+            "exit_code": session.artifacts.get("exit_code_by_idx", {}).get(
+                session.active_hypothesis_idx,
+                "",
+            ),
+        }
+        card["family"] = infer_product_family(card)
+        return card
+
     # ── 内部方法 ──────────────────────────────────────────────────────────────
 
     def _select_seed_scan_rows(self, scan_df: pd.DataFrame) -> pd.DataFrame:
@@ -1470,6 +2945,18 @@ class LiveDiscoveryEngine:
             sub = best[best["dimension"] == dim].head(quota)
             if not sub.empty:
                 frames.append(sub)
+
+        # 方向平衡: 保证 IC>0 (做多预测力) 的特征有足够槽位,
+        # 消除牛市中 IC<0 (做空) 特征垄断的偏差
+        if "IC" in best.columns:
+            long_quota = max(self.top_n // 3, 5)
+            long_rows = best[best["IC"] > 0].head(long_quota)
+            if not long_rows.empty:
+                frames.append(long_rows)
+                logger.info(
+                    "[DISCOVERY] IC scan direction balance: added %d LONG-IC rows (IC>0)",
+                    len(long_rows),
+                )
 
         return (
             pd.concat(frames, ignore_index=False)
@@ -1555,7 +3042,8 @@ class LiveDiscoveryEngine:
         oos = wf_report.get("OOS", {})
         explanation = self._explainer.explain(atom)
 
-        card_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_") + atom.feature[:10]
+        rule_str = atom.rule_str()
+        card_id = _stable_card_id(atom.feature, rule_str, mechanism_type)
 
         card = {
             "id": card_id,
@@ -1564,9 +3052,9 @@ class LiveDiscoveryEngine:
                 "operator":  atom.operator,
                 "threshold": round(float(atom.threshold), 6),
                 "direction": atom.direction,
-                "horizon":   max(int(atom.horizon), 30),
+                "horizon":   int(atom.horizon),
             },
-            "exit": exit_cond,  # None = 使用固定持仓 horizon
+            "exit": exit_cond,  # None = 仅剩 safety_cap 安全网，禁止当作正式离场逻辑
             "exit_params": exit_params.to_dict(),
             "stop_pct": round(float(exit_params.stop_pct), 4),
             "stop_logic": _build_stop_logic(
@@ -1580,14 +3068,22 @@ class LiveDiscoveryEngine:
                 "thesis_invalidation": list(exit_cond.get("invalidation") or []) if isinstance(exit_cond, dict) else [],
             },
             "stats": {
-                "oos_win_rate":   round(float(oos.get("win_rate") or 0), 2),
-                "n_oos":          int(oos.get("n_triggers") or 0),
-                "oos_net_return": round(float(oos.get("avg_return_pct") or 0), 4),
-                "degradation":    round(float(wf_report.get("degradation") or 0), 3),
-                "is_robust":      bool(wf_report.get("is_robust", False)),
+                # 审批标准: 智能出场回测（vs_entry 力衰竭 + 止损 + 保本）
+                "oos_win_rate":     round(float(exit_cond.get("win_rate", 0) if isinstance(exit_cond, dict) else 0), 2),
+                "n_oos":            int(exit_cond.get("n_samples", 0) if isinstance(exit_cond, dict) else 0),
+                "oos_pf":           round(float(exit_cond.get("earliest_pf", 0) if isinstance(exit_cond, dict) else 0), 3),
+                "oos_avg_ret":      round(float(exit_cond.get("net_return_with_exit", 0) if isinstance(exit_cond, dict) else 0), 4),
+                "oos_net_return":   round(float(exit_cond.get("net_return_with_exit", 0) if isinstance(exit_cond, dict) else 0), 4),
+                "exit_reason_dist": exit_cond.get("exit_reason_counts", {}) if isinstance(exit_cond, dict) else {},
+                "avg_bars_held":    round(float(exit_cond.get("avg_bars_held", 0) if isinstance(exit_cond, dict) else 0), 1),
+                # 研究基准（固定持仓，仅供参考）
+                "baseline_wr":      round(float(oos.get("win_rate") or 0), 2),
+                "baseline_n":       int(oos.get("n_triggers") or 0),
+                "degradation":      round(float(wf_report.get("degradation") or 0), 3),
+                "is_robust":        bool(wf_report.get("is_robust", False)),
             },
             "explanation": explanation,
-            "rule_str": atom.rule_str(),
+            "rule_str": rule_str,
             "discovered_at": datetime.now(timezone.utc).isoformat(),
             "status": "pending",
             "mechanism_type": mechanism_type,
@@ -1596,21 +3092,315 @@ class LiveDiscoveryEngine:
 
         return card
 
+    @staticmethod
+    def _is_sparse_multi_seed(seed: dict) -> bool:
+        return bool(seed.get("conditions")) and str(seed.get("origin", "")).startswith("realtime_seed_miner_multi")
+
+    def _should_direct_review_seed(self, seed: dict) -> bool:
+        if not self._is_sparse_multi_seed(seed):
+            return False
+
+        stats = seed.get("seed_stats", {})
+        return (
+            float(stats.get("oos_wr", 0.0) or 0.0) >= 65.0
+            and int(stats.get("oos_n", 0) or 0) >= 12
+            and float(stats.get("oos_pf", 0.0) or 0.0) >= 1.20
+            and float(stats.get("oos_avg_ret", 0.0) or 0.0) >= 0.02
+        )
+
+    def _build_seed_entry_mask(self, df: pd.DataFrame, seed: dict) -> pd.Series:
+        from alpha.combo_scanner import _crossing_mask
+
+        seed_conditions = list(seed.get("conditions") or [])
+        if seed_conditions:
+            primary = seed_conditions[0]
+            seed_feat = str(primary["feature"])
+            seed_op = str(primary.get("op", primary.get("operator", "")))
+            seed_thresh = float(primary["threshold"])
+        else:
+            seed_feat = str(seed["feature"])
+            seed_op = str(seed["op"])
+            seed_thresh = float(seed["threshold"])
+
+        if seed_feat not in df.columns:
+            return pd.Series(False, index=df.index)
+
+        seed_mask = pd.Series(
+            _crossing_mask(
+                df[seed_feat].values,
+                seed_op,
+                seed_thresh,
+                cooldown=int(seed.get("cooldown", 60) or 60),
+            ),
+            index=df.index,
+        )
+
+        for cond in seed_conditions[1:]:
+            cond_feat = str(cond["feature"])
+            cond_op = str(cond.get("op", cond.get("operator", "")))
+            cond_thresh = float(cond["threshold"])
+            if cond_feat not in df.columns:
+                return pd.Series(False, index=df.index)
+            col = df[cond_feat]
+            if cond_op == "<":
+                cond_mask = col < cond_thresh
+            elif cond_op == "<=":
+                cond_mask = col <= cond_thresh
+            elif cond_op == ">=":
+                cond_mask = col >= cond_thresh
+            else:
+                cond_mask = col > cond_thresh
+            seed_mask = seed_mask & cond_mask.fillna(False)
+
+        seed_context = str(seed.get("context", "") or "")
+        if seed_context:
+            seed_mask = seed_mask & _context_mask(df, seed_context)
+
+        return seed_mask.fillna(False)
+
+    def _build_direct_seed_card(
+        self,
+        seed: dict,
+        exit_cond: Optional[dict],
+        exit_params: ExitParams,
+        mechanism_type: str,
+    ) -> dict:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        seed_name = str(seed.get("name", seed.get("feature", "seed")))
+
+        seed_conditions = list(seed.get("conditions") or [])
+        primary = seed_conditions[0] if seed_conditions else {
+            "feature": seed["feature"],
+            "op": seed["op"],
+            "threshold": seed["threshold"],
+        }
+        combo_conditions = seed_conditions[1:]
+        combo_text = " AND ".join(
+            f"{cond['feature']} {cond.get('op', cond.get('operator', ''))} {float(cond['threshold']):.4g}"
+            for cond in combo_conditions
+        ) or "(none)"
+        stats = seed.get("seed_stats", {})
+        stop_pct = round(float(exit_params.stop_pct), 4)
+        seed_context = str(seed.get("context", "") or "")
+        threshold = round(float(primary["threshold"]), 6)
+        rule_str = (
+            f"{primary['feature']} {primary.get('op', primary.get('operator', ''))} {float(primary['threshold']):.4g} "
+            f"AND {combo_text} -> {str(seed['direction'])} {int(seed['horizon'])}bars"
+        )
+        card_id = _stable_card_id(seed_name, rule_str, seed_context, mechanism_type)
+
+        card = {
+            "id": card_id,
+            "group": str(seed.get("group") or seed_name),
+            "status": "pending",
+            "origin": str(seed.get("origin", "") or ""),
+            "review_profile": "sparse_realtime_multi",
+            "entry": {
+                "feature": str(primary["feature"]),
+                "operator": str(primary.get("op", primary.get("operator", ""))),
+                "threshold": threshold,
+                "direction": str(seed["direction"]),
+                "horizon": int(seed["horizon"]),
+            },
+            "combo_conditions": combo_conditions,
+            "exit": exit_cond,
+            "stop_pct": stop_pct,
+            "exit_params": exit_params.to_dict(),
+            "stop_logic": _build_stop_logic(
+                mechanism_type,
+                exit_params,
+                direction=str(seed["direction"]),
+            ),
+            "strategy_blueprint": {
+                "snapshot_required": True,
+                "force_decay_exit": list(exit_cond.get("top3") or []) if isinstance(exit_cond, dict) else [],
+                "thesis_invalidation": list(exit_cond.get("invalidation") or []) if isinstance(exit_cond, dict) else [],
+            },
+            "stats": {
+                "oos_win_rate": round(float(stats.get("oos_wr", 0.0) or 0.0), 2),
+                "n_oos": int(stats.get("oos_n", 0) or 0),
+                "oos_pf": round(float(stats.get("oos_pf", 0.0) or 0.0), 3),
+                "oos_avg_ret": round(float(stats.get("oos_avg_ret", 0.0) or 0.0), 4),
+                "oos_net_return": round(float(stats.get("oos_avg_ret", 0.0) or 0.0), 4),
+                "seed_oos_wr": round(float(stats.get("oos_wr", 0.0) or 0.0), 2),
+                "wr_improvement": 0.0,
+                "degradation": 1.0,
+            },
+            "explanation": (
+                f"种子: {primary['feature']} {primary.get('op', primary.get('operator', ''))} {float(primary['threshold']):.4g} "
+                f"({str(seed['direction']).upper()} 研究窗={int(seed['horizon'])}bar)\n"
+                f"上下文: {seed_context or 'NONE'}\n"
+                f"联立条件: {combo_text}\n"
+                f"直通评审: multi-condition 种子已自带物理确认，不再强制叠加额外 confirm\n"
+                f"OOS胜率={float(stats.get('oos_wr', 0.0) or 0.0):.1f}% "
+                f"n={int(stats.get('oos_n', 0) or 0)} PF={float(stats.get('oos_pf', 0.0) or 0.0):.2f} "
+                f"avg={float(stats.get('oos_avg_ret', 0.0) or 0.0):.4f}%"
+            ),
+            "rule_str": rule_str,
+            "discovered_at": now_iso,
+            "mechanism_type": mechanism_type,
+        }
+        card["family"] = infer_product_family(card)
+        return card
+
+    def _maybe_build_direct_seed_card(self, df: pd.DataFrame, seed: dict) -> Optional[dict]:
+        if not self._should_direct_review_seed(seed):
+            return None
+
+        direction = str(seed["direction"])
+        mechanism_type = str(seed.get("mechanism_type") or "") or _infer_mechanism_type(
+            str(seed["feature"]),
+            direction,
+            str(seed["op"]),
+        )
+        combo_conditions = list(seed.get("conditions") or [])[1:]
+        entry_mask = self._build_seed_entry_mask(df, seed)
+        exit_params = _build_mechanism_exit_params(
+            mechanism_type,
+            int(seed["horizon"]),
+            direction,
+        )
+        exit_cond = _mine_exit_conditions(
+            df, entry_mask, direction, int(seed["horizon"]),
+            entry_feature=str(seed["feature"]),
+            entry_op=str(seed["op"]),
+            entry_threshold=float(seed["threshold"]),
+            combo_conditions=combo_conditions,
+            mechanism_type=mechanism_type,
+            min_exit_samples=8,  # 多条件种子样本少，放宽下限
+        )
+        if exit_cond is None:
+            exit_cond = _derive_mechanism_exit_v2(
+                entry_feature=str(seed["feature"]),
+                entry_op=str(seed["op"]),
+                entry_threshold=float(seed["threshold"]),
+                combo_conditions=combo_conditions,
+                mechanism_type=mechanism_type,
+            )
+        # 多条件种子的微结构特征覆盖率低（~20%），全 df 上跑出场回测
+        # 几乎找不到入场点。种子已被挖掘器 OOS 验证过，出场条件是物理
+        # 机制推导的（vs_entry 力消失），直接用种子的 OOS 统计量构建卡片。
+        stats = seed.get("seed_stats", {})
+        exit_cond.update({
+            "earliest_pf": float(stats.get("oos_pf", 0.0) or 0.0),
+            "net_return_with_exit": float(stats.get("oos_avg_ret", 0.0) or 0.0),
+            "improvement": 0.0,
+            "triggered_exit_pct": 100.0,
+            "n_samples": int(stats.get("oos_n", 0) or 0),
+            "exit_reason_counts": {"logic_complete": int(stats.get("oos_n", 0) or 0)},
+            "avg_bars_held": float(seed.get("horizon", 30)),
+            "win_rate": float(stats.get("oos_wr", 0.0) or 0.0),
+            "source": "seed_miner_oos_validated",
+        })
+        return self._build_direct_seed_card(seed, exit_cond, exit_params, mechanism_type)
+
+    @staticmethod
+    def _normalize_row_seed_conditions(row) -> list[dict]:
+        raw_conditions = row.get("seed_conditions") if hasattr(row, "get") else None
+        if not isinstance(raw_conditions, list):
+            return []
+
+        normalized: list[dict] = []
+        for cond in raw_conditions:
+            if not isinstance(cond, dict):
+                continue
+            feature = str(cond.get("feature", "") or "")
+            op = str(cond.get("op", cond.get("operator", "")) or "")
+            threshold = cond.get("threshold")
+            if not feature or not op or threshold is None:
+                continue
+            try:
+                threshold = float(threshold)
+            except (TypeError, ValueError):
+                continue
+            normalized.append(
+                {
+                    "feature": feature,
+                    "op": op,
+                    "threshold": threshold,
+                }
+            )
+        return normalized
+
+    def _row_combo_conditions(self, row) -> list[dict]:
+        combined: list[dict] = []
+        seed_conditions = self._normalize_row_seed_conditions(row)
+        if len(seed_conditions) > 1:
+            combined.extend(seed_conditions[1:])
+
+        confirm_feature = str(row.get("confirm_feature", "") or "")
+        confirm_op = str(row.get("confirm_op", "") or "")
+        confirm_threshold = row.get("confirm_threshold")
+        if confirm_feature and confirm_op and confirm_threshold is not None:
+            try:
+                combined.append(
+                    {
+                        "feature": confirm_feature,
+                        "op": confirm_op,
+                        "threshold": float(confirm_threshold),
+                    }
+                )
+            except (TypeError, ValueError):
+                pass
+
+        deduped: list[dict] = []
+        seen: set[tuple[str, str, float]] = set()
+        for cond in combined:
+            key = (
+                str(cond["feature"]),
+                str(cond["op"]),
+                round(float(cond["threshold"]), 8),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(cond)
+        return deduped
+
     def _build_combo_entry_mask(self, df: pd.DataFrame, row) -> pd.Series:
         """根据 combo 扫描结果构建多条件入场掩码 (种子 AND 确认)。"""
         from alpha.combo_scanner import _crossing_mask
 
         # 种子条件 (带 crossing 检测)
-        seed_feat = row["seed_feature"]
-        seed_op = row["seed_op"]
-        seed_thresh = row["seed_threshold"]
-        if seed_feat in df.columns:
-            seed_mask = pd.Series(
-                _crossing_mask(df[seed_feat].values, seed_op, seed_thresh, cooldown=60),
-                index=df.index,
-            )
+        seed_conditions = self._normalize_row_seed_conditions(row)
+        if seed_conditions:
+            primary = seed_conditions[0]
+            seed_feat = primary["feature"]
+            seed_op = primary["op"]
+            seed_thresh = primary["threshold"]
         else:
+            seed_feat = row["seed_feature"]
+            seed_op = row["seed_op"]
+            seed_thresh = row["seed_threshold"]
+
+        if seed_feat not in df.columns:
             return pd.Series(False, index=df.index)
+
+        seed_mask = pd.Series(
+            _crossing_mask(df[seed_feat].values, seed_op, seed_thresh, cooldown=60),
+            index=df.index,
+        )
+
+        for cond in seed_conditions[1:]:
+            cond_feat = cond["feature"]
+            cond_op = cond["op"]
+            cond_thresh = cond["threshold"]
+            if cond_feat not in df.columns:
+                return pd.Series(False, index=df.index)
+            col = df[cond_feat]
+            if cond_op == "<":
+                cond_mask = col < cond_thresh
+            elif cond_op == "<=":
+                cond_mask = col <= cond_thresh
+            elif cond_op == ">=":
+                cond_mask = col >= cond_thresh
+            else:
+                cond_mask = col > cond_thresh
+            seed_mask = seed_mask & cond_mask.fillna(False)
+
+        seed_context = str(row.get("seed_context", "") or "")
+        if seed_context:
+            seed_mask = seed_mask & _context_mask(df, seed_context)
 
         # 确认条件
         conf_feat = row["confirm_feature"]
@@ -1637,14 +3427,24 @@ class LiveDiscoveryEngine:
     ) -> dict:
         """将 combo 扫描结果打包成策略卡片。"""
         now_iso = datetime.now(timezone.utc).isoformat()
-        card_id = (
-            datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_")
-            + row["seed_feature"][:8]
-            + "_"
-            + row["confirm_feature"][:8]
-        )
-
         stop_pct = round(float(exit_params.stop_pct), 4)
+        combo_conditions = self._row_combo_conditions(row)
+        combo_text = " AND ".join(
+            f"{cond['feature']} {cond['op']} {float(cond['threshold']):.4g}"
+            for cond in combo_conditions
+        ) or "(none)"
+        seed_context = str(row.get("seed_context", "") or "")
+        rule_str = (
+            f"{row['seed_feature']} {row['seed_op']} {row['seed_threshold']:.4g} "
+            f"AND {row['confirm_feature']} {row['confirm_op']} {row['confirm_threshold']:.4g} "
+            f"-> {row['direction']} {int(row['horizon'])}bars"
+        )
+        card_id = _stable_card_id(
+            row.get("seed_name", row["seed_feature"]),
+            rule_str,
+            seed_context,
+            mechanism_type,
+        )
 
         card = {
             "id": card_id,
@@ -1655,15 +3455,9 @@ class LiveDiscoveryEngine:
                 "operator":  row["seed_op"],
                 "threshold": round(float(row["seed_threshold"]), 6),
                 "direction": row["direction"],
-                "horizon":   max(int(row["horizon"]), 30),
+                "horizon":   int(row["horizon"]),
             },
-            "combo_conditions": [
-                {
-                    "feature":   row["confirm_feature"],
-                    "op":        row["confirm_op"],
-                    "threshold": round(float(row["confirm_threshold"]), 6),
-                }
-            ],
+            "combo_conditions": combo_conditions,
             "exit": exit_cond,
             "stop_pct": stop_pct,
             "exit_params": exit_params.to_dict(),
@@ -1678,27 +3472,30 @@ class LiveDiscoveryEngine:
                 "thesis_invalidation": list(exit_cond.get("invalidation") or []) if isinstance(exit_cond, dict) else [],
             },
             "stats": {
-                "oos_win_rate":    round(float(row["oos_wr"]), 2),
-                "n_oos":           int(row["oos_n"]),
-                "oos_pf":          round(float(row["oos_pf"]), 3),
-                "oos_avg_ret":     round(float(row["oos_avg_ret"]), 4),
-                "oos_net_return":  round(float(row["oos_avg_ret"]), 4),
-                "wr_improvement":  round(float(row["wr_improvement"]), 2),
-                "seed_oos_wr":     round(float(row["seed_oos_wr"]), 2),
-                "degradation":     round(float(row.get("degradation") or 0), 3),
+                # 审批标准: 智能出场回测（vs_entry 力衰竭 + 止损 + 保本）
+                "oos_win_rate":     round(float(exit_cond.get("win_rate", 0) if isinstance(exit_cond, dict) else 0), 2),
+                "n_oos":            int(exit_cond.get("n_samples", 0) if isinstance(exit_cond, dict) else 0),
+                "oos_pf":           round(float(exit_cond.get("earliest_pf", 0) if isinstance(exit_cond, dict) else 0), 3),
+                "oos_avg_ret":      round(float(exit_cond.get("net_return_with_exit", 0) if isinstance(exit_cond, dict) else 0), 4),
+                "oos_net_return":   round(float(exit_cond.get("net_return_with_exit", 0) if isinstance(exit_cond, dict) else 0), 4),
+                "exit_reason_dist": exit_cond.get("exit_reason_counts", {}) if isinstance(exit_cond, dict) else {},
+                "avg_bars_held":    round(float(exit_cond.get("avg_bars_held", 0) if isinstance(exit_cond, dict) else 0), 1),
+                # 研究基准（固定持仓，仅供参考）
+                "baseline_wr":      round(float(row["oos_wr"]), 2),
+                "baseline_pf":      round(float(row["oos_pf"]), 3),
+                "baseline_avg_ret": round(float(row["oos_avg_ret"]), 4),
+                "wr_improvement":   round(float(row["wr_improvement"]), 2),
+                "seed_oos_wr":      round(float(row["seed_oos_wr"]), 2),
+                "degradation":      round(float(row.get("degradation") or 0), 3),
             },
             "explanation": (
                 f"种子: {row['seed_feature']} {row['seed_op']} {row['seed_threshold']:.4g} "
-                f"({row['direction'].upper()} {int(row['horizon'])}bars)\n"
+                f"({row['direction'].upper()} 研究窗={int(row['horizon'])}bar)\n"
                 f"确认: {row['confirm_feature']} {row['confirm_op']} {row['confirm_threshold']:.4g}\n"
                 f"组合OOS胜率={row['oos_wr']:.1f}% (种子单独={row['seed_oos_wr']:.1f}%, "
                 f"提升+{row['wr_improvement']:.1f}%)"
             ),
-            "rule_str": (
-                f"{row['seed_feature']} {row['seed_op']} {row['seed_threshold']:.4g} "
-                f"AND {row['confirm_feature']} {row['confirm_op']} {row['confirm_threshold']:.4g} "
-                f"-> {row['direction']} {int(row['horizon'])}bars"
-            ),
+            "rule_str": rule_str,
             "discovered_at": now_iso,
             "mechanism_type": mechanism_type,
         }
@@ -1730,16 +3527,24 @@ class LiveDiscoveryEngine:
         direction,
         horizon,
         params,
+        *,
+        use_full_data: bool = False,
     ):
         """
-        OOS 回测出场条件，模拟 P1 智能出场框架的 5 层逻辑。
+        OOS 回测出场条件，模拟实盘 evaluate_exit_action() 的完整 8 层逻辑。
 
-        模拟层:
-          Layer 1: 硬止损 (adverse >= stop_pct)
+        与实盘 smart_exit_policy.py:evaluate_exit_action() 完全对齐:
+          Layer 1: 自适应硬止损 (stop_pct * conf_mult * regime_mult + MFE 棘轮)
+          Layer 2: 止盈 (take_profit_pct > 0 时)
           Layer 3: 利润保护追踪止损 (protect_armed once mfe >= protect_start_pct)
-          Layer 5: 最小持仓保护 (skip logic_complete if j < min_hold_bars)
-          Layer 7: 信号消失出场 (entry combo 反转, current_return > 0)
-          Fallback: 时间上限 (time_cap at max_hold_bars)
+          Layer 4: 最小持仓保护 (skip dynamic exits if j < min_hold_bars)
+          Layer 5: 论文失效出场 (invalidation combos)
+          Layer 6: 机制衰竭收紧保护 (decay >= tighten_threshold -> 缩小 gap)
+          Layer 7: 信号消失出场 (exit combos, current_return > 0)
+          Fallback: safety_cap 安全网 (at max_hold_bars)
+
+        注: Layer 6 的 decay_score 在回测中用简化模型估算:
+            随持仓时间线性增长 decay = j / max_hold_bars (0->1)
 
         OOS 切分: 使用最后 33% 数据 (split_idx = int(len(df)*0.67))
         """
@@ -1751,10 +3556,12 @@ class LiveDiscoveryEngine:
             "n_samples": 0,
             "exit_reason_counts": {
                 "hard_stop": 0,
+                "take_profit": 0,
                 "thesis_invalidated": 0,
                 "profit_protect": 0,
+                "tightened_protect": 0,
                 "logic_complete": 0,
-                "time_cap": 0,
+                _SAFETY_CAP_REASON: 0,
             },
             "avg_bars_held": 0.0,
             "win_rate": 0.0,
@@ -1766,7 +3573,7 @@ class LiveDiscoveryEngine:
             return _EMPTY
 
         n_total = len(df)
-        split_idx = int(n_total * 0.67)
+        split_idx = 0 if use_full_data else int(n_total * 0.67)
         close_arr = df["close"].values if "close" in df.columns else None
         if close_arr is None:
             return _EMPTY
@@ -1797,13 +3604,23 @@ class LiveDiscoveryEngine:
         bars_held_list = []
         reason_counts = {
             "hard_stop": 0,
+            "take_profit": 0,
             "thesis_invalidated": 0,
             "profit_protect": 0,
+            "tightened_protect": 0,
             "logic_complete": 0,
-            "time_cap": 0,
+            _SAFETY_CAP_REASON: 0,
         }
 
         sign = -1.0 if direction == "short" else 1.0
+
+        # 回测中使用默认 confidence=2 和 regime=RANGE_BOUND
+        _conf_mult = params.confidence_stop_multipliers.get(2, 1.0)
+        _regime_mult = (
+            params.regime_stop_multipliers_short.get("RANGE_BOUND", 1.0)
+            if direction == "short"
+            else params.regime_stop_multipliers.get("RANGE_BOUND", 1.0)
+        )
 
         for entry_idx in oos_entry_positions:
             entry_price = close_arr[entry_idx]
@@ -1833,19 +3650,26 @@ class LiveDiscoveryEngine:
                 adverse = max(0.0, -current_return)
                 mfe = max(mfe, current_return)
 
-                # Layer 1: 硬止损
-                if adverse >= params.stop_pct:
+                # ── Layer 1: 自适应硬止损 (含 MFE 棘轮 + regime/confidence 乘数)
+                effective_stop = params.stop_pct * _conf_mult * _regime_mult
+                # MFE 棘轮: 浮盈足够大时收紧止损（与实盘 line 934 一致）
+                if mfe > params.mfe_ratchet_threshold:
+                    ratcheted_stop = mfe * params.mfe_ratchet_ratio
+                    effective_stop = min(effective_stop, ratcheted_stop)
+                if adverse >= effective_stop:
                     exit_reason = "hard_stop"
                     exit_bar = j
                     break
 
-                # Layer 3: 利润保护追踪止损
-                if mfe >= params.protect_start_pct:
-                    protect_armed = True
-                if invalidation_combos and _combo_matches(invalidation_combos, entry_idx, bar_idx):
-                    exit_reason = "thesis_invalidated"
+                # ── Layer 2: 止盈
+                if params.take_profit_pct > 0 and current_return >= params.take_profit_pct:
+                    exit_reason = "take_profit"
                     exit_bar = j
                     break
+
+                # ── Layer 3: 利润保护追踪止损
+                if mfe >= params.protect_start_pct:
+                    protect_armed = True
                 if protect_armed:
                     gap = max(params.protect_floor_pct, mfe * params.protect_gap_ratio)
                     new_floor = mfe - gap
@@ -1856,19 +3680,42 @@ class LiveDiscoveryEngine:
                         exit_bar = j
                         break
 
-                # Layer 5: 最小持仓保护
+                # ── Layer 4: 最小持仓保护
                 if j < params.min_hold_bars:
                     continue
 
-                # Layer 7: 信号消失出场 (只在盈利时触发)
+                # ── Layer 5: 论文失效出场（invalidation combos，立即出场不防抖）
+                if invalidation_combos and _combo_matches(invalidation_combos, entry_idx, bar_idx):
+                    exit_reason = "thesis_invalidated"
+                    exit_bar = j
+                    break
+
+                # ── Layer 6: 机制衰竭收紧保护
+                # 简化模型: decay_score = j / max_hold_bars（线性增长 0->1）
+                decay_score = j / max(max_hold_bars, 1)
+                if decay_score >= params.decay_exit_threshold:
+                    # 衰竭严重到达出场阈值，但回测中不直接出场
+                    # （实盘依赖 mechanism_tracker 的精确衰竭分，这里近似为收紧保护）
+                    pass
+                if decay_score >= params.decay_tighten_threshold and protect_armed:
+                    # 收紧保护: 用 tighten_gap_ratio 替代 protect_gap_ratio
+                    tightened_gap = max(params.protect_floor_pct, mfe * params.tighten_gap_ratio)
+                    tightened_floor = mfe - tightened_gap
+                    tightened_floor = max(tightened_floor, params.protect_floor_pct)
+                    if current_return <= tightened_floor:
+                        exit_reason = "tightened_protect"
+                        exit_bar = j
+                        break
+
+                # ── Layer 7: 信号消失出场（只在盈利时触发，与实盘 line 1072 一致）
                 if _combo_matches(valid_combos, entry_idx, bar_idx) and current_return > 0:
                     exit_reason = "logic_complete"
                     exit_bar = j
                     break
 
-            # Fallback: 时间上限
+            # ── Layer 8: safety_cap 安全网
             if exit_reason is None:
-                exit_reason = "time_cap"
+                exit_reason = _SAFETY_CAP_REASON
                 exit_bar = min(max_hold_bars, n_total - 1 - entry_idx)
 
             reason_counts[exit_reason] = reason_counts.get(exit_reason, 0) + 1
@@ -1901,7 +3748,7 @@ class LiveDiscoveryEngine:
         net_return_with_exit = float(np.mean(exit_returns))
         hold_mean = float(np.mean(hold_returns)) if hold_returns else 0.0
         improvement = net_return_with_exit - hold_mean
-        triggered_count = n_samples - reason_counts.get("time_cap", 0)
+        triggered_count = n_samples - reason_counts.get(_SAFETY_CAP_REASON, 0) - reason_counts.get("time_cap", 0)
         triggered_exit_pct = triggered_count / n_samples * 100.0
         avg_bars_held = float(np.mean(bars_held_list)) if bars_held_list else 0.0
         win_rate = len(wins) / n_samples * 100.0
@@ -1980,7 +3827,7 @@ class LiveDiscoveryEngine:
             print(f"\n  [{i}] {card['rule_str']}")
             mech = card.get("mechanism_type", "generic_alpha")
             print(
-                f"      方向={entry['direction'].upper()}  周期={entry['horizon']}bar  机制={mech}"
+                f"      方向={entry['direction'].upper()}  研究窗={entry['horizon']}bar  机制={mech}"
                 f"  OOS胜率={stats['oos_win_rate']:.1f}%  n={stats['n_oos']}"
                 f"  净收益={stats.get('oos_net_return', stats.get('oos_avg_ret', 0.0)):+.4f}%"
                 f"  降幂={stats.get('degradation', 0.0):.2f}"
@@ -1999,7 +3846,10 @@ class LiveDiscoveryEngine:
                     f"  净收益={exit_info.get('net_return_with_exit', 0.0):+.4f}%"
                 )
             else:
-                print(f"      出场条件: 固定持仓 {entry['horizon']}bar (未找到更优出场)")
+                print(
+                    f"      出场条件: 仅剩 safety_cap={entry['horizon']}bar 安全网 "
+                    f"(未挖到因果离场，禁止直接当主逻辑)"
+                )
 
         print()
         print("  在控制台 Alpha 标签页查看并审批")

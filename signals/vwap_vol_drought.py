@@ -38,7 +38,8 @@ COOLDOWN_BARS = 60              # 1-min 冷却（60 分钟）
 class VwapVolDroughtDetector(SignalDetector):
     name = "P1-8_vwap_vol_drought"
     direction = "both"   # SHORT 或 LONG，由实际条件决定
-    hold_bars = 30
+    research_horizon_bars = 30
+    hold_bars = research_horizon_bars
     required_columns = ["vwap_deviation", "volume", "high", "low"]
 
     def detect(self, df: pd.DataFrame) -> pd.Series:
@@ -55,6 +56,7 @@ class VwapVolDroughtDetector(SignalDetector):
         vwap_dev = float(latest.get("vwap_deviation", float("nan")))
         if pd.isna(vwap_dev):
             return None
+        research_horizon = self.resolved_research_horizon_bars()
 
         drought_cnt, _ = compute_state_blocks(df, _TF_MIN)
 
@@ -69,7 +71,8 @@ class VwapVolDroughtDetector(SignalDetector):
                 "phase":            "P1",
                 "name":             self.name,
                 "direction":        "short",
-                "horizon":          self.hold_bars,
+                "horizon":          research_horizon,
+                "research_horizon_bars": research_horizon,
                 "timestamp_ms":     int(latest.get("timestamp", 0)),
                 "desc":             (
                     f"[P1-8] VWAP overextended + vol drought "
@@ -93,7 +96,8 @@ class VwapVolDroughtDetector(SignalDetector):
                 "phase":            "P1",
                 "name":             self.name,
                 "direction":        "long",
-                "horizon":          self.hold_bars,
+                "horizon":          research_horizon,
+                "research_horizon_bars": research_horizon,
                 "timestamp_ms":     int(latest.get("timestamp", 0)),
                 "desc":             (
                     f"[P1-8] VWAP oversold + vol drought "

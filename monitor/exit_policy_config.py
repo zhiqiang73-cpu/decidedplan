@@ -1,4 +1,9 @@
-"""Exit parameter loading and lookup helpers."""
+"""Exit parameter loading and lookup helpers.
+
+``base_horizon`` remains the research/observation window estimated during
+discovery. It is *not* a promise to exit after N bars; the runtime only uses it
+to size the final safety cap when all dynamic exit logic stays silent.
+"""
 
 from __future__ import annotations
 
@@ -57,9 +62,9 @@ class ExitParams:
         "VOL_EXPANSION": 1.5,
         "CRISIS": 0.5,
     })
-    # SHORT 方向独立 regime 乘数
-    # 回测验证: 多数 SHORT 策略在 QUIET_TREND 下 regime_mult=0.6 最优
-    # (P1-11 SHORT 例外, 最优 1.3, 通过 best_params.json 单独覆盖)
+    # SHORT 鏂瑰悜鐙珛 regime 涔樻暟
+    # 鍥炴祴楠岃瘉: 澶氭暟 SHORT 绛栫暐鍦?QUIET_TREND 涓?regime_mult=0.6 鏈€浼?
+    # (P1-11 SHORT 渚嬪, 鏈€浼?1.3, 閫氳繃 best_params.json 鍗曠嫭瑕嗙洊)
     regime_stop_multipliers_short: dict = field(default_factory=lambda: {
         "QUIET_TREND": 0.6,
         "RANGE_BOUND": 1.0,
@@ -155,10 +160,15 @@ DEFAULT_EXIT_PARAMS: Dict[str, ExitParams] = {
 }
 
 
-def resolve_max_hold_bars(family: str, base_horizon: int, params: ExitParams) -> int:
+def resolve_safety_cap_bars(family: str, base_horizon: int, params: ExitParams) -> int:
     family_cap = FAMILY_MIN_HOLD_CAPS.get(family, max(6, base_horizon * 2))
     scaled_cap = max(base_horizon * params.max_hold_factor, params.min_hold_bars + 1)
     return max(family_cap, scaled_cap)
+
+
+def resolve_max_hold_bars(family: str, base_horizon: int, params: ExitParams) -> int:
+    """Backward-compatible alias for older call sites."""
+    return resolve_safety_cap_bars(family, base_horizon, params)
 
 
 def _load_raw_params() -> dict:
@@ -205,11 +215,11 @@ def get_exit_params_for_signal(
 
 
 def has_explicit_exit_params(family: str, direction: str | None = None) -> bool:
-    raw = _load_raw_params()
-    if not raw:
-        return False
     direction_key = resolve_exit_params_key(family, direction)
-    return direction_key in raw or family in raw
+    raw = _load_raw_params()
+    if direction_key in raw or family in raw:
+        return True
+    return direction_key in DEFAULT_EXIT_PARAMS or family in DEFAULT_EXIT_PARAMS
 
 
 def save_exit_params(key: str, params: ExitParams) -> None:
