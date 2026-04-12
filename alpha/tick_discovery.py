@@ -457,8 +457,9 @@ class TickDiscoveryEngine:
         logger.info("[TICK-DISCOVERY] 扫描完成: %d 条结果", len(scan_df))
 
         # ── Step 3: 双向 AtomMiner（long + short，禁止用 IC 符号锁定方向） ──
-        # AtomMiner 不接受 train_frac/fee_pct（由 WalkForwardValidator 控制）
-        miner = AtomMiner()
+        # tick 数据必须用极端触发率：P系列信号触发率 0.1~0.3%，不能用默认 25%
+        # 只有在极端条件下（卖方/买方真的耗尽了）才触发，胜率才会高
+        miner = AtomMiner(max_trigger_rate=0.05)  # 最多触发5%的bar（极端异常）
         # 取 IC |ICIR| 最高的 Top-N 特征
         seed_rows = self._select_seed_rows(scan_df)
         logger.info("[TICK-DISCOVERY] AtomMiner 种子: %d 行", len(seed_rows))
