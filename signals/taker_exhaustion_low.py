@@ -51,7 +51,7 @@ _VWAP_HIGH_THR_D   = 0.020180    # vwap_deviation > (p95 at 10m IS) — 与 P1-8
 _TAKER_DELTA_THR_D = -1.092845   # taker_ratio_delta5 < (p5 at 10m IS)
 _HOLD_BARS_SHORT   = 30
 
-COOLDOWN_BARS = 30
+COOLDOWN_BARS = 20
 
 
 class TakerExhaustionLowDetector(SignalDetector):

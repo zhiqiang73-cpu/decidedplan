@@ -32,7 +32,7 @@ _VWAP_LONG_THR    = -0.023646   # vwap_deviation < 此值 = 偏低 (p2  at 10m)
 _DROUGHT_SHORT_MIN = 4          # 连续 10min 干旱块数（SHORT，p97 at 10m）
 _DROUGHT_LONG_MIN  = 3          # 连续 10min 干旱块数（LONG， p95 at 10m）
 _TF_MIN = 10                    # 聚合粒度（分钟）
-COOLDOWN_BARS = 60              # 1-min 冷却（60 分钟）
+COOLDOWN_BARS = 40              # 1-min 冷却（60 分钟）
 
 
 class VwapVolDroughtDetector(SignalDetector):

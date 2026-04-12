@@ -39,7 +39,7 @@ OI_DELEVER      = -0.03
 RANGE_CENTER_LOW  = 0.30
 RANGE_CENTER_HIGH = 0.70
 CONFIRM_BARS    = 3
-COOLDOWN_BARS   = 120
+COOLDOWN_BARS   = 60
 
 
 def _safe_get(row, col, default=None):

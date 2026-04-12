@@ -38,7 +38,7 @@ _FUNDING_THR_A   = -0.000025   # funding_rate < (p3 approx at 1m, IS)
 _RANGE4H_THR_B   = 0.991977    # position_in_range_4h > (p99 at 1m, IS)
 _FUNDING_THR_B   = -0.000034   # funding_rate < (p2 at 1m, IS)
 
-COOLDOWN_BARS = 30
+COOLDOWN_BARS = 20
 
 
 class HighPosFundingDetector(SignalDetector):

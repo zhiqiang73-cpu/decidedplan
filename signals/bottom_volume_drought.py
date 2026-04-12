@@ -18,7 +18,7 @@ from signals.base import SignalDetector
 
 logger = logging.getLogger(__name__)
 
-COOLDOWN_BARS = 30
+COOLDOWN_BARS = 20
 
 _VARIANTS = (
     {

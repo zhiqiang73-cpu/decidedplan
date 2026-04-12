@@ -1046,7 +1046,7 @@ class ExecutionEngine:
             raw_signal_name=str((pending.entry_snapshot or {}).get("raw_signal_name") or pending.signal_name),
         )
         cooldown_key = f"{pending.family}|{pending.direction}"
-        self._signal_cooldown[cooldown_key] = time.time() + 300
+        self._signal_cooldown[cooldown_key] = time.time() + 180
         logger.info(
             "[EXEC] Order not filled %s order_id=%s (cooldown 5min)",
             pending.signal_name,
@@ -1280,8 +1280,8 @@ class ExecutionEngine:
         # should not waste cooldown time since the trade was managed correctly.
         _HARD_STOP_REASONS = {"hard_stop"}
         _MECHANISM_DECAY_PREFIX = "mechanism_decay_"
-        _ALPHA_LOSS_COOLDOWN_S = 600  # 10 minutes (alpha cards)
-        _DECAY_COOLDOWN_S = 180       # 3 minutes (P1 signals)
+        _ALPHA_LOSS_COOLDOWN_S = 420  # 7 minutes (alpha cards)
+        _DECAY_COOLDOWN_S = 120       # 2 minutes (P1 signals)
         _LOSS_THRESHOLD = -0.0002     # -0.02% gross, below which we count as a real loss
         if exit_reason in _HARD_STOP_REASONS or exit_reason.startswith(_MECHANISM_DECAY_PREFIX):
             ep = float(exit_price) if exit_price is not None else position.entry_price
@@ -1306,7 +1306,7 @@ class ExecutionEngine:
         # After safety_cap on A2 cards, apply 15-min cooldown.
         # If 60 bars elapsed without the trend materialising the setup is
         # structurally exhausted; immediate re-entry risks the same dead market.
-        _TIMECAP_COOLDOWN_S = 900  # 15 minutes
+        _TIMECAP_COOLDOWN_S = 600  # 10 minutes
         if exit_reason in {"time_cap", "safety_cap"} and position.family.startswith("A2"):
             cooldown_key = f"{position.family}|{position.direction}"
             self._signal_cooldown[cooldown_key] = time.time() + _TIMECAP_COOLDOWN_S

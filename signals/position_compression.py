@@ -43,7 +43,7 @@ _VWAP_LONG_THR         = -0.023646  # vwap_deviation   < (p2 at 10m)
 _COMP_LONG_10M_MIN     = 8          # 连续 10min 压缩块
 _COMP_LONG_10M_VWAP    = 6          # 连续 10min 压缩块（VWAP 版本，条件稍宽）
 
-COOLDOWN_BARS = 60
+COOLDOWN_BARS = 40
 
 
 class PositionCompressionDetector(SignalDetector):

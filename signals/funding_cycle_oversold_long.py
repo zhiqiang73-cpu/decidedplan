@@ -21,7 +21,7 @@ from signals.base import SignalDetector
 
 logger = logging.getLogger(__name__)
 
-COOLDOWN_BARS = 60
+COOLDOWN_BARS = 40
 
 # 2 core price-based variants + 2 VWAP-based variants
 # All require negative or zero funding as physical confirmation
@@ -70,7 +70,7 @@ class FundingCycleOversoldLong(SignalDetector):
     ]
 
     # 1 hour between runner triggers (ms)
-    runner_cooldown_ms = 3600000
+    runner_cooldown_ms = 1800000
 
     def detect(self, df: pd.DataFrame) -> pd.Series:
         result = pd.Series(False, index=df.index)

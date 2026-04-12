@@ -91,7 +91,7 @@ class SignalRunner:
         self,
         alpha_cooldown: int = 1,
         p2_startup_grace_bars: int = 3,
-        p2_group_cooldown_min: int = 5,
+        p2_group_cooldown_min: int = 3,
         p2_max_groups_per_bar: int = 2,
     ):
         self._alpha_checker = AlphaRuleChecker(cooldown_bars=alpha_cooldown)
@@ -123,7 +123,7 @@ class SignalRunner:
         ]
 
         self._new_signal_cooldown: dict[str, int] = {}
-        self._new_signal_cooldown_ms = 90 * 1000  # 90s (was 180s); exec layer has its own 5-15min cooldown
+        self._new_signal_cooldown_ms = 60 * 1000  # 60s; exec layer has its own 5-15min cooldown
 
         self._shared_cooldown_groups: dict[tuple[str, str], str] = {
             ("P1-8_vwap_vol_drought", "long"): "vwap_bottom_long",
@@ -326,7 +326,7 @@ class SignalRunner:
         return build_strategy_status_rows(has_explicit_exit_params)
 
     # OA-1 context-signal cooldown key -> last fired timestamp_ms
-    _OA1_COOLDOWN_MS = 300_000  # 5 minutes
+    _OA1_COOLDOWN_MS = 180_000  # 3 minutes
 
     def _generate_context_signals(
         self,
