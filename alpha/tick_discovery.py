@@ -30,6 +30,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr
 
 from core.tick_feature_engine import TickFeatureEngine
 from alpha.scanner import FeatureScanner
@@ -38,6 +39,18 @@ from alpha.walk_forward import WalkForwardValidator
 from utils.file_io import write_json_atomic
 
 logger = logging.getLogger(__name__)
+
+# ── Block State 种子定义（整数特征，用整数阈值构造 Atom） ─────────────────
+# 值含义：连续 N 个时间窗口满足条件的计数
+# 方向：吸收卖盘/买盘耗尽 -> long；动量衰竭 -> 双向；连续方向 -> 对应方向
+_BLOCK_STATE_SEEDS: dict[str, list[str]] = {
+    "tick_absorption_blocks":       ["long"],
+    "tick_exhaustion_blocks":       ["long", "short"],
+    "tick_direction_persist_long":  ["long"],
+    "tick_direction_persist_short": ["short"],
+}
+# 整数阈值列表，operator 固定 ">"，>0=>=1, >1=>=2, 以此类推
+_BLOCK_THRESHOLDS: list[int] = [0, 1, 2, 3, 4]
 
 # ── 输出目录 ──────────────────────────────────────────────────────────────────
 _TICK_OUTPUT_DIR = Path("alpha/output/tick")
@@ -456,7 +469,10 @@ class TickDiscoveryEngine:
             return []
         logger.info("[TICK-DISCOVERY] 扫描完成: %d 条结果", len(scan_df))
 
-        # ── Step 3: 双向 AtomMiner（long + short，禁止用 IC 符号锁定方向） ──
+        # ── 提前切分数据（Step 3B 和 Step 4 共用 IS/OOS） ─────────────────────
+        train_df, test_df = self._validator.split(df)
+
+        # ── Step 3A: 双向 AtomMiner（long + short，禁止用 IC 符号锁定方向） ─
         # tick 数据必须用极端触发率：P系列信号触发率 0.1~0.3%，不能用默认 25%
         # 只有在极端条件下（卖方/买方真的耗尽了）才触发，胜率才会高
         miner = AtomMiner(max_trigger_rate=0.05)  # 最多触发5%的bar（极端异常）
@@ -464,8 +480,18 @@ class TickDiscoveryEngine:
         seed_rows = self._select_seed_rows(scan_df)
         logger.info("[TICK-DISCOVERY] AtomMiner 种子: %d 行", len(seed_rows))
 
-        atoms = miner.mine_from_scan(df, seed_rows, top_n=len(seed_rows))
-        logger.info("[TICK-DISCOVERY] 挖掘到 %d 个 Atom (long + short 双向)", len(atoms))
+        ic_atoms = miner.mine_from_scan(df, seed_rows, top_n=len(seed_rows))
+        logger.info("[TICK-DISCOVERY] IC扫描挖掘 %d 个 Atom (long + short 双向)", len(ic_atoms))
+
+        # ── Step 3B: Block State 整数阈值挖掘（新增） ──────────────────────
+        block_atoms = self._mine_block_state_atoms(df, train_df, test_df, horizons)
+        logger.info("[TICK-DISCOVERY] Block State 挖掘 %d 个 Atom", len(block_atoms))
+
+        atoms = ic_atoms + block_atoms
+        logger.info(
+            "[TICK-DISCOVERY] 总计 Atom: %d（IC扫描=%d, BlockState=%d）",
+            len(atoms), len(ic_atoms), len(block_atoms),
+        )
 
         if not atoms:
             logger.warning("[TICK-DISCOVERY] 无 Atom，跳过")
@@ -474,11 +500,13 @@ class TickDiscoveryEngine:
                 total_atoms=0,
                 validated_count=0,
                 rejected=[],
+                block_atoms_count=0,
+                combo_count=0,
             )
             return []
 
         # ── Step 4: Walk-Forward 验证 ────────────────────────────────────────
-        train_df, test_df = self._validator.split(df)
+        # train_df, test_df 已在 Step 3 之前切分
         validated = []
         rejected: list[dict] = []
 
@@ -551,11 +579,21 @@ class TickDiscoveryEngine:
             validated.append((atom, report, p_dir, oos_m, is_m))
 
         logger.info("[TICK-DISCOVERY] Walk-Forward 通过: %d / %d 个 Atom", len(validated), len(atoms))
+
+        # ── Step 4.5: Combo 扫描（种子 + 确认因子）── ─────────────────────
+        # 对每个WF通过的atom，在OOS数据上寻找能提升P(MFE>MAE)的确认因子
+        combo_cards: list[dict] = []
+        if validated:
+            combo_cards = self._combo_scan(validated, train_df, test_df, horizons, window_seconds)
+            logger.info("[TICK-DISCOVERY] Combo 扫描新增 %d 张带确认因子的卡片", len(combo_cards))
+
         self._save_diagnostics(
             window_seconds,
             total_atoms=len(atoms),
             validated_count=len(validated),
             rejected=rejected,
+            block_atoms_count=len(block_atoms),
+            combo_count=len(combo_cards),
         )
 
         if not validated:
@@ -585,23 +623,27 @@ class TickDiscoveryEngine:
                 exit_params.get("stop_pct", 0),
             )
 
-        # ── Step 6: 方向分布统计 + 写文件 ────────────────────────────────────
-        n_long = sum(1 for c in results if c.get("direction") == "long")
-        n_short = sum(1 for c in results if c.get("direction") == "short")
+        # ── Step 6: 合并 combo 卡片 + 方向分布统计 + 写文件 ─────────────────
+        # combo_cards 是对已有atom的增强版，不计入 validated_count
+        all_results = results + combo_cards
+        n_long = sum(1 for c in all_results if c.get("direction") == "long")
+        n_short = sum(1 for c in all_results if c.get("direction") == "short")
         logger.info(
-            "[TICK-DISCOVERY] 总计 %d 个候选: LONG=%d SHORT=%d",
-            len(results), n_long, n_short,
+            "[TICK-DISCOVERY] 总计 %d 个候选（含combo=%d）: LONG=%d SHORT=%d",
+            len(all_results), len(combo_cards), n_long, n_short,
         )
 
-        self._save_pending(results, window_seconds)
+        self._save_pending(all_results, window_seconds)
         self._save_diagnostics(
             window_seconds,
             total_atoms=len(atoms),
             validated_count=len(validated),
             rejected=rejected,
-            results=results,
+            block_atoms_count=len(block_atoms),
+            combo_count=len(combo_cards),
+            results=all_results,
         )
-        return results
+        return all_results
 
     # ── 内部方法 ──────────────────────────────────────────────────────────────
 
@@ -650,6 +692,153 @@ class TickDiscoveryEngine:
             len(long_take), len(short_take), len(result),
         )
         return result.reset_index(drop=True)
+
+    def _mine_block_state_atoms(self, df, train_df, test_df, horizons):
+        import warnings as _warnings
+        atoms = []
+        n_total = len(df)
+        for feature, directions in _BLOCK_STATE_SEEDS.items():
+            if feature not in df.columns:
+                continue
+            if feature in train_df.columns and train_df[feature].max() == 0:
+                continue
+            col_all = df[feature].values
+            for horizon in horizons:
+                fwd_col = "fwd_ret_" + str(horizon)
+                if fwd_col not in df.columns:
+                    continue
+                fwd_all = df[fwd_col].values
+                valid_mask = (~np.isnan(col_all)) & (~np.isnan(fwd_all))
+                for thresh in _BLOCK_THRESHOLDS:
+                    entry_bool = (col_all > thresh) & valid_mask
+                    n_triggers = int(entry_bool.sum())
+                    trigger_rate = n_triggers / max(n_total, 1)
+                    if trigger_rate < 0.005 or trigger_rate > 0.15:
+                        continue
+                    if n_triggers < 30:
+                        continue
+                    try:
+                        with _warnings.catch_warnings():
+                            _warnings.simplefilter("ignore")
+                            ic_val, _ = spearmanr(col_all[entry_bool], fwd_all[entry_bool])
+                        if np.isnan(ic_val):
+                            ic_val = 0.0
+                    except Exception:
+                        ic_val = 0.0
+                    if feature in train_df.columns and fwd_col in train_df.columns:
+                        ci = train_df[feature].values
+                        fi = train_df[fwd_col].values
+                        vm = (~np.isnan(ci)) & (~np.isnan(fi))
+                        im = (ci > thresh) & vm
+                        n_is = int(im.sum())
+                    else:
+                        n_is = 0
+                        im = np.zeros(0, dtype=bool)
+                        fi = np.zeros(0)
+                    for direction in directions:
+                        sign = 1.0 if direction == "long" else -1.0
+                        dir_ic = round(ic_val * sign, 5)
+                        if n_is >= 5:
+                            g = fi[im] * sign * 100.0
+                            net = g - _MAKER_FEE_TOTAL
+                            wr = float((net > 0).mean())
+                            pf = _profit_factor(net)
+                            avg = float(net.mean())
+                        else:
+                            wr = pf = avg = 0.0
+                        atoms.append(CausalAtom(
+                            feature=feature, operator=">",
+                            threshold=float(thresh), direction=direction,
+                            horizon=horizon, ic=dir_ic, icir=0.0,
+                            win_rate=round(wr, 4), profit_factor=round(pf, 4),
+                            avg_return=round(avg, 4), n_triggers=n_triggers,
+                            trigger_rate=round(trigger_rate * 100, 4),
+                        ))
+                        logger.debug(
+                            "[BLOCK-STATE] %s>%d %s h=%d n=%d",
+                            feature, thresh, direction, horizon, n_triggers)
+        logger.info("[BLOCK-STATE] %d Block State Atoms", len(atoms))
+        return atoms
+
+    def _combo_scan(self, validated, train_df, test_df, horizons, window_seconds):
+        import hashlib as _hashlib
+        combo_cards = []
+        n_test = len(test_df)
+        if n_test == 0:
+            return combo_cards
+        for atom, wf_report, p_seed, oos_m, is_m in validated:
+            sf = atom.feature
+            so = atom.operator
+            st = atom.threshold
+            direction = atom.direction
+            horizon = atom.horizon
+            fwd_col = "fwd_ret_" + str(horizon)
+            if fwd_col not in test_df.columns:
+                continue
+            seed_mask = _build_entry_mask(test_df, sf, so, st)
+            for cf in _TICK_CONFIRM_FEATURES:
+                if cf == sf:
+                    continue
+                if cf not in train_df.columns or cf not in test_df.columns:
+                    continue
+                is_col = train_df[cf].dropna()
+                if len(is_col) < 20:
+                    continue
+                p5 = float(is_col.quantile(0.05))
+                p95 = float(is_col.quantile(0.95))
+                for cf_op, cf_thresh in [("<", p5), (">", p95)]:
+                    cm = _build_entry_mask(test_df, cf, cf_op, cf_thresh)
+                    combo = seed_mask & cm
+                    n_combo = int(combo.sum())
+                    if n_combo < _MIN_OOS_N:
+                        continue
+                    rate = n_combo / max(n_test, 1)
+                    if rate < 0.005 or rate > 0.15:
+                        continue
+                    p_combo = _p_mfe_gt_mae(test_df, combo, direction, horizon)
+                    if p_combo < _MIN_P_MFE_GT_MAE or p_combo <= p_seed:
+                        continue
+                    fv = test_df.loc[combo, fwd_col].dropna().values
+                    if len(fv) == 0:
+                        continue
+                    sign = 1.0 if direction == "long" else -1.0
+                    nv = fv * sign * 100.0 - _MAKER_FEE_TOTAL
+                    cwr = float((nv > 0).mean())
+                    cpf = _profit_factor(nv)
+                    cnet = float(nv.mean())
+                    cooled = _cooldown_mask(combo, cooldown=horizon)
+                    ep = _optimize_exit_params_tick(test_df, cooled, direction, horizon)
+                    card = self._build_card(
+                        atom, wf_report, p_combo, oos_m, is_m, ep, window_seconds)
+                    raw = ("{s}s:{sf}:{so}:{st:.6f}:{d}:h{h}+{cf}:{co}:{ct:.6f}"
+                        .format(s=window_seconds, sf=sf, so=so, st=st,
+                                d=direction, h=horizon, cf=cf, co=cf_op, ct=cf_thresh))
+                    card["id"] = "TC-" + _hashlib.sha1(raw.encode()).hexdigest()[:8].upper()
+                    card["wf_stats"]["p_mfe_gt_mae"] = round(p_combo, 3)
+                    card["wf_stats"]["oos_wr"] = round(cwr * 100, 2)
+                    card["wf_stats"]["oos_n"] = n_combo
+                    card["wf_stats"]["oos_net"] = round(cnet, 4)
+                    card["wf_stats"]["oos_pf"] = round(cpf, 3)
+                    card["combo_condition"] = {
+                        "feature": cf, "operator": cf_op,
+                        "threshold": round(cf_thresh, 6),
+                        "p_mfe_gt_mae_seed": round(p_seed, 3),
+                        "p_mfe_gt_mae_combo": round(p_combo, 3),
+                        "n_triggers_oos": n_combo,
+                        "trigger_rate_oos": round(rate * 100, 4),
+                    }
+                    card["notes"] = (
+                        "Combo:{sf}>{st:.4g}+{cf}{co}{ct:.4g} "
+                        "P(dir):{ps:.1f}%->{pc:.1f}%".format(
+                            sf=sf, st=st, cf=cf, co=cf_op, ct=cf_thresh,
+                            ps=p_seed*100, pc=p_combo*100)
+                    )
+                    combo_cards.append(card)
+                    logger.info(
+                        "[COMBO] %s+%s%s%.4g P:%.1f%%->%.1f%% n=%d",
+                        sf[:20], cf[:15], cf_op, cf_thresh,
+                        p_seed*100, p_combo*100, n_combo)
+        return combo_cards
 
     @staticmethod
     def _build_card(
@@ -745,6 +934,8 @@ class TickDiscoveryEngine:
         total_atoms: int,
         validated_count: int,
         rejected: list[dict],
+        block_atoms_count: int = 0,
+        combo_count: int = 0,
         results: list[dict] | None = None,
     ) -> None:
         """保存逐笔发现诊断，避免 0 候选时没有尸检报告。"""
@@ -764,6 +955,8 @@ class TickDiscoveryEngine:
                 "total_atoms": int(total_atoms),
                 "validated_count": int(validated_count),
                 "rejected_count": int(len(rejected)),
+                "block_atoms_count": int(block_atoms_count),
+                "combo_count": int(combo_count),
                 "candidate_count": int(len(results or [])),
             },
             "rejected_atoms": rejected,
