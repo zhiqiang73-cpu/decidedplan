@@ -525,13 +525,14 @@ class AutoPromoter:
         if degradation is not None and float(degradation) < 0.5:
             return False
 
-        # MFE/MAE 比率 >= 1.5（核心指标：有利方向走的必须比不利方向多50%以上）
-        # 注意：MFE_cov@0.04% 对 BTC 无意义（任何入场都能轻松达到90%+），已废弃
-        mfe_mae = (
-            stats.get("mfe_mae_ratio")
-            or wf_stats.get("mfe_mae_ratio")
+        # P(MFE > MAE) >= 65%：入场后方向正确概率（核心门槛）
+        # 含义：触发入场后，有利幅度 > 不利幅度 的次数占比 >= 65%
+        # 做多 = 上涨幅度 > 下跌幅度；做空 = 下跌幅度 > 上涨幅度
+        p_mfe_gt_mae = (
+            stats.get("p_mfe_gt_mae")
+            or wf_stats.get("p_mfe_gt_mae")
         )
-        if mfe_mae is not None and float(mfe_mae) < 1.5:
+        if p_mfe_gt_mae is not None and float(p_mfe_gt_mae) < 0.65:
             return False
 
         return True

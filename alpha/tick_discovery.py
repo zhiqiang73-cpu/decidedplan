@@ -46,10 +46,10 @@ _TICK_OUTPUT_DIR = Path("alpha/output/tick")
 _MAKER_FEE_TOTAL = 0.04   # %
 
 # ── 质量门槛 ──────────────────────────────────────────────────────────────────
-_MIN_OOS_WR    = 40.0    # 固定horizon WR宽松预筛（不可靠，真正门槛是MFE/MAE比率）
+_MIN_OOS_WR    = 40.0    # 固定horizon WR宽松预筛（不可靠，真正门槛是 P(MFE>MAE)>=65%）
 _MIN_OOS_N     = 100     # OOS 触发次数（tick 自相关高，比 1m 要求更多）
 _MIN_OOS_NET   = 0.0     # OOS 净收益 > 0
-_MIN_MFE_MAE_RATIO = 1.5 # MFE/MAE 比率 >= 1.5（核心门槛：有利方向走的比不利方向多50%以上）
+_MIN_P_MFE_GT_MAE  = 0.65 # P(MFE > MAE) >= 65%（核心门槛：入场后方向正确概率）
 _TRAIN_FRAC    = 0.60    # 60/40 切分（比 1m 更保守）
 _MAX_COMBO_COND = 1      # 最多 1 个确认条件（防止过拟合）
 _MAX_SIGNAL_AUTOCORR = 0.3  # 信号触发的 lag-1 自相关上限
@@ -104,19 +104,16 @@ def _profit_factor(returns: np.ndarray) -> float:
     return float(wins.sum() / loss_sum)
 
 
-def _mfe_mae_ratio(df: pd.DataFrame, mask: pd.Series, direction: str, horizon: int) -> float:
+def _p_mfe_gt_mae(df: pd.DataFrame, mask: pd.Series, direction: str, horizon: int) -> float:
     """
-    计算 MFE/MAE 比率：均值(最大有利偏移) / 均值(最大不利偏移)
+    计算 P(MFE > MAE)：入场后方向正确概率（核心门槛）
 
-    使用预计算的 fwd_max_ret_{horizon} 和 fwd_min_ret_{horizon} 列：
-    - fwd_max_ret_N: horizon bars 内的最大正向收益率（价格上涨最多时）
-    - fwd_min_ret_N: horizon bars 内的最小收益率（价格下跌最多时，为负数）
+    含义：触发入场后，有利幅度 > 不利幅度 的次数 / 总触发次数
+    - 做多：上涨幅度 > 下跌幅度 的概率（MFE=最大涨幅，MAE=最大跌幅）
+    - 做空：下跌幅度 > 上涨幅度 的概率（MFE=最大跌幅，MAE=最大涨幅）
 
-    对 long：MFE = fwd_max_ret（价格涨），MAE = abs(fwd_min_ret)（价格跌）
-    对 short：MFE = abs(fwd_min_ret)（价格跌），MAE = fwd_max_ret（价格涨）
-
-    >= 1.5 说明有利方向走的比不利方向多50%以上，有真实方向性边缘。
-    MFE_cov@0.04% 对 BTC 无意义（任何入场都能轻松达到90%+），已废弃。
+    >= 0.65 表示：100次触发里，至少65次价格朝正确方向走得更多。
+    这就是"猜对方向的概率"，是入场质量的核心衡量标准。
     """
     fwd_max_col = f"fwd_max_ret_{horizon}"
     fwd_min_col = f"fwd_min_ret_{horizon}"
@@ -128,24 +125,22 @@ def _mfe_mae_ratio(df: pd.DataFrame, mask: pd.Series, direction: str, horizon: i
     if len(triggered) < 5:
         return 0.0
 
-    max_rets = triggered[fwd_max_col].dropna() * 100.0   # 最大正向收益率 %
+    max_rets = triggered[fwd_max_col].dropna() * 100.0   # 最大上涨幅度 %
     min_rets = triggered[fwd_min_col].dropna().abs() * 100.0  # 最大下跌幅度 %（取正）
 
     if direction == "long":
-        mfes = max_rets.clip(lower=0)  # 价格涨 = long的MFE
-        maes = min_rets                # 价格跌 = long的MAE
+        mfes = max_rets.clip(lower=0)  # 做多：有利方向 = 涨
+        maes = min_rets                # 做多：不利方向 = 跌
     else:  # short
-        mfes = min_rets                # 价格跌 = short的MFE
-        maes = max_rets.clip(lower=0)  # 价格涨 = short的MAE
+        mfes = min_rets                # 做空：有利方向 = 跌
+        maes = max_rets.clip(lower=0)  # 做空：不利方向 = 涨
 
-    # 只保留 MFE 和 MAE 都 > 0 的有效对
+    # 只保留 MFE 和 MAE 都 > 0 的有效对（两个方向都动过才有意义）
     valid = (mfes > 0) & (maes > 0)
     if valid.sum() < 5:
         return 0.0
 
-    mean_mfe = float(mfes[valid].mean())
-    mean_mae = float(maes[valid].mean())
-    return round(mean_mfe / mean_mae, 3) if mean_mae > 0 else 0.0
+    return round(float((mfes[valid] > maes[valid]).mean()), 3)
 
 
 def _signal_autocorr(mask: pd.Series, lag: int = 1) -> float:
@@ -532,27 +527,27 @@ class TickDiscoveryEngine:
             if report.get("degradation", 0) < 0.50:
                 _record_reject(atom, report, f"样本外退化过大: {report.get('degradation')} < 0.50")
                 continue
-            # MFE/MAE 比率门控（替代废弃的 MFE_cov@0.04%）
+            # P(MFE > MAE) 门控：入场后方向正确概率 >= 65%
             test_mask = _build_entry_mask(test_df, atom.feature, atom.operator, atom.threshold)
-            mfe_mae = _mfe_mae_ratio(test_df, test_mask, atom.direction, atom.horizon)
-            if mfe_mae < _MIN_MFE_MAE_RATIO:
-                _record_reject(atom, report, f"MFE/MAE比率不足: {mfe_mae:.2f} < {_MIN_MFE_MAE_RATIO:.1f}", mfe_cov=mfe_mae)
+            p_dir = _p_mfe_gt_mae(test_df, test_mask, atom.direction, atom.horizon)
+            if p_dir < _MIN_P_MFE_GT_MAE:
+                _record_reject(atom, report, f"方向正确概率不足: {p_dir:.1%} < {_MIN_P_MFE_GT_MAE:.0%}", mfe_cov=p_dir)
                 logger.debug(
-                    "[TICK-DISCOVERY] 跳过 %s: MFE/MAE=%.2f < %.1f",
-                    atom.rule_str()[:40], mfe_mae, _MIN_MFE_MAE_RATIO,
+                    "[TICK-DISCOVERY] 跳过 %s: 方向正确概率=%.1f%% < 65%%",
+                    atom.rule_str()[:40], p_dir * 100,
                 )
                 continue
             # 信号自相关门控（防止高频抱团信号）
             full_mask = _build_entry_mask(df, atom.feature, atom.operator, atom.threshold)
             autocorr = _signal_autocorr(full_mask, lag=1)
             if abs(autocorr) > _MAX_SIGNAL_AUTOCORR:
-                _record_reject(atom, report, f"信号自相关超限: {autocorr:.3f} > {_MAX_SIGNAL_AUTOCORR}", mfe_cov=mfe_mae, autocorr=autocorr)
+                _record_reject(atom, report, f"信号自相关超限: {autocorr:.3f} > {_MAX_SIGNAL_AUTOCORR}", mfe_cov=p_dir, autocorr=autocorr)
                 logger.debug(
                     "[TICK-DISCOVERY] 跳过 %s: 信号自相关 %.3f 超限",
                     atom.rule_str()[:40], autocorr,
                 )
                 continue
-            validated.append((atom, report, mfe_mae, oos_m, is_m))
+            validated.append((atom, report, p_dir, oos_m, is_m))
 
         logger.info("[TICK-DISCOVERY] Walk-Forward 通过: %d / %d 个 Atom", len(validated), len(atoms))
         self._save_diagnostics(
@@ -568,7 +563,7 @@ class TickDiscoveryEngine:
         # ── Step 5: 出场参数网格扫描（数据驱动，禁止硬编码） ────────────────
         # 对每个通过 WF 的 atom，用 OOS 数据网格扫描最优止损/保本参数
         results = []
-        for atom, wf_report, mfe_mae, oos_m, is_m in validated:
+        for atom, wf_report, p_dir, oos_m, is_m in validated:
             full_mask = _build_entry_mask(df, atom.feature, atom.operator, atom.threshold)
             # 添加 cooldown：同方向连续触发，只保留第一个
             cooled_mask = _cooldown_mask(full_mask, cooldown=atom.horizon)
@@ -578,14 +573,14 @@ class TickDiscoveryEngine:
             )
 
             # ── 构建策略卡片 ──────────────────────────────────────────────
-            card = self._build_card(atom, wf_report, mfe_mae, oos_m, is_m, exit_params, window_seconds)
+            card = self._build_card(atom, wf_report, p_dir, oos_m, is_m, exit_params, window_seconds)
             results.append(card)
             logger.info(
-                "[TICK-DISCOVERY] 候选: %s | OOS WR=%.1f%% n=%d MFE/MAE=%.2f stop=%.2f%%",
+                "[TICK-DISCOVERY] 候选: %s | OOS WR=%.1f%% n=%d 方向正确率=%.1f%% stop=%.2f%%",
                 atom.rule_str()[:40],
                 oos_m.get("win_rate") or 0,
                 oos_m.get("n_triggers") or 0,
-                mfe_mae,
+                p_dir * 100,
                 exit_params.get("stop_pct", 0),
             )
 
@@ -659,7 +654,7 @@ class TickDiscoveryEngine:
     def _build_card(
         atom: CausalAtom,
         wf_report: dict,
-        mfe_mae_ratio: float,
+        p_dir: float,
         oos_m: dict,
         is_m: dict,
         exit_params: dict,
@@ -692,7 +687,7 @@ class TickDiscoveryEngine:
                 "oos_pf":         round(oos_m.get("profit_factor") or 0, 3),
                 "is_wr":          round(is_m.get("win_rate") or 0, 2),
                 "degradation":    round(wf_report.get("degradation", 0), 3),
-                "mfe_mae_ratio":  round(mfe_mae_ratio, 3),
+                "p_mfe_gt_mae":   round(p_dir, 3),  # 方向正确概率，核心门槛
             },
             # 出场参数：全部来自网格扫描，禁止硬编码
             "exit_params": {
@@ -761,7 +756,7 @@ class TickDiscoveryEngine:
                 "min_oos_wr": _MIN_OOS_WR,
                 "min_oos_n": _MIN_OOS_N,
                 "min_oos_net": _MIN_OOS_NET,
-                "min_mfe_mae_ratio": _MIN_MFE_MAE_RATIO,
+                "min_p_mfe_gt_mae": _MIN_P_MFE_GT_MAE,
                 "max_signal_autocorr": _MAX_SIGNAL_AUTOCORR,
             },
             "summary": {

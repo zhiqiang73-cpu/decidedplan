@@ -184,22 +184,23 @@ class WalkForwardValidator:
         mfe_result = self._compute_mfe_mae(atom, test_df)
         mfe_mae_ratio   = mfe_result["mfe_mae_ratio"]
         mfe_coverage_rate = mfe_result["coverage_rate"]
+        p_mfe_gt_mae    = mfe_result["p_mfe_gt_mae"]  # 核心：方向正确概率
 
         # 稳健判断（全部基于费后指标）：
         #   1. OOS 保留 IS 性能的 50% 以上（ICIR 衰减）
         #   2. OOS ICIR 绝对值 > 0.3
-        #   3. OOS 盈亏比（费后）> 1.0 — 这是最关键的可交易性门槛
-        #   4. OOS 平均收益（费后）> 0 — 不允许费后为负
-        #   5. MFE/MAE 比率 >= 1.5 — 有利方向必须走的比不利方向多50%，有真实方向性边缘
-        oos_pf      = oos_metrics.get("profit_factor") or 0.0   # 已是费后
-        oos_avg_ret = oos_metrics.get("avg_return_pct") or 0.0  # 已是费后
+        #   3. OOS 盈亏比（费后）> 1.0
+        #   4. OOS 平均收益（费后）> 0
+        #   5. P(MFE > MAE) >= 65% — 入场后方向正确的概率（做多=往上走，做空=往下走）
+        oos_pf      = oos_metrics.get("profit_factor") or 0.0
+        oos_avg_ret = oos_metrics.get("avg_return_pct") or 0.0
         min_icir    = 0.3 if abs(is_icir) > 0.5 else 0.1
         is_robust = (
             degradation > 0.5
             and abs(oos_icir or 0) > min_icir
             and oos_pf > 1.0
-            and oos_avg_ret > 0.0     # 费后平均收益必须为正
-            and mfe_mae_ratio >= 1.5  # MFE/MAE 比率不低于 1.5
+            and oos_avg_ret > 0.0
+            and p_mfe_gt_mae >= 0.65  # 方向正确概率 >= 65%
         )
 
         return {
@@ -208,8 +209,9 @@ class WalkForwardValidator:
             "OOS":            oos_metrics,
             "degradation":    round(degradation, 3),
             "is_robust":      is_robust,
-            "mfe_mae_ratio":  round(mfe_mae_ratio, 3),
-            "mfe_coverage":   round(mfe_coverage_rate * 100.0, 2),  # 仅供参考，已废弃作为门槛
+            "p_mfe_gt_mae":   round(p_mfe_gt_mae, 3),   # 核心门槛：方向正确概率
+            "mfe_mae_ratio":  round(mfe_mae_ratio, 3),   # 辅助参考
+            "mfe_coverage":   round(mfe_coverage_rate * 100.0, 2),
         }
 
 
@@ -338,22 +340,26 @@ class WalkForwardValidator:
         mfe_above_fee = int(np.sum(mfes > fee_threshold_pct))
         coverage_rate = mfe_above_fee / n_valid if n_valid > 0 else 0.0
 
-        # MFE/MAE 比率（核心指标）
+        # P(MFE > MAE)：入场后价格朝正确方向走的概率（核心门槛）
+        # 含义：100次触发里有多少次"有利幅度 > 不利幅度"
         valid_pairs = (mfes > 0) & (maes > 0)
         if valid_pairs.sum() >= 5:
             mean_mfe = float(mfes[valid_pairs].mean())
             mean_mae = float(maes[valid_pairs].mean())
             mfe_mae_ratio = round(mean_mfe / mean_mae, 3) if mean_mae > 0 else 0.0
+            p_mfe_gt_mae = float((mfes[valid_pairs] > maes[valid_pairs]).mean())
         else:
             mean_mfe = float(mfes.mean()) if n_valid > 0 else 0.0
             mean_mae = float(maes.mean()) if n_valid > 0 else 0.0
             mfe_mae_ratio = 0.0
+            p_mfe_gt_mae = 0.0
 
         return {
-            "coverage_rate": coverage_rate,
-            "mfe_mae_ratio": mfe_mae_ratio,
-            "mean_mfe":      round(mean_mfe, 4),
-            "mean_mae":      round(mean_mae, 4),
+            "coverage_rate":  coverage_rate,
+            "mfe_mae_ratio":  mfe_mae_ratio,
+            "p_mfe_gt_mae":   round(p_mfe_gt_mae, 3),  # 核心：方向正确概率
+            "mean_mfe":       round(mean_mfe, 4),
+            "mean_mae":       round(mean_mae, 4),
         }
 
     # ── 日级 ICIR 辅助 ──────────────────────────────────────────────────────

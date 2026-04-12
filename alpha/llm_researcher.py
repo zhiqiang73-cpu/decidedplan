@@ -674,7 +674,7 @@ class KimiResearcher:
         parts.append("- 保护 protect_start_pct: [0.04, 0.08, 0.12, 0.15, 0.20]")
         parts.append("")
         parts.append("### 最终门槛")
-        parts.append("- MFE/MAE 比率 >= 1.5（入场后有利方向走的必须比不利方向多50%以上，这是入场质量核心标准）")
+        parts.append("- P(MFE > MAE) >= 65%（核心入场质量门槛：入场后方向正确的概率。做多=上涨幅度>下跌幅度 的概率；做空=下跌幅度>上涨幅度 的概率。即"猜对方向"的概率必须 >= 65%）")
         parts.append("- OOS WR >= 65%（扣 Maker 0.04% 后，必须用 vs_entry 退出计算，不得用固定K线持仓）")
         parts.append("- OOS n >= 30")
         parts.append("- OOS 净收益 >= 0.03%（每笔至少 3 个基点）")
@@ -1095,14 +1095,14 @@ class KimiResearcher:
         user_prompt = f"""以下是 Walk-Forward 验证结果,请判断是否继续进入出场挖掘阶段。
 
 ## Walk-Forward 关键指标解读
-- mfe_mae_ratio: 入场后最大有利偏移/最大不利偏移比率，>= 1.5 才说明有真实方向性边缘（核心门槛）
+- p_mfe_gt_mae: 入场后方向正确概率（核心门槛）。做多=上涨幅度>下跌幅度的概率，做空=下跌幅度>上涨幅度的概率。>= 0.65（65%）才说明信号有真实方向性边缘，这是"猜对方向"的概率
 - oos_win_rate: 固定持仓退出的OOS胜率（仅供参考，不是准入标准，P1-8级信号该值只有44.5%）
 - n_oos: 样本外触发次数，必须 >= 30 才有统计意义
-- mfe_coverage: 已废弃指标，忽略（对BTC无意义，任何入场都能轻松达到90%+）
+- mfe_coverage / mfe_mae_ratio: 已废弃指标，忽略
 
 ## 判断标准
-- mfe_mae_ratio >= 1.5 且 n_oos >= 30 时才 proceed=true
-- mfe_mae_ratio 只要 >= 1.2 且物理机制强，可谨慎 proceed（出场挖掘阶段会进一步优化）
+- p_mfe_gt_mae >= 0.65 且 n_oos >= 30 时才 proceed=true
+- p_mfe_gt_mae >= 0.60 且物理机制强，可谨慎 proceed（出场挖掘阶段会进一步验证）
 - oos_win_rate 低不是拒绝理由（固定持仓WR对任何vs_entry策略都低）
 
 ## 当前假设
@@ -1114,7 +1114,7 @@ class KimiResearcher:
 请只输出 JSON:
 {{
   "proceed": true/false,
-  "decision": "中文结论。重点说明 mfe_mae_ratio 和 n_oos 是否达标，以及是否继续做出场挖掘"
+  "decision": "中文结论。重点说明 p_mfe_gt_mae（方向正确概率）和 n_oos 是否达标，以及是否继续做出场挖掘"
 }}
 """
 
