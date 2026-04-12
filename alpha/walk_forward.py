@@ -178,16 +178,19 @@ class WalkForwardValidator:
         else:
             degradation = oos_icir / is_icir
 
-        # MFE 覆盖率：在 OOS 数据上，每个触发点持有 horizon bars 内的最大有利偏移
-        # 统计 MFE > 0.04%（Maker 往返费用）的比例
-        mfe_coverage_rate = self._compute_mfe_coverage(atom, test_df)
+        # MFE/MAE 比率：在 OOS 数据上计算入场质量
+        # MFE/MAE >= 1.5 是真正有意义的门槛（有利方向走的比不利方向多50%以上）
+        # 注意: MFE_cov@0.04% 对 BTC 毫无意义，已废弃作为门槛
+        mfe_result = self._compute_mfe_mae(atom, test_df)
+        mfe_mae_ratio   = mfe_result["mfe_mae_ratio"]
+        mfe_coverage_rate = mfe_result["coverage_rate"]
 
         # 稳健判断（全部基于费后指标）：
         #   1. OOS 保留 IS 性能的 50% 以上（ICIR 衰减）
         #   2. OOS ICIR 绝对值 > 0.3
         #   3. OOS 盈亏比（费后）> 1.0 — 这是最关键的可交易性门槛
         #   4. OOS 平均收益（费后）> 0 — 不允许费后为负
-        #   5. MFE 覆盖率 >= 75% — 至少 75% 的触发点有足够的正向空间覆盖费用
+        #   5. MFE/MAE 比率 >= 1.5 — 有利方向必须走的比不利方向多50%，有真实方向性边缘
         oos_pf      = oos_metrics.get("profit_factor") or 0.0   # 已是费后
         oos_avg_ret = oos_metrics.get("avg_return_pct") or 0.0  # 已是费后
         min_icir    = 0.3 if abs(is_icir) > 0.5 else 0.1
@@ -195,17 +198,18 @@ class WalkForwardValidator:
             degradation > 0.5
             and abs(oos_icir or 0) > min_icir
             and oos_pf > 1.0
-            and oos_avg_ret > 0.0          # 费后平均收益必须为正
-            and mfe_coverage_rate >= 0.75  # MFE 覆盖率不低于 75%
+            and oos_avg_ret > 0.0     # 费后平均收益必须为正
+            and mfe_mae_ratio >= 1.5  # MFE/MAE 比率不低于 1.5
         )
 
         return {
-            "rule":          atom.rule_str(),
-            "IS":            is_metrics,
-            "OOS":           oos_metrics,
-            "degradation":   round(degradation, 3),
-            "is_robust":     is_robust,
-            "mfe_coverage":  round(mfe_coverage_rate * 100.0, 2),  # 0-100 scale, live_discovery 兼容
+            "rule":           atom.rule_str(),
+            "IS":             is_metrics,
+            "OOS":            oos_metrics,
+            "degradation":    round(degradation, 3),
+            "is_robust":      is_robust,
+            "mfe_mae_ratio":  round(mfe_mae_ratio, 3),
+            "mfe_coverage":   round(mfe_coverage_rate * 100.0, 2),  # 仅供参考，已废弃作为门槛
         }
 
 
@@ -249,30 +253,44 @@ class WalkForwardValidator:
 
         return reports
 
-    # ── MFE 覆盖率辅助 ──────────────────────────────────────────────────────
+    # ── MFE/MAE 辅助 ────────────────────────────────────────────────────────
     @staticmethod
     def _compute_mfe_coverage(
         atom: "CausalAtom",
         df: pd.DataFrame,
         fee_threshold_pct: float = 0.04,
     ) -> float:
+        """保留兼容接口，内部调用 _compute_mfe_mae，返回覆盖率。"""
+        result = WalkForwardValidator._compute_mfe_mae(atom, df, fee_threshold_pct)
+        return result["coverage_rate"]
+
+    @staticmethod
+    def _compute_mfe_mae(
+        atom: "CausalAtom",
+        df: pd.DataFrame,
+        fee_threshold_pct: float = 0.04,
+    ) -> dict:
         """
-        计算 OOS 数据上的 MFE 覆盖率。
+        计算 OOS 数据上的 MFE/MAE 比率及 MFE 覆盖率。
 
-        对每个信号触发点，检查持有 horizon bars 内的最大有利偏移（MFE）
-        是否超过 fee_threshold_pct（默认 0.04%，Maker 往返费用）。
-        返回 MFE > fee_threshold_pct 的触发点比例。
+        MFE/MAE 比率是真正有意义的入场质量指标：
+        - MFE = 入场后最大有利偏移（Maximum Favorable Excursion）
+        - MAE = 入场后最大不利偏移（Maximum Adverse Excursion）
+        - MFE/MAE >= 1.5 说明有利方向走的比不利方向多50%以上，有真实方向性边缘
 
-        Args:
-            atom:              CausalAtom（含 feature, operator, threshold, horizon, direction）
-            df:                数据切片（OOS 部分）
-            fee_threshold_pct: MFE 最低门槛（%），默认 0.04%（Maker 往返费）
+        注意: MFE_cov@0.04% 对 BTC 无意义（任何入场都能轻松达到90%+），
+        已废弃作为门槛，仅保留供日志参考。
 
         Returns:
-            mfe_coverage_rate: float，范围 [0.0, 1.0]；若无触发点则返回 0.0
+            dict: {
+                "coverage_rate": float [0.0, 1.0],  # MFE > fee 的比例（仅供参考）
+                "mfe_mae_ratio": float,              # 核心指标，mean(MFE)/mean(MAE)
+                "mean_mfe":      float,
+                "mean_mae":      float,
+            }
         """
         if "close" not in df.columns:
-            return 0.0
+            return {"coverage_rate": 0.0, "mfe_mae_ratio": 0.0, "mean_mfe": 0.0, "mean_mae": 0.0}
 
         col = df[atom.feature]
         if atom.operator == ">":
@@ -281,42 +299,62 @@ class WalkForwardValidator:
             mask = col < atom.threshold
 
         triggered = mask & col.notna()
-        trigger_indices = df.index[triggered].tolist()
-        if not trigger_indices:
-            return 0.0
+        if not triggered.any():
+            return {"coverage_rate": 0.0, "mfe_mae_ratio": 0.0, "mean_mfe": 0.0, "mean_mae": 0.0}
 
         close_arr = df["close"].values
-        idx_arr = np.array(range(len(df)))
         horizon = max(1, int(atom.horizon))
         sign = -1.0 if atom.direction == "short" else 1.0
         n_total = len(df)
 
-        mfe_above_fee = 0
-        n_valid = 0
-
-        for pos in trigger_indices:
-            # 找到该 index 在 df 中的整数位置
+        # 获取触发位置的整数索引
+        triggered_locs = []
+        for pos in df.index[triggered]:
             loc = df.index.get_loc(pos)
-            if not isinstance(loc, int):
-                continue
-            entry_price = close_arr[loc]
-            if entry_price == 0 or np.isnan(entry_price):
-                continue
+            if isinstance(loc, int) and loc + 1 < n_total:
+                triggered_locs.append(loc)
 
-            mfe = 0.0
-            end_loc = min(loc + horizon, n_total - 1)
-            for j in range(loc + 1, end_loc + 1):
-                current_ret = (close_arr[j] - entry_price) / entry_price * sign * 100.0
-                if current_ret > mfe:
-                    mfe = current_ret
+        if not triggered_locs:
+            return {"coverage_rate": 0.0, "mfe_mae_ratio": 0.0, "mean_mfe": 0.0, "mean_mae": 0.0}
 
-            n_valid += 1
-            if mfe > fee_threshold_pct:
-                mfe_above_fee += 1
+        # 向量化计算：构建 (n_triggers, horizon) 价格路径矩阵
+        locs = np.array([l for l in triggered_locs if l + horizon < n_total])
+        if len(locs) == 0:
+            return {"coverage_rate": 0.0, "mfe_mae_ratio": 0.0, "mean_mfe": 0.0, "mean_mae": 0.0}
 
-        if n_valid == 0:
-            return 0.0
-        return mfe_above_fee / n_valid
+        entry_prices = close_arr[locs]
+        # future_indices: shape (n, horizon)
+        future_indices = locs[:, np.newaxis] + np.arange(1, horizon + 1)
+        future_prices = close_arr[future_indices]
+
+        # path_rets: shape (n, horizon), 有符号收益率（%）
+        path_rets = (future_prices - entry_prices[:, np.newaxis]) / entry_prices[:, np.newaxis] * sign * 100.0
+
+        mfes = np.nanmax(path_rets, axis=1)   # 最大有利偏移
+        maes = np.nanmax(-path_rets, axis=1)  # 最大不利偏移（取正值）
+
+        # MFE 覆盖率（仅供参考）
+        n_valid = len(mfes)
+        mfe_above_fee = int(np.sum(mfes > fee_threshold_pct))
+        coverage_rate = mfe_above_fee / n_valid if n_valid > 0 else 0.0
+
+        # MFE/MAE 比率（核心指标）
+        valid_pairs = (mfes > 0) & (maes > 0)
+        if valid_pairs.sum() >= 5:
+            mean_mfe = float(mfes[valid_pairs].mean())
+            mean_mae = float(maes[valid_pairs].mean())
+            mfe_mae_ratio = round(mean_mfe / mean_mae, 3) if mean_mae > 0 else 0.0
+        else:
+            mean_mfe = float(mfes.mean()) if n_valid > 0 else 0.0
+            mean_mae = float(maes.mean()) if n_valid > 0 else 0.0
+            mfe_mae_ratio = 0.0
+
+        return {
+            "coverage_rate": coverage_rate,
+            "mfe_mae_ratio": mfe_mae_ratio,
+            "mean_mfe":      round(mean_mfe, 4),
+            "mean_mae":      round(mean_mae, 4),
+        }
 
     # ── 日级 ICIR 辅助 ──────────────────────────────────────────────────────
     @staticmethod

@@ -650,11 +650,11 @@ class ComboScanner:
         mask: pd.Series, df: pd.DataFrame,
         fwd_col: str, direction: str,
     ) -> dict:
-        """计算触发条件下的收益统计。"""
+        """计算触发条件下的收益统计，包含 MFE/MAE 比率（入场质量核心指标）。"""
         valid = mask & df[fwd_col].notna()
         n = int(valid.sum())
         if n == 0:
-            return {"n": 0, "wr": 0.0, "avg_ret": 0.0, "pf": 0.0}
+            return {"n": 0, "wr": 0.0, "avg_ret": 0.0, "pf": 0.0, "mfe_mae_ratio": 0.0}
 
         fwd = df.loc[valid, fwd_col].values
 
@@ -676,11 +676,39 @@ class ComboScanner:
             else float("inf")
         )
 
+        # MFE/MAE 比率：从价格路径向量化计算
+        # 有利方向走的均值 / 不利方向走的均值，>= 1.5 说明有真实方向性边缘
+        mfe_mae_ratio = 0.0
+        try:
+            parts = fwd_col.split("_")
+            horizon = int(parts[-1]) if parts[-1].isdigit() else 0
+            if "close" in df.columns and horizon > 0:
+                close_np = df["close"].values
+                n_rows = len(close_np)
+                sign = -1.0 if direction == "short" else 1.0
+                valid_locs = np.where(valid.values)[0]
+                # 只保留后面还有足够 bars 的位置
+                valid_locs = valid_locs[valid_locs + horizon < n_rows]
+                if len(valid_locs) >= 5:
+                    entry_prices = close_np[valid_locs]
+                    # future_indices: (n, horizon)
+                    future_idx = valid_locs[:, np.newaxis] + np.arange(1, horizon + 1)
+                    future_prices = close_np[future_idx]
+                    path_rets = (future_prices - entry_prices[:, np.newaxis]) / entry_prices[:, np.newaxis] * sign * 100.0
+                    mfes = np.nanmax(path_rets, axis=1)
+                    maes = np.nanmax(-path_rets, axis=1)
+                    good = (mfes > 0) & (maes > 0)
+                    if good.sum() >= 5:
+                        mfe_mae_ratio = round(float(mfes[good].mean() / maes[good].mean()), 3)
+        except Exception:
+            mfe_mae_ratio = 0.0
+
         return {
-            "n":       n,
-            "wr":      wr,
-            "avg_ret": float(rets.mean()),
-            "pf":      pf,
+            "n":             n,
+            "wr":            wr,
+            "avg_ret":       float(rets.mean()),
+            "pf":            pf,
+            "mfe_mae_ratio": mfe_mae_ratio,
         }
 
 

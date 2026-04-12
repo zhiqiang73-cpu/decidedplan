@@ -525,13 +525,13 @@ class AutoPromoter:
         if degradation is not None and float(degradation) < 0.5:
             return False
 
-        # MFE 覆盖率 >= 75%（核心指标：75% 的信号必须有足够正向空间覆盖费用）
-        mfe_cov = (
-            stats.get("mfe_coverage")
-            or stats.get("oos_mfe_coverage")
-            or wf_stats.get("mfe_coverage")
+        # MFE/MAE 比率 >= 1.5（核心指标：有利方向走的必须比不利方向多50%以上）
+        # 注意：MFE_cov@0.04% 对 BTC 无意义（任何入场都能轻松达到90%+），已废弃
+        mfe_mae = (
+            stats.get("mfe_mae_ratio")
+            or wf_stats.get("mfe_mae_ratio")
         )
-        if mfe_cov is not None and float(mfe_cov) < 75.0:
+        if mfe_mae is not None and float(mfe_mae) < 1.5:
             return False
 
         return True

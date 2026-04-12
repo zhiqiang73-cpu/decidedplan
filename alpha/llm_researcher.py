@@ -674,7 +674,8 @@ class KimiResearcher:
         parts.append("- 保护 protect_start_pct: [0.04, 0.08, 0.12, 0.15, 0.20]")
         parts.append("")
         parts.append("### 最终门槛")
-        parts.append("- OOS WR >= 65%（扣 Maker 0.04% 后）")
+        parts.append("- MFE/MAE 比率 >= 1.5（入场后有利方向走的必须比不利方向多50%以上，这是入场质量核心标准）")
+        parts.append("- OOS WR >= 65%（扣 Maker 0.04% 后，必须用 vs_entry 退出计算，不得用固定K线持仓）")
         parts.append("- OOS n >= 30")
         parts.append("- OOS 净收益 >= 0.03%（每笔至少 3 个基点）")
         parts.append("- PF >= 1.2")
@@ -691,6 +692,8 @@ class KimiResearcher:
         parts.append(f"3. 禁止 TIME 维度特征: {time_hint}")
         parts.append("4. 代码只能用 np/pd/math/statistics")
         parts.append("5. 中文注释和结论,JSON 或代码格式输出")
+        parts.append("6. 禁止用固定N根K线作为出场逻辑，出场必须基于 vs_entry 变化量（力是否用完）")
+        parts.append("7. horizon 只是研究观察窗口，不是出场时间承诺，不能说'持有N根K线后出场'")
         parts.append("")
         parts.append(f"当前已知可用特征:\n{allowed_hint}")
         parts.append(f"\n当前明确不可用特征:\n{unavailable_hint}")
@@ -1091,6 +1094,17 @@ class KimiResearcher:
         hypothesis = self._current_hypothesis_payload(session)
         user_prompt = f"""以下是 Walk-Forward 验证结果,请判断是否继续进入出场挖掘阶段。
 
+## Walk-Forward 关键指标解读
+- mfe_mae_ratio: 入场后最大有利偏移/最大不利偏移比率，>= 1.5 才说明有真实方向性边缘（核心门槛）
+- oos_win_rate: 固定持仓退出的OOS胜率（仅供参考，不是准入标准，P1-8级信号该值只有44.5%）
+- n_oos: 样本外触发次数，必须 >= 30 才有统计意义
+- mfe_coverage: 已废弃指标，忽略（对BTC无意义，任何入场都能轻松达到90%+）
+
+## 判断标准
+- mfe_mae_ratio >= 1.5 且 n_oos >= 30 时才 proceed=true
+- mfe_mae_ratio 只要 >= 1.2 且物理机制强，可谨慎 proceed（出场挖掘阶段会进一步优化）
+- oos_win_rate 低不是拒绝理由（固定持仓WR对任何vs_entry策略都低）
+
 ## 当前假设
 {_pretty_json(hypothesis, limit=3000)}
 
@@ -1100,7 +1114,7 @@ class KimiResearcher:
 请只输出 JSON:
 {{
   "proceed": true/false,
-  "decision": "中文结论。说明是否继续做出场挖掘,或者建议修改什么"
+  "decision": "中文结论。重点说明 mfe_mae_ratio 和 n_oos 是否达标，以及是否继续做出场挖掘"
 }}
 """
 

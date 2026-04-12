@@ -2014,17 +2014,21 @@ class LiveDiscoveryEngine:
                 )
                 continue
 
-            oos_wr = float(wf_results.get("oos_win_rate", 0) or 0)
             n_oos = int(wf_results.get("n_oos", 0) or 0)
-            mfe_cov = float(wf_results.get("mfe_coverage", 0) or 0)
-            # Phase 4 baseline 门槛: 宽松标准（固定持仓 baseline, 智能出场会提升 10-20%）
-            # 真正的严格门槛在 Phase 6（智能出场回测后）
-            if oos_wr < 45.0 or n_oos < 10 or mfe_cov < 50.0:
+            mfe_mae = float(wf_results.get("mfe_mae_ratio", 0) or 0)
+            # Phase 4 预筛门槛：只看样本量和入场质量，不用固定horizon WR
+            # 原因：P1-8级信号固定horizon WR只有44.5%，用WR门槛会误杀好信号
+            # 真正的严格门槛在 Phase 6（vs_entry智能出场回测，OOS WR >= 65%）
+            if n_oos < 10:
                 logger.info(
-                    "[KIMI] Phase 4: baseline 门槛不通过 WR=%.1f%% n=%d MFE=%.1f%%",
-                    oos_wr,
+                    "[KIMI] Phase 4: 样本不足 n=%d < 10",
                     n_oos,
-                    mfe_cov,
+                )
+                continue
+            if mfe_mae < 1.2:
+                logger.info(
+                    "[KIMI] Phase 4: MFE/MAE=%.2f < 1.2，入场后有利方向不足（预筛）",
+                    mfe_mae,
                 )
                 continue
 
@@ -2328,6 +2332,7 @@ class LiveDiscoveryEngine:
                 "oos_net_return": 0.0,
                 "oos_pf": 0.0,
                 "mfe_coverage": 0.0,
+                "mfe_mae_ratio": 0.0,
             }
 
         mask_values = entry_mask.reindex(df.index, fill_value=False).fillna(False).astype(bool).values
@@ -2339,6 +2344,7 @@ class LiveDiscoveryEngine:
         sign = -1.0 if str(direction).lower() == "short" else 1.0
         returns: list[float] = []
         mfes: list[float] = []
+        maes: list[float] = []
 
         for entry_idx in oos_positions:
             entry_price = close_arr[entry_idx]
@@ -2357,6 +2363,7 @@ class LiveDiscoveryEngine:
             path_returns = (future - entry_price) / entry_price * sign * 100.0
             returns.append(float(ret))
             mfes.append(float(np.nanmax(path_returns)))
+            maes.append(float(np.nanmax(-path_returns)))  # 最大不利偏移（取正值）
 
         if not returns:
             return {
@@ -2367,6 +2374,7 @@ class LiveDiscoveryEngine:
                 "oos_net_return": 0.0,
                 "oos_pf": 0.0,
                 "mfe_coverage": 0.0,
+                "mfe_mae_ratio": 0.0,
             }
 
         wins = [ret for ret in returns if ret > 0]
@@ -2378,6 +2386,17 @@ class LiveDiscoveryEngine:
             oos_pf = 1.5 if wins else 1.0
 
         mfe_hits = sum(1 for value in mfes if value > fee)
+
+        # MFE/MAE 比率：有利方向走的 / 不利方向走的
+        # 这是真正有意义的入场质量指标（MFE_cov@0.04% 对 BTC 无意义，已废弃）
+        valid_pairs = [(m, a) for m, a in zip(mfes, maes) if m > 0 and a > 0]
+        if len(valid_pairs) >= 5:
+            mean_mfe = float(np.mean([m for m, a in valid_pairs]))
+            mean_mae = float(np.mean([a for m, a in valid_pairs]))
+            mfe_mae_ratio = round(mean_mfe / mean_mae, 3) if mean_mae > 0 else 0.0
+        else:
+            mfe_mae_ratio = 0.0
+
         available_oos_bars = max(len(df) - split_idx, 1)
         return {
             "split_idx": split_idx,
@@ -2387,6 +2406,7 @@ class LiveDiscoveryEngine:
             "oos_net_return": round(float(np.mean(returns)), 4),
             "oos_pf": round(float(oos_pf), 4),
             "mfe_coverage": round(mfe_hits / len(mfes) * 100.0, 2),
+            "mfe_mae_ratio": mfe_mae_ratio,
             "oos_trigger_rate": round(len(returns) / available_oos_bars * 100.0, 4),
         }
 
