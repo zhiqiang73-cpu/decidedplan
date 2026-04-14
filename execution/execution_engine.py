@@ -13,10 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from execution import config
+from execution.exchange_sync import ExchangeTradeSyncer
 from execution.order_manager import OrderManager, OrderManagerError
 from execution.trade_logger import TradeLogger
 from monitor.mechanism_tracker import MechanismTracker, resolve_mechanism_type, get_mechanism_for_family, get_force_category
-from monitor.live_catalog import EXECUTION_WHITELIST
+from monitor.live_catalog import is_execution_allowed
 from monitor.exit_policy_config import (
     ExitParams,
     build_exit_params,
@@ -28,11 +29,26 @@ from monitor.smart_exit_policy import (
     build_runtime_state,
     evaluate_exit_action,
     normalize_family,
+    resolve_effective_stop_pct,
     update_mfe_mae,
 )
 from utils.file_io import write_json_atomic
 
 logger = logging.getLogger(__name__)
+
+# Exit reason constants (module-level to avoid per-call allocation)
+_HARD_STOP_REASONS = frozenset({"hard_stop"})
+_MECHANISM_DECAY_PREFIX = "mechanism_decay_"
+_ALPHA_LOSS_COOLDOWN_S = 420   # 7 minutes (alpha cards)
+_DECAY_COOLDOWN_S = 120        # 2 minutes (P1 signals)
+_LOSS_THRESHOLD = -0.0002      # -0.02% gross
+_TIMECAP_COOLDOWN_S = 600      # 10 minutes
+_MANUAL_INTERVENTION_COOLDOWN_S = 900  # 15 minutes after exchange/manual intervention
+
+# Position sizing overrides
+_QUIET_POSITION_PCT = 0.05     # 5% for QUIET_TREND regime
+_COUNTER_TREND_PCT = 0.04      # 4% for counter-trend shorts
+_P110_TREND_UP_SHORT_RANGE4H_MIN = 0.90
 
 
 @dataclass(frozen=True)
@@ -131,11 +147,18 @@ class ExecutionEngine:
         self._open_positions: dict[str, OpenPosition] = {}
         self._signal_cooldown: dict[str, float] = {}
         self._last_ext_sync_ts: float = 0.0
+        self._external_sync_failures: int = 0
         self._external_sync_future = None
         self._external_sync_keys: set[str] = set()
         self._thread_pool = ThreadPoolExecutor(
             max_workers=max_positions,
             thread_name_prefix="entry-monitor",
+        )
+        # Dedicated pool for exchange sync — must NOT share with entry-monitor
+        # to avoid starvation when all entry threads are blocked polling orders
+        self._sync_pool = ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="exchange-sync",
         )
         self._mechanism_tracker = MechanismTracker()
         self._current_regime: str = "QUIET_TREND"
@@ -148,8 +171,22 @@ class ExecutionEngine:
         # A2 family 1-bar entry confirmation: key="{family}|{direction}"
         self._entry_confirm_pending: dict[str, float] = {}
 
+        # Exchange trade syncer -- pulls actual fills from Binance
+        self._exchange_syncer: ExchangeTradeSyncer | None = (
+            ExchangeTradeSyncer(order_manager) if order_manager is not None else None
+        )
+        self._last_trade_sync_ts: float = 0.0
+
         # Persist open positions across restarts
         self._state_file = Path("execution/logs/positions_state.json")
+        self._pending_restore_state: dict[str, Any] = {}
+        self._booted_without_order_manager = order_manager is None
+        self._orphan_flatten_future = None
+        self._orphan_flatten_meta: dict[str, Any] | None = None
+        self._orphan_flatten_attempts = 0
+        self._orphan_recovery_deadline_ts = (
+            time.time() + 1800.0 if self._booted_without_order_manager else 0.0
+        )
         self._restore_positions_from_state()
 
         if self.enabled:
@@ -179,6 +216,27 @@ class ExecutionEngine:
         """Inject conviction engine (adaptive brain) for shadow scoring."""
         self._conviction_engine = brain
 
+    def is_execution_connected(self) -> bool:
+        """当前是否具备可用的交易接口。"""
+        return bool(self.enabled and self.order_manager is not None)
+
+    def set_order_manager(self, order_manager: OrderManager | None) -> None:
+        """运行中替换交易接口，供 monitor 后台自愈重连使用。"""
+        with self._lock:
+            self.order_manager = order_manager
+            self.enabled = order_manager is not None
+
+        if order_manager is None:
+            logger.warning("[EXEC] Order manager detached; execution disabled")
+            return
+
+        logger.info("[EXEC] Order manager attached; live execution restored")
+        try:
+            order_manager.set_leverage(self.leverage)
+        except Exception as exc:
+            logger.warning("[EXEC] set_leverage failed after reconnect: %s", exc)
+        self._restore_positions_from_state()
+
     def _log_blocked(self, signal: str, family: str, direction: str,
                      blocked_by: str, confidence: int, reason: str) -> None:
         if self._decision_logger is not None:
@@ -199,6 +257,27 @@ class ExecutionEngine:
                 flow=self._current_flow, reason=reason,
             )
 
+    def _arm_manual_intervention_cooldown(
+        self,
+        family: str,
+        direction: str,
+        reason: str,
+    ) -> None:
+        cooldown_key = f"{family}|{direction}"
+        until_ts = time.time() + _MANUAL_INTERVENTION_COOLDOWN_S
+        with self._lock:
+            self._signal_cooldown[cooldown_key] = max(
+                float(self._signal_cooldown.get(cooldown_key, 0.0) or 0.0),
+                until_ts,
+            )
+            remaining = max(0, int(self._signal_cooldown[cooldown_key] - time.time()))
+        logger.warning(
+            "[EXEC] Reconcile cooldown armed: %s blocked for %ds after %s",
+            cooldown_key,
+            remaining,
+            reason,
+        )
+
     def update_market_state(
         self,
         regime: str,
@@ -211,17 +290,30 @@ class ExecutionEngine:
         self._current_trend = trend_direction
 
     def on_signal(self, alert: dict[str, Any], latest_features: Any | None = None) -> None:
-        if not self.enabled or self.order_manager is None:
-            return
-
         direction = str(alert.get("direction", "")).lower()
         if direction not in {"long", "short"}:
             return
 
+        signal_name = str(alert.get("name", ""))
+        family = self._resolve_signal_family(alert)
         confidence = self._safe_int(alert.get("confidence"), 1)
+
+        if not self.enabled or self.order_manager is None:
+            logger.warning(
+                "[EXEC] Skip %s: execution disabled (order manager unavailable)",
+                signal_name or family,
+            )
+            self._log_blocked(
+                signal_name,
+                family,
+                direction,
+                "execution_disabled",
+                confidence,
+                "execution engine unavailable",
+            )
+            return
+
         if confidence < self.min_confidence:
-            signal_name = str(alert.get("name", ""))
-            family = self._resolve_signal_family(alert)
             logger.debug(
                 "[EXEC] Skip low-confidence %s conf=%s < %s",
                 signal_name, confidence, self.min_confidence,
@@ -229,9 +321,6 @@ class ExecutionEngine:
             self._log_blocked(signal_name, family, direction, "confidence_gate",
                               confidence, f"conf={confidence} < min={self.min_confidence}")
             return
-
-        signal_name = str(alert.get("name", ""))
-        family = self._resolve_signal_family(alert)
         is_alpha = self._is_alpha_alert(alert, family)
 
         # Block LONG entries during LIQUIDATION flow -- forced selling creates
@@ -251,6 +340,30 @@ class ExecutionEngine:
             direction == "short"
             and self._current_trend == "TREND_UP"
         ):
+            if family == "P1-10":
+                r4h = self._extract_feature_float(latest_features, "position_in_range_4h")
+                if r4h is None or r4h < _P110_TREND_UP_SHORT_RANGE4H_MIN:
+                    got = "missing" if r4h is None else f"{r4h:.3f}"
+                    logger.info(
+                        "[EXEC] Skip %s: P1-10 SHORT in TREND_UP needs "
+                        "position_in_range_4h >= %.2f (got %s)",
+                        signal_name,
+                        _P110_TREND_UP_SHORT_RANGE4H_MIN,
+                        got,
+                    )
+                    self._log_blocked(
+                        signal_name,
+                        family,
+                        direction,
+                        "trend_filter",
+                        confidence,
+                        (
+                            "P1-10 SHORT in TREND_UP needs "
+                            f"position_in_range_4h >= {_P110_TREND_UP_SHORT_RANGE4H_MIN:.2f} "
+                            f"(got {got})"
+                        ),
+                    )
+                    return
             if is_alpha:
                 logger.info(
                     "[EXEC] Skip %s: P2 SHORT blocked in TREND_UP "
@@ -298,10 +411,14 @@ class ExecutionEngine:
             return
 
         # Alpha 淇″彿涔熷繀椤婚€氳繃鐧藉悕鍗?-- 闃叉 approved_rules.json 缁曡繃 live_catalog 鏆傚仠
-        if (family, direction) not in EXECUTION_WHITELIST:
+        if not is_execution_allowed(
+            family,
+            direction,
+            allow_synthetic_alpha=is_alpha,
+        ):
             logger.info("[EXEC] Rejected %s %s: not in whitelist (alpha=%s)", family, direction, is_alpha)
             self._log_blocked(signal_name, family, direction, "whitelist",
-                              confidence, f"{family}|{direction} not in EXECUTION_WHITELIST")
+                              confidence, f"{family}|{direction} not in execution allowlist")
             return
 
         cooldown_key = f"{family}|{direction}"
@@ -404,9 +521,18 @@ class ExecutionEngine:
                 and p.direction == direction
             )
             if same_dir_force_count >= 1:
-                logger.info(
-                    "REJECT %s: same-direction force concentration %s|%s=%d >= 1",
-                    signal_name, alert_force_cat, direction, same_dir_force_count,
+                reason = (
+                    f"same-direction force concentration "
+                    f"{alert_force_cat}|{direction}={same_dir_force_count} >= 1"
+                )
+                logger.info("REJECT %s: %s", signal_name, reason)
+                self._log_blocked(
+                    signal_name,
+                    family,
+                    direction,
+                    "force_concentration",
+                    confidence,
+                    reason,
                 )
                 return
 
@@ -421,9 +547,18 @@ class ExecutionEngine:
                     else:
                         unrealised_pct = (pos.entry_price - close_price) / pos.entry_price * 100
                     if unrealised_pct < 0:
-                        logger.info(
-                            "REJECT %s: same-force %s has losing position %s (%.3f%%)",
-                            signal_name, alert_force_cat, pos.signal_name, unrealised_pct,
+                        reason = (
+                            f"same-force {alert_force_cat} has losing position "
+                            f"{pos.signal_name} ({unrealised_pct:.3f}%)"
+                        )
+                        logger.info("REJECT %s: %s", signal_name, reason)
+                        self._log_blocked(
+                            signal_name,
+                            family,
+                            direction,
+                            "force_concentration",
+                            confidence,
+                            reason,
                         )
                         return
 
@@ -436,9 +571,15 @@ class ExecutionEngine:
                 if get_force_category(p.mechanism_type) == alert_force_cat
             )
             if force_count >= 2:
-                logger.info(
-                    "REJECT %s: force concentration %s=%d >= 2",
-                    signal_name, alert_force_cat, force_count,
+                reason = f"force concentration {alert_force_cat}={force_count} >= 2"
+                logger.info("REJECT %s: %s", signal_name, reason)
+                self._log_blocked(
+                    signal_name,
+                    family,
+                    direction,
+                    "force_concentration",
+                    confidence,
+                    reason,
                 )
                 return
 
@@ -471,6 +612,15 @@ class ExecutionEngine:
                     return
             except OrderManagerError as exc:
                 logger.warning("[EXEC] get_open_positions failed: %s", exc)
+                self._log_blocked(
+                    signal_name,
+                    family,
+                    direction,
+                    "exchange_unavailable",
+                    confidence,
+                    f"cannot verify exchange positions: {exc}",
+                )
+                return
 
             # 鈹€鈹€ Conviction Engine: entry scoring (shadow mode) 鈹€鈹€
             if self._conviction_engine is not None:
@@ -507,11 +657,7 @@ class ExecutionEngine:
 
             try:
                 attempt_plan = self._build_entry_attempt(direction, attempt=1)
-                # QUIET_TREND uses a smaller position (5% vs 8% default).
-                # 11 of 12 losses in the 15h audit occurred in QUIET_TREND;
-                # same stop % 鈫?smaller notional = smaller dollar loss per trade.
-                _QUIET_POSITION_PCT = 0.05
-                _COUNTER_TREND_PCT = 0.04  # half position for counter-trend shorts
+                # QUIET_TREND uses smaller position; counter-trend shorts use half
                 effective_pct = (
                     _QUIET_POSITION_PCT
                     if self._current_regime == "QUIET_TREND"
@@ -519,6 +665,9 @@ class ExecutionEngine:
                 )
                 # Cap counter-trend SHORT positions: uptrend shorts get half position
                 if direction == "short" and self._current_trend == "TREND_UP":
+                    effective_pct = min(effective_pct, _COUNTER_TREND_PCT)
+                # Cap counter-trend LONG positions: P1-14 longs in TREND_DOWN get half position
+                if direction == "long" and self._current_trend == "TREND_DOWN" and "P1-14" in signal_name:
                     effective_pct = min(effective_pct, _COUNTER_TREND_PCT)
                 if effective_pct != self.position_pct:
                     logger.debug(
@@ -896,6 +1045,15 @@ class ExecutionEngine:
                 status = self.order_manager.get_order_status(order_id)
             except OrderManagerError as exc:
                 logger.warning("[EXEC] Status check failed order_id=%s: %s", order_id, exc)
+                # Deadline check MUST happen even on HTTP failure, otherwise
+                # persistent network outage causes an infinite loop.
+                if time.monotonic() >= deadline:
+                    logger.warning(
+                        "[EXEC] Deadline reached during HTTP failure for order_id=%s; finalizing",
+                        order_id,
+                    )
+                    self._finalize_not_filled(order_id)
+                    return
                 time.sleep(self.poll_interval_s)
                 continue
 
@@ -1048,7 +1206,7 @@ class ExecutionEngine:
         cooldown_key = f"{pending.family}|{pending.direction}"
         self._signal_cooldown[cooldown_key] = time.time() + 180
         logger.info(
-            "[EXEC] Order not filled %s order_id=%s (cooldown 5min)",
+            "[EXEC] Order not filled %s order_id=%s (cooldown 3min)",
             pending.signal_name,
             pending.order_id,
         )
@@ -1120,7 +1278,6 @@ class ExecutionEngine:
         exit_reason: str,
         failure_reason: str,
     ) -> None:
-        max_attempts = 3
         runtime_state = position.runtime_state
         attempts = int(runtime_state.get("close_attempts", 0) or 0) + 1
         runtime_state["close_attempts"] = attempts
@@ -1128,27 +1285,25 @@ class ExecutionEngine:
         runtime_state["close_pending_reason"] = exit_reason
         runtime_state["close_last_error"] = failure_reason
 
-        pos_key = f"{position.family}|{position.direction}"
-        if attempts >= max_attempts:
-            with self._lock:
-                self._open_positions.pop(pos_key, None)
+        # 不从追踪中删除仓位，持续重试直到成功。
+        # 历史教训：原逻辑在第 3 次失败后 pop() 删除仓位记录，导致仓位仍在
+        # 交易所开着但系统再也不发平仓指令，累积大额亏损。
+        # 正确兜底由 _collect_stale_exchange_keys_locked() 负责：若交易所
+        # 确认仓位已消失，120s 宽限后自动清理本地记录。
+        if attempts >= 3:
             logger.critical(
-                "[EXEC][ALERT] Close failed %s after %d attempts; removing %s from tracking and assuming exchange handled it. last_error=%s",
+                "[EXEC][ALERT] Close failed %s attempt=%d, KEEP RETRYING next bar. last_error=%s",
                 position.signal_name,
                 attempts,
-                pos_key,
                 failure_reason,
             )
-            self._save_positions_state()
-            return
-
-        logger.warning(
-            "[EXEC] Close attempt %d/%d failed %s: %s; marked close_pending for retry on next bar",
-            attempts,
-            max_attempts,
-            position.signal_name,
-            failure_reason,
-        )
+        else:
+            logger.warning(
+                "[EXEC] Close attempt %d failed %s: %s; retry on next bar",
+                attempts,
+                position.signal_name,
+                failure_reason,
+            )
         self._save_positions_state()
 
 
@@ -1156,13 +1311,28 @@ class ExecutionEngine:
         if self.order_manager is None:
             return
 
+        # Guard against double-close race: on_bar from consecutive bars may
+        # both decide to close the same position while the first close is
+        # still in flight (45s limit + market fallback).
+        with self._lock:
+            rs = position.runtime_state
+            if rs.get("close_in_flight"):
+                logger.debug(
+                    "[EXEC] Skip duplicate close for %s (already in flight)",
+                    position.signal_name,
+                )
+                return
+            rs["close_in_flight"] = True
+
         try:
             result = self.order_manager.close_position(position.direction, position.qty)
         except OrderManagerError as exc:
+            position.runtime_state["close_in_flight"] = False
             self._handle_close_failure(position, exit_reason, str(exc))
             return
 
         if result.get("status") != "closed":
+            position.runtime_state["close_in_flight"] = False
             self._handle_close_failure(position, exit_reason, str(result))
             return
 
@@ -1208,24 +1378,24 @@ class ExecutionEngine:
             raw_signal_name=str((position.entry_snapshot or {}).get("raw_signal_name") or position.signal_name),
         )
 
+        # Compute return metrics ONCE for all downstream consumers
+        ep = float(exit_price) if exit_price is not None else position.entry_price
+        gross_ret_pct = ((ep - position.entry_price) / position.entry_price) * 100
+        if position.direction == "short":
+            gross_ret_pct = -gross_ret_pct
+        net_ret_pct = gross_ret_pct - total_fee_rate * 100
+
         # Record outcome for signal health tracking
         if self._signal_health is not None:
             try:
-                ep = float(exit_price) if exit_price is not None else position.entry_price
-                gross_ret = ((ep - position.entry_price) / position.entry_price) * 100
-                if position.direction == "short":
-                    gross_ret = -gross_ret
-                net_ret = gross_ret - total_fee_rate * 100
                 card_id = position.signal_name
-                # Composite signals (e.g. "A2-26 | A2-29"): record outcome
-                # for each sub-card so health lifecycle tracks them individually.
                 sub_ids = [s.strip() for s in card_id.split(" | ")] if " | " in card_id else [card_id]
                 for sid in sub_ids:
                     if sid:
                         self._signal_health.record_outcome(
                             card_id=sid,
                             direction=position.direction,
-                            net_return_pct=net_ret,
+                            net_return_pct=net_ret_pct,
                             flow_type=position.entry_flow_type,
                             regime=position.entry_regime,
                         )
@@ -1235,35 +1405,24 @@ class ExecutionEngine:
         # Feed outcome to adaptive cooldown for self-tuning
         if self._signal_runner is not None:
             try:
-                ep = float(exit_price) if exit_price is not None else position.entry_price
-                gross_ret = ((ep - position.entry_price) / position.entry_price) * 100
-                if position.direction == "short":
-                    gross_ret = -gross_ret
-                net_ret = gross_ret - total_fee_rate * 100
-                is_win = net_ret > 0
-                # Use the position's entry_snapshot to extract group for cooldown key
+                is_win = net_ret_pct > 0
                 group = str(position.entry_snapshot.get("group", position.family) if position.entry_snapshot else position.family)
                 cooldown_key = f"{group}|{position.direction}|{position.horizon_min}"
                 self._signal_runner.record_p2_outcome(cooldown_key, is_win)
             except Exception as exc:
                 logger.warning("[EXEC] Adaptive cooldown feedback failed: %s", exc)
 
-        # 鈹€鈹€ Conviction Engine: learn from closed trade 鈹€鈹€
-        # Use GROSS return (same as bar snapshots) to avoid net/gross mismatch.
-        # Bar snapshots record gross unrealized P&L; final label must match.
+        # Conviction Engine: learn from closed trade (uses GROSS return to
+        # match bar-level snapshots which record gross unrealized P&L)
         if self._conviction_engine is not None:
             try:
-                ep = float(exit_price) if exit_price is not None else position.entry_price
-                gross_ret = ((ep - position.entry_price) / position.entry_price) * 100
-                if position.direction == "short":
-                    gross_ret = -gross_ret
                 pos_key_brain = f"{position.family}|{position.direction}"
                 entry_snap = position.entry_snapshot or {}
                 entry_features = entry_snap.get("entry_conviction_features") or [0.0] * 5
                 self._conviction_engine.learn_from_trade(
                     pos_key=pos_key_brain,
                     entry_features=entry_features,
-                    final_return_pct=gross_ret,
+                    final_return_pct=gross_ret_pct,
                     family=position.family,
                     regime=position.entry_regime,
                 )
@@ -1274,44 +1433,32 @@ class ExecutionEngine:
             pos_key = f"{position.family}|{position.direction}"
             self._open_positions.pop(pos_key, None)
 
-        # Extended cooldown after adverse exits (hard_stop or ANY mechanism decay).
-        # Prevents loss-loops where a "sticky" condition keeps re-entering.
-        # Only applies to actual losses 鈥?profitable hard_stop exits (MFE ratchet)
-        # should not waste cooldown time since the trade was managed correctly.
-        _HARD_STOP_REASONS = {"hard_stop"}
-        _MECHANISM_DECAY_PREFIX = "mechanism_decay_"
-        _ALPHA_LOSS_COOLDOWN_S = 420  # 7 minutes (alpha cards)
-        _DECAY_COOLDOWN_S = 120       # 2 minutes (P1 signals)
-        _LOSS_THRESHOLD = -0.0002     # -0.02% gross, below which we count as a real loss
+        # Extended cooldown after adverse exits (hard_stop or mechanism decay).
+        # Only applies to actual losses -- profitable hard_stop (MFE ratchet)
+        # should not waste cooldown time.
         if exit_reason in _HARD_STOP_REASONS or exit_reason.startswith(_MECHANISM_DECAY_PREFIX):
-            ep = float(exit_price) if exit_price is not None else position.entry_price
-            gross_ret = ((ep - position.entry_price) / position.entry_price)
-            if position.direction == "short":
-                gross_ret = -gross_ret
-            is_actual_loss = gross_ret < _LOSS_THRESHOLD
+            gross_ret_decimal = gross_ret_pct / 100.0
+            is_actual_loss = gross_ret_decimal < _LOSS_THRESHOLD
             if is_actual_loss:
                 cooldown_key = f"{position.family}|{position.direction}"
                 cooldown_s = _ALPHA_LOSS_COOLDOWN_S if position.family.startswith("A") else _DECAY_COOLDOWN_S
                 self._signal_cooldown[cooldown_key] = time.time() + cooldown_s
                 logger.info(
                     "[EXEC] Loss/decay cooldown: %s blocked for %ds after %s (gross=%.4f%%)",
-                    cooldown_key, cooldown_s, exit_reason, gross_ret * 100,
+                    cooldown_key, cooldown_s, exit_reason, gross_ret_pct,
                 )
             else:
                 logger.info(
                     "[EXEC] %s exit reason=%s but gross=%.4f%% >= threshold, skipping cooldown",
-                    position.signal_name, exit_reason, gross_ret * 100,
+                    position.signal_name, exit_reason, gross_ret_pct,
                 )
 
-        # After safety_cap on A2 cards, apply 15-min cooldown.
-        # If 60 bars elapsed without the trend materialising the setup is
-        # structurally exhausted; immediate re-entry risks the same dead market.
-        _TIMECAP_COOLDOWN_S = 600  # 10 minutes
+        # After safety_cap on A2 cards, apply 10-min cooldown.
         if exit_reason in {"time_cap", "safety_cap"} and position.family.startswith("A2"):
             cooldown_key = f"{position.family}|{position.direction}"
             self._signal_cooldown[cooldown_key] = time.time() + _TIMECAP_COOLDOWN_S
             logger.info(
-                "[EXEC] A2 safety_cap cooldown: %s blocked for 15min",
+                "[EXEC] A2 safety_cap cooldown: %s blocked for 10min",
                 cooldown_key,
             )
 
@@ -1323,6 +1470,7 @@ class ExecutionEngine:
         )
         self._save_positions_state()
     def _sync_external_position_locked(self) -> None:
+        self._consume_orphan_flatten_result_locked()
         future = self._external_sync_future
         tracked_keys = self._external_sync_keys
         if future is not None and future.done():
@@ -1331,25 +1479,110 @@ class ExecutionEngine:
             try:
                 positions = future.result()
             except Exception as exc:
-                logger.warning("[EXEC] Sync external positions failed: %s", exc)
+                self._external_sync_failures += 1
+                logger.warning(
+                    "[EXEC] Sync external positions failed (%d): %s",
+                    self._external_sync_failures,
+                    exc,
+                )
             else:
+                if self._external_sync_failures:
+                    logger.info(
+                        "[EXEC] External position sync recovered after %d failure(s)",
+                        self._external_sync_failures,
+                    )
+                self._external_sync_failures = 0
                 self._apply_external_positions_locked(positions, tracked_keys)
 
         if self.order_manager is None or self._pending_entries:
             return
-        if self._external_sync_future is not None:
-            return
 
         now = time.time()
+        # If the sync future has been in flight for > 30s, it's stuck; discard it
+        if self._external_sync_future is not None:
+            if now - self._last_ext_sync_ts > 30:
+                logger.warning(
+                    "[EXEC] External sync future stuck >30s, discarding"
+                )
+                self._external_sync_future = None
+                self._external_sync_keys = set()
+            else:
+                return
+
         if now - self._last_ext_sync_ts < 5:
             return
         self._last_ext_sync_ts = now
         self._external_sync_keys = {
             key for key, position in self._open_positions.items() if not position.external
         }
-        self._external_sync_future = self._thread_pool.submit(
+        self._external_sync_future = self._sync_pool.submit(
             self.order_manager.get_open_positions
         )
+
+        # Piggyback: sync exchange trade fills every 30s
+        if (self._exchange_syncer is not None
+                and now - self._last_trade_sync_ts >= 30):
+            self._last_trade_sync_ts = now
+            self._sync_pool.submit(self._exchange_syncer.sync)
+
+    @staticmethod
+    def _position_age_seconds(position: OpenPosition) -> float:
+        if position.entry_time is None:
+            return float("inf")
+        return max(
+            0.0,
+            (datetime.now(timezone.utc) - position.entry_time).total_seconds(),
+        )
+
+    def _collect_stale_exchange_keys_locked(
+        self,
+        exchange_qty: dict[str, float],
+        tracked_keys: set[str],
+    ) -> list[str]:
+        """找出交易所已无对应仓位、但本地仍残留的幽灵仓位。"""
+        qty_tolerance = 1e-6
+        sync_grace_s = 120.0
+        stale_keys: list[str] = []
+
+        for direction in ("long", "short"):
+            tracked_positions = [
+                (pos_key, pos)
+                for pos_key, pos in self._open_positions.items()
+                if not pos.external
+                and pos_key in tracked_keys
+                and pos.direction == direction
+            ]
+            if not tracked_positions:
+                continue
+
+            tracked_positions.sort(
+                key=lambda item: item[1].entry_time or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )
+            remaining_exchange_qty = max(
+                0.0,
+                float(exchange_qty.get(direction, 0.0) or 0.0),
+            )
+
+            for pos_key, pos in tracked_positions:
+                if remaining_exchange_qty + qty_tolerance >= pos.qty:
+                    remaining_exchange_qty = max(0.0, remaining_exchange_qty - pos.qty)
+                    continue
+
+                age_s = self._position_age_seconds(pos)
+                if age_s < sync_grace_s:
+                    logger.debug(
+                        "[EXEC] Keep %s despite exchange qty gap %.6f < %.6f within %.0fs grace",
+                        pos_key,
+                        remaining_exchange_qty,
+                        pos.qty,
+                        sync_grace_s,
+                    )
+                    continue
+
+                stale_keys.append(pos_key)
+
+        return stale_keys
 
     def _apply_external_positions_locked(
         self,
@@ -1357,6 +1590,7 @@ class ExecutionEngine:
         tracked_keys: set[str],
     ) -> None:
         ext_key = "external|any"
+        ext_position = self._open_positions.get(ext_key)
         system_qty: dict[str, float] = {"long": 0.0, "short": 0.0}
         for position in self._open_positions.values():
             if not position.external and position.direction in system_qty:
@@ -1400,8 +1634,8 @@ class ExecutionEngine:
                 )
                 has_external = False
 
-        if has_external and ext_key not in self._open_positions:
-            self._open_positions[ext_key] = OpenPosition(
+        if has_external and ext_position is None:
+            ext_position = OpenPosition(
                 signal_name="external_position",
                 family="external",
                 direction=ext_dir,
@@ -1417,40 +1651,211 @@ class ExecutionEngine:
                 dynamic_exit_enabled=False,
                 external=True,
             )
+            self._open_positions[ext_key] = ext_position
             logger.warning(
                 "[EXEC] Detected external position (%s %.6f), blocking new entries",
                 ext_dir,
                 ext_qty,
+            )
+        elif has_external and ext_position is not None:
+            if ext_position.direction != ext_dir:
+                ext_position.entry_time = datetime.now(timezone.utc)
+            ext_position.direction = ext_dir
+            ext_position.qty = ext_qty
+            ext_entry_price = exchange_entry_price.get(ext_dir, 0.0)
+            if ext_entry_price > 0:
+                ext_position.entry_price = ext_entry_price
+
+        if has_external and ext_position is not None:
+            self._maybe_schedule_orphan_flatten_locked(
+                ext_position.direction,
+                ext_position.qty,
+                ext_position.entry_time,
             )
         elif not has_external and ext_key in self._open_positions:
             logger.info("[EXEC] External position cleared")
             del self._open_positions[ext_key]
 
         if not self._pending_entries:
-            stale_keys: list[str] = []
-            for pos_key, pos in self._open_positions.items():
-                if pos.external:
-                    continue
-                if pos_key not in tracked_keys:
-                    continue
-                if exchange_qty.get(pos.direction, 0.0) < 1e-6:
-                    stale_keys.append(pos_key)
+            stale_keys = self._collect_stale_exchange_keys_locked(exchange_qty, tracked_keys)
 
             for pos_key in stale_keys:
                 pos = self._open_positions.pop(pos_key)
-                logger.warning(
-                    "[EXEC] Position %s vanished from exchange (manual close?), removed from tracking. "
-                    "entry=%.2f qty=%.6f held=%s bars",
-                    pos_key,
-                    pos.entry_price,
-                    pos.qty,
-                    (datetime.now(timezone.utc) - pos.entry_time).seconds // 60
-                    if pos.entry_time else "?",
+                held_min = (
+                    int(self._position_age_seconds(pos) // 60)
+                    if pos.entry_time else 0
                 )
+                logger.warning(
+                    "[EXEC] Position %s vanished from exchange sync, removed from tracking. "
+                    "entry=%.2f qty=%.6f held=%s min",
+                    pos_key, pos.entry_price, pos.qty, held_min,
+                )
+                self._arm_manual_intervention_cooldown(
+                    family=pos.family,
+                    direction=pos.direction,
+                    reason="manual_close_exchange",
+                )
+                # Log to trades.csv so manual closes appear in UI trade history
+                if self.trade_logger is not None:
+                    try:
+                        self.trade_logger.log_trade(
+                            signal_name=pos.signal_name,
+                            direction=pos.direction,
+                            entry_time=pos.entry_time or datetime.now(timezone.utc),
+                            entry_price=pos.entry_price,
+                            exit_time=datetime.now(timezone.utc),
+                            exit_price=None,
+                            qty=pos.qty,
+                            exit_reason="manual_close_exchange",
+                            confidence=pos.confidence,
+                            horizon_min=pos.horizon_min,
+                            total_fee_rate=config.fee_rate_for_type(pos.entry_fee_type),
+                            flow_type=pos.entry_flow_type,
+                            regime=pos.entry_regime,
+                            strategy_id=pos.family,
+                            raw_signal_name=str(
+                                (pos.entry_snapshot or {}).get("raw_signal_name")
+                                or pos.signal_name
+                            ),
+                        )
+                    except Exception as exc:
+                        logger.warning("[EXEC] Failed to log vanished position: %s", exc)
             if stale_keys:
                 self._save_positions_state()
 
 
+
+    def _consume_orphan_flatten_result_locked(self) -> None:
+        future = self._orphan_flatten_future
+        if future is None or not future.done():
+            return
+
+        meta = dict(self._orphan_flatten_meta or {})
+        direction = str(meta.get("direction", "unknown"))
+        qty = float(meta.get("qty", 0.0) or 0.0)
+        self._orphan_flatten_future = None
+        self._orphan_flatten_meta = None
+
+        try:
+            result = future.result()
+        except Exception as exc:
+            self._orphan_flatten_attempts += 1
+            logger.critical(
+                "[EXEC][ALERT] Orphan auto-flatten failed (%s %.6f): %s",
+                direction,
+                qty,
+                exc,
+            )
+            return
+
+        if result.get("status") == "closed":
+            self._orphan_flatten_attempts = 0
+            ext_pos = self._open_positions.get("external|any")
+            if ext_pos is not None and self.trade_logger is not None:
+                try:
+                    exit_ts_ms = self._safe_int(result.get("update_time"), 0)
+                    exit_time = (
+                        datetime.fromtimestamp(exit_ts_ms / 1000, tz=timezone.utc)
+                        if exit_ts_ms > 0
+                        else datetime.now(timezone.utc)
+                    )
+                    exit_price = self._safe_float(result.get("avg_price"), None)
+                    self.trade_logger.log_trade(
+                        signal_name=ext_pos.signal_name,
+                        direction=ext_pos.direction,
+                        entry_time=ext_pos.entry_time or datetime.now(timezone.utc),
+                        entry_price=float(ext_pos.entry_price or 0.0),
+                        exit_time=exit_time,
+                        exit_price=exit_price,
+                        qty=float(result.get("qty") or ext_pos.qty or qty),
+                        exit_reason="orphan_auto_flatten",
+                        confidence=ext_pos.confidence,
+                        horizon_min=ext_pos.horizon_min,
+                        total_fee_rate=config.fee_rate_for_type(
+                            str(result.get("fee_type") or ext_pos.entry_fee_type)
+                        ),
+                        flow_type=ext_pos.entry_flow_type,
+                        regime=ext_pos.entry_regime,
+                        strategy_id=ext_pos.family,
+                        raw_signal_name=ext_pos.signal_name,
+                    )
+                except Exception as exc:
+                    logger.warning("[EXEC] Failed to log orphan auto-flatten: %s", exc)
+            logger.warning(
+                "[EXEC][RESET] Orphan exchange position flattened (%s %.6f); waiting for sync confirmation",
+                direction,
+                qty,
+            )
+            return
+
+        self._orphan_flatten_attempts += 1
+        logger.critical(
+            "[EXEC][ALERT] Orphan auto-flatten rejected (%s %.6f): %s",
+            direction,
+            qty,
+            result,
+        )
+
+    def _maybe_schedule_orphan_flatten_locked(
+        self,
+        direction: str,
+        qty: float,
+        detected_at: datetime | None = None,
+    ) -> bool:
+        if self.order_manager is None or not self.enabled:
+            return False
+        if self._pending_entries or self._orphan_flatten_future is not None:
+            return False
+        if self._orphan_flatten_attempts >= 3:
+            return False
+        if any(not pos.external for pos in self._open_positions.values()):
+            return False
+
+        reconnect_eligible = (
+            bool(config.AUTO_FLATTEN_ORPHAN_ON_RECONNECT)
+            and self._booted_without_order_manager
+            and time.time() <= self._orphan_recovery_deadline_ts
+        )
+        persistent_eligible = False
+        if (
+            not reconnect_eligible
+            and bool(getattr(config, "AUTO_FLATTEN_PERSISTENT_EXTERNAL", False))
+        ):
+            persistent_after_s = float(
+                getattr(config, "PERSISTENT_EXTERNAL_FLATTEN_AFTER_S", 0.0) or 0.0
+            )
+            if persistent_after_s > 0:
+                if detected_at is None:
+                    external_age_s = float("inf")
+                else:
+                    external_age_s = max(
+                        0.0,
+                        (datetime.now(timezone.utc) - detected_at).total_seconds(),
+                    )
+                persistent_eligible = external_age_s >= persistent_after_s
+
+        if not reconnect_eligible and not persistent_eligible:
+            return False
+
+        self._orphan_flatten_meta = {"direction": direction, "qty": float(qty)}
+        self._orphan_flatten_future = self._sync_pool.submit(
+            self.order_manager.close_position,
+            direction,
+            qty,
+        )
+        if reconnect_eligible:
+            logger.critical(
+                "[EXEC][RESET] Untracked exchange position detected after reconnect (%s %.6f); auto-flattening orphan position",
+                direction,
+                qty,
+            )
+        else:
+            logger.critical(
+                "[EXEC][RESET] Persistent untracked exchange position detected (%s %.6f); auto-flattening orphan position",
+                direction,
+                qty,
+            )
+        return True
 
     @staticmethod
     def _extract_alert_time(alert: dict[str, Any]) -> datetime:
@@ -1487,6 +1892,24 @@ class ExecutionEngine:
             return None
 
     @staticmethod
+    def _extract_feature_float(latest_features: Any, name: str) -> float | None:
+        getter = getattr(latest_features, "get", None)
+        value = None
+        if callable(getter):
+            value = getter(name, None)
+        elif isinstance(latest_features, dict):
+            value = latest_features.get(name, None)
+        try:
+            if value is None:
+                return None
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        if result != result:
+            return None
+        return result
+
+    @staticmethod
     def _safe_int(value: Any, default: int) -> int:
         try:
             return int(value)
@@ -1501,7 +1924,13 @@ class ExecutionEngine:
         """Write all non-external open positions to disk."""
         try:
             snapshot: dict[str, Any] = {}
+            now_ts = time.time()
             with self._lock:
+                persisted_cooldowns = {
+                    key: float(until_ts)
+                    for key, until_ts in self._signal_cooldown.items()
+                    if float(until_ts or 0.0) > now_ts
+                }
                 for key, pos in self._open_positions.items():
                     if pos.external:
                         continue
@@ -1528,9 +1957,12 @@ class ExecutionEngine:
                         "entry_flow_type": pos.entry_flow_type,
                         "mechanism_type": pos.mechanism_type,
                     }
+                for key, data in self._pending_restore_state.items():
+                    snapshot.setdefault(key, dict(data))
             payload = {
                 "saved_at": datetime.now(timezone.utc).isoformat(),
                 "positions": snapshot,
+                "cooldowns": persisted_cooldowns,
             }
             self._state_file.parent.mkdir(parents=True, exist_ok=True)
             write_json_atomic(self._state_file, payload, indent=2, default=str)
@@ -1540,6 +1972,7 @@ class ExecutionEngine:
     def _restore_positions_from_state(self) -> None:
         """On startup, recover positions from disk and verify against exchange."""
         if not self._state_file.exists():
+            self._pending_restore_state = {}
             return
         try:
             raw = json.loads(self._state_file.read_text(encoding="utf-8"))
@@ -1548,34 +1981,93 @@ class ExecutionEngine:
             return
 
         saved: dict[str, Any] = raw.get("positions", {})
+        saved_cooldowns = raw.get("cooldowns", {})
+        now_ts = time.time()
+        if isinstance(saved_cooldowns, dict):
+            with self._lock:
+                for key, until_ts in saved_cooldowns.items():
+                    try:
+                        until = float(until_ts)
+                    except (TypeError, ValueError):
+                        continue
+                    if until > now_ts:
+                        self._signal_cooldown[str(key)] = max(
+                            float(self._signal_cooldown.get(str(key), 0.0) or 0.0),
+                            until,
+                        )
+                expired_keys = [
+                    key for key, until_ts in self._signal_cooldown.items()
+                    if float(until_ts or 0.0) <= now_ts
+                ]
+                for key in expired_keys:
+                    self._signal_cooldown.pop(key, None)
         if not saved:
+            self._pending_restore_state = {}
             return
 
-        # Query exchange to confirm which directions still have open qty
+        if not self.enabled or self.order_manager is None:
+            self._pending_restore_state = dict(saved)
+            logger.warning(
+                "[EXEC] Restore deferred for %d position(s): execution unavailable; keeping snapshot until reconnect",
+                len(saved),
+            )
+            return
+
         exchange_qty: dict[str, float] = {"long": 0.0, "short": 0.0}
-        if self.enabled and self.order_manager is not None:
-            try:
-                for p in self.order_manager.get_open_positions():
-                    d = str(p.get("direction", "")).lower()
-                    if d in exchange_qty:
-                        exchange_qty[d] += float(p.get("qty", 0.0))
-            except Exception as exc:
-                logger.warning(
-                    "[EXEC] Cannot verify exchange positions during restore: %s", exc
-                )
-                return
+        try:
+            for p in self.order_manager.get_open_positions():
+                d = str(p.get("direction", "")).lower()
+                if d in exchange_qty:
+                    exchange_qty[d] += float(p.get("qty", 0.0))
+        except Exception as exc:
+            logger.warning(
+                "[EXEC] Cannot verify exchange positions during restore: %s", exc
+            )
+            self._pending_restore_state = dict(saved)
+            return
 
         restored = 0
-        for key, data in saved.items():
+        state_changed = False
+        restored_keys: set[str] = set()
+        with self._lock:
+            existing_positions = {
+                key: pos.qty
+                for key, pos in self._open_positions.items()
+                if not pos.external
+            }
+
+        for key, data in sorted(
+            saved.items(),
+            key=lambda item: str((item[1] or {}).get("entry_time", "")),
+        ):
             direction = str(data.get("direction", "")).lower()
             qty = float(data.get("qty", 0.0))
+            if direction not in exchange_qty or qty <= 0:
+                logger.warning("[EXEC] Restore skip %s: invalid state payload", key)
+                state_changed = True
+                continue
+
+            existing_qty = float(existing_positions.get(key, 0.0) or 0.0)
+            if existing_qty > 0:
+                exchange_qty[direction] = max(0.0, exchange_qty[direction] - existing_qty)
+                restored_keys.add(key)
+                continue
 
             # Skip if the exchange no longer holds this position
             if exchange_qty.get(direction, 0.0) < qty - 1e-6:
-                logger.info(
-                    "[EXEC] Restore skip %s: not on exchange (already closed)", key
+                logger.warning(
+                    "[EXEC][ALERT] Restore skip %s: saved qty %.6f not found on exchange; pruning stale snapshot",
+                    key,
+                    qty,
                 )
+                self._arm_manual_intervention_cooldown(
+                    family=str(data.get("family", key.split("|", 1)[0])),
+                    direction=direction,
+                    reason="restore_exchange_mismatch",
+                )
+                state_changed = True
                 continue
+            exchange_qty[direction] = max(0.0, exchange_qty[direction] - qty)
 
             try:
                 entry_time = datetime.fromisoformat(str(data["entry_time"]))
@@ -1611,18 +2103,89 @@ class ExecutionEngine:
                 with self._lock:
                     self._open_positions[key] = pos
                 restored += 1
+                restored_keys.add(key)
                 logger.info(
                     "[EXEC] Restored %s entry=%.2f qty=%.6f regime=%s",
                     key, pos.entry_price, pos.qty, pos.entry_regime,
                 )
             except Exception as exc:
                 logger.warning("[EXEC] Failed to restore %s: %s", key, exc)
+                state_changed = True
 
+        self._pending_restore_state = {}
         if restored:
             logger.info(
                 "[EXEC] State recovery complete: %d position(s) restored from %s",
                 restored,
                 self._state_file,
             )
+            # 重启后立刻做硬止损预检：对每笔还原的仓位，用当前市价判断
+            # 是否已超出止损线。超过则标记 close_pending，下一个 on_bar()
+            # 触发时立刻平仓，不必等待下一根 K 线到达。
+            self._mark_overdue_stops_after_restore()
+        if state_changed or restored_keys != set(saved):
+            self._save_positions_state()
+
+    def _mark_overdue_stops_after_restore(self) -> None:
+        """重启还原后立刻用当前市价做硬止损预检。
+
+        若某仓位的逆势幅度已超过配置的 stop_pct，立刻标记 close_pending，
+        确保下一个 on_bar() 调用时第一时间平仓，不因重启延误止损。
+        """
+        if self.order_manager is None:
+            return
+        try:
+            close_price = self._reference_price_from_book(
+                self.order_manager.get_book_ticker()
+            )
+        except Exception as exc:
+            logger.warning("[EXEC] Restore stop-check: cannot get book ticker: %s", exc)
+            return
+        if close_price <= 0:
+            return
+
+        with self._lock:
+            positions_snapshot = list(self._open_positions.values())
+
+        overdue_positions: list[OpenPosition] = []
+        for pos in positions_snapshot:
+            if pos.external or not pos.dynamic_exit_enabled:
+                continue
+            entry = pos.entry_price
+            if entry <= 0:
+                continue
+            if pos.direction == "short":
+                adverse_pct = max(0.0, (close_price - entry) / entry * 100)
+            else:
+                adverse_pct = max(0.0, (entry - close_price) / entry * 100)
+
+            params = self._resolve_position_exit_params(pos)
+            rs = pos.runtime_state
+            rs["confidence"] = int(rs.get("confidence", pos.confidence) or pos.confidence)
+            rs["entry_regime"] = str(
+                rs.get("entry_regime", pos.entry_regime or "RANGE_BOUND")
+                or pos.entry_regime
+                or "RANGE_BOUND"
+            )
+            effective_stop = resolve_effective_stop_pct(
+                position={"direction": pos.direction, "entry_price": pos.entry_price},
+                runtime_state=rs,
+                params=params,
+            )
+            if adverse_pct >= effective_stop:
+                rs["close_pending"] = True
+                rs["close_pending_reason"] = "hard_stop"
+                overdue_positions.append(pos)
+                logger.critical(
+                    "[EXEC][RESTORE] %s adverse=%.3f%% >= live_stop=%.3f%%; attempting immediate hard stop",
+                    pos.signal_name,
+                    adverse_pct,
+                    effective_stop,
+                )
+
+        if overdue_positions:
+            self._save_positions_state()
+            for pos in overdue_positions:
+                self._close_position(pos, exit_reason="hard_stop")
 
 
