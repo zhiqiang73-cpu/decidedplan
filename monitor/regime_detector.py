@@ -63,7 +63,7 @@ TREND_DIR_AUTOCORR_MIN = 0.12    # 方向自相关 > 0.12 才算有持续性
 TREND_DIR_NET_MIN      = 0.05    # 净方向 > 0.05 才有意义
 TREND_RANGE_HIGH       = 0.75    # 24h 区间位置 > 75% = 高位
 TREND_RANGE_LOW        = 0.25    # 24h 区间位置 < 25% = 低位
-TREND_LOOKBACK_BARS    = 20      # 趋势检测回看窗口
+TREND_LOOKBACK_BARS    = 60      # 趋势检测回看窗口（60根K线=1小时，足以识别多小时级别趋势）
 
 # ── 制度判断阈值（基于物理特征，不用 ML）─────────────────────────────────────
 
@@ -180,7 +180,7 @@ class RegimeDetector:
 
         趋势方向过滤:
           TREND_UP:       P2 Alpha SHORT 完全封锁（派发论点在上涨中无效）
-          TREND_DOWN:     P2 Alpha LONG 需 HIGH 置信度（防止逆势做多）
+          TREND_DOWN:     C1 完全封锁；所有 P1/P2 LONG 需 HIGH 置信度（conf>=3）
           TREND_NEUTRAL:  不额外限制
 
         Returns:
@@ -202,7 +202,8 @@ class RegimeDetector:
 
             # 趋势方向过滤：逆势信号需要更高置信度
             # P2 Alpha: 逆势需要 HIGH (conf >= 3)
-            # P1 信号: 逆势需要 MEDIUM+ (conf >= 2)
+            # P1 信号（非C1）: 逆势需要 HIGH (conf >= 3)
+            # C1 资金周期超卖: 下跌趋势中物理假设直接失效，硬封锁
             if reject_reason is None:
                 if trend_direction == TREND_UP and direction == "short":
                     if phase == "P2":
@@ -215,10 +216,19 @@ class RegimeDetector:
                             f"TREND_UP: P1 SHORT requires conf>=2 (got {conf})"
                         )
                 elif trend_direction == TREND_DOWN and direction == "long":
-                    min_conf = 3 if phase == "P2" else 2
-                    if conf < min_conf:
+                    if name.startswith("C1"):
+                        # 修复1: C1 做多假设是「负费率超卖→反弹」
+                        # 在单边下跌中，负费率是持续正常状态而非超卖信号
+                        # 物理机制失效，无论置信度多高都封锁
                         reject_reason = (
-                            f"TREND_DOWN: {phase} LONG requires conf>={min_conf} (got {conf})"
+                            "TREND_DOWN: C1 funding oversold LONG completely blocked "
+                            "(mean-reversion thesis invalid in sustained downtrend)"
+                        )
+                    elif conf < 3:
+                        # 修复3: 其他 P1/P2 做多在下跌趋势中统一需要 HIGH 置信度
+                        # 原来 P1 只需 conf>=2，门槛太低
+                        reject_reason = (
+                            f"TREND_DOWN: {phase} LONG requires conf>=3 (got {conf})"
                         )
 
             if reject_reason:

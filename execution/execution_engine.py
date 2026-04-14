@@ -48,7 +48,6 @@ _MANUAL_INTERVENTION_COOLDOWN_S = 900  # 15 minutes after exchange/manual interv
 # Position sizing overrides
 _QUIET_POSITION_PCT = 0.05     # 5% for QUIET_TREND regime
 _COUNTER_TREND_PCT = 0.04      # 4% for counter-trend shorts
-_P110_TREND_UP_SHORT_RANGE4H_MIN = 0.90
 
 
 @dataclass(frozen=True)
@@ -333,45 +332,17 @@ class ExecutionEngine:
                               confidence, "LONG blocked during LIQUIDATION flow")
             return
 
-        # Block SHORT in uptrend: P2 alpha SHORTs are completely blocked
-        # (distribution thesis is structurally invalid when price is rising).
-        # P1 SHORTs require at least conf>=3 (HIGH) to pass -- symmetric with LONG in TREND_DOWN.
+        # Block ALL SHORTs in uptrend without exception.
+        # 均值回归 SHORT 在单边上涨中无论置信度多高都无效：
+        #   - 趋势行情中 VWAP/24h高位/买盘萎缩 的"过高"状态会持续存在
+        #   - HIGH 置信度只说明特征很极端，不代表回归会发生
+        # 旧逻辑：P1 SHORT 在 TREND_UP 时仅封 conf<3，HIGH 可绕过 → 已知亏损根源
+        # 新逻辑：TREND_UP 时所有 SHORT 一律封死，包括 HIGH 置信度
         if (
             direction == "short"
             and self._current_trend == "TREND_UP"
         ):
-            if family == "P1-10":
-                r4h = self._extract_feature_float(latest_features, "position_in_range_4h")
-                if r4h is None or r4h < _P110_TREND_UP_SHORT_RANGE4H_MIN:
-                    got = "missing" if r4h is None else f"{r4h:.3f}"
-                    logger.info(
-                        "[EXEC] Skip %s: P1-10 SHORT in TREND_UP needs "
-                        "position_in_range_4h >= %.2f (got %s)",
-                        signal_name,
-                        _P110_TREND_UP_SHORT_RANGE4H_MIN,
-                        got,
-                    )
-                    self._log_blocked(
-                        signal_name,
-                        family,
-                        direction,
-                        "trend_filter",
-                        confidence,
-                        (
-                            "P1-10 SHORT in TREND_UP needs "
-                            f"position_in_range_4h >= {_P110_TREND_UP_SHORT_RANGE4H_MIN:.2f} "
-                            f"(got {got})"
-                        ),
-                    )
-                    return
             if is_alpha:
-                logger.info(
-                    "[EXEC] Skip %s: P2 SHORT blocked in TREND_UP "
-                    "(distribution thesis invalid in uptrend)",
-                    signal_name,
-                )
-                self._log_blocked(signal_name, family, direction, "trend_filter",
-                                  confidence, "P2 SHORT completely blocked in TREND_UP")
                 confirm_key = f"{family}|{direction}"
                 if confirm_key in self._entry_confirm_pending:
                     logger.info(
@@ -379,15 +350,13 @@ class ExecutionEngine:
                         signal_name,
                     )
                     self._entry_confirm_pending.pop(confirm_key, None)
-                return
-            elif confidence < 3:
-                logger.info(
-                    "[EXEC] Skip %s: P1 SHORT blocked in TREND_UP (conf=%d < 3)",
-                    signal_name, confidence,
-                )
-                self._log_blocked(signal_name, family, direction, "trend_filter",
-                                  confidence, f"P1 SHORT in TREND_UP needs HIGH conf (got {confidence})")
-                return
+            logger.info(
+                "[EXEC] Skip %s: ALL SHORTs blocked in TREND_UP (conf=%d, family=%s)",
+                signal_name, confidence, family,
+            )
+            self._log_blocked(signal_name, family, direction, "trend_filter",
+                              confidence, f"ALL SHORTs blocked in TREND_UP (no exceptions)")
+            return
 
         if (
             direction == "long"
