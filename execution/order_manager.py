@@ -256,6 +256,29 @@ class OrderManager:
             )
         return positions
 
+    def get_user_trades(
+        self,
+        from_id: int | None = None,
+        start_time: int | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Fetch actual fills from Binance /fapi/v1/userTrades.
+
+        Uses ``fromId`` for efficient incremental sync.  First call
+        should pass ``start_time`` (ms) to bootstrap history.
+        """
+        params: dict[str, Any] = {"symbol": self.symbol, "limit": limit}
+        if from_id is not None:
+            params["fromId"] = from_id
+        if start_time is not None:
+            params["startTime"] = start_time
+        data = self._request_json(
+            "GET", "/fapi/v1/userTrades", params=params, signed=True,
+        )
+        if not isinstance(data, list):
+            return []
+        return data
+
     def set_leverage(self, leverage: int) -> None:
         """Set account leverage for the trading symbol."""
         self._request_json(
@@ -342,6 +365,52 @@ class OrderManager:
             )
 
         return {"status": "rejected", "reason": "all_attempts_failed"}
+
+    def place_stop_market(
+        self,
+        direction: str,
+        qty: float,
+        stop_price: float,
+    ) -> dict[str, Any]:
+        """在交易所挂 STOP_MARKET 止损单（防宕机灾难保护）。
+
+        作为进场成功后的次级防护，失败不影响主仓位。
+        reduceOnly=true 确保只减仓，不反向开仓。
+        """
+        # 止损方向与仓位方向相反
+        side = self._close_side(direction)
+        norm_qty = self._quantize_up_to_step(
+            Decimal(str(qty)), self.filters.step_size
+        )
+        if norm_qty < self.filters.min_qty:
+            norm_qty = self.filters.min_qty
+        norm_stop = self._normalize_price(stop_price)
+
+        params = {
+            "symbol": self.symbol,
+            "side": side,
+            "type": "STOP_MARKET",
+            "quantity": self._decimal_to_str(norm_qty),
+            "stopPrice": self._decimal_to_str(norm_stop),
+            "reduceOnly": "true",
+            "newOrderRespType": "ACK",
+        }
+
+        try:
+            data = self._request_json(
+                "POST", "/fapi/v1/order", params=params, signed=True
+            )
+        except OrderManagerError as exc:
+            logger.warning("[EXEC] place_stop_market failed %s: %s", direction, exc)
+            return {"status": "rejected", "reason": str(exc)}
+
+        return {
+            "status": "placed",
+            "order_id": str(data.get("orderId", "")),
+            "stop_price": float(norm_stop),
+            "qty": float(norm_qty),
+            "raw": data,
+        }
 
     def get_book_ticker(self) -> dict[str, float]:
         data = self._request_json(

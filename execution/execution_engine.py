@@ -104,6 +104,7 @@ class OpenPosition:
     entry_regime: str = ""
     entry_flow_type: str = ""
     mechanism_type: str = ""
+    exchange_stop_order_id: str = ""  # 交易所端止损单 ID（防宕机灾难保护）
 
     @property
     def research_horizon_min(self) -> int:
@@ -338,25 +339,47 @@ class ExecutionEngine:
         #   - HIGH 置信度只说明特征很极端，不代表回归会发生
         # 旧逻辑：P1 SHORT 在 TREND_UP 时仅封 conf<3，HIGH 可绕过 → 已知亏损根源
         # 新逻辑：TREND_UP 时所有 SHORT 一律封死，包括 HIGH 置信度
+        # 例外：P1-10 买方耗尽在 4h 区间顶部 (>0.90) 物理上仍然有效
         if (
             direction == "short"
             and self._current_trend == "TREND_UP"
         ):
-            if is_alpha:
-                confirm_key = f"{family}|{direction}"
-                if confirm_key in self._entry_confirm_pending:
-                    logger.info(
-                        "[EXEC] A2 deferred entry cancelled for %s: TREND_UP invalidates setup",
-                        signal_name,
-                    )
-                    self._entry_confirm_pending.pop(confirm_key, None)
-            logger.info(
-                "[EXEC] Skip %s: ALL SHORTs blocked in TREND_UP (conf=%d, family=%s)",
-                signal_name, confidence, family,
-            )
-            self._log_blocked(signal_name, family, direction, "trend_filter",
-                              confidence, f"ALL SHORTs blocked in TREND_UP (no exceptions)")
-            return
+            # P1-10 exception: buyer exhaustion at 4h range top is physically valid
+            # even in an uptrend -- price at intraday extreme = buyers spent
+            is_p110 = "P1-10" in signal_name
+            at_4h_top = False
+            if is_p110 and latest_features is not None:
+                r4h = (
+                    latest_features.get("position_in_range_4h")
+                    if isinstance(latest_features, (dict,))
+                    else None
+                )
+                if r4h is None and hasattr(latest_features, "get"):
+                    r4h = latest_features.get("position_in_range_4h")
+                at_4h_top = r4h is not None and float(r4h) > 0.90
+
+            if at_4h_top:
+                logger.info(
+                    "[EXEC] %s SHORT exception in TREND_UP: 4h top zone r4h=%.3f",
+                    signal_name, float(r4h),
+                )
+                # Fall through to normal execution
+            else:
+                if is_alpha:
+                    confirm_key = f"{family}|{direction}"
+                    if confirm_key in self._entry_confirm_pending:
+                        logger.info(
+                            "[EXEC] A2 deferred entry cancelled for %s: TREND_UP invalidates setup",
+                            signal_name,
+                        )
+                        self._entry_confirm_pending.pop(confirm_key, None)
+                logger.info(
+                    "[EXEC] Skip %s: ALL SHORTs blocked in TREND_UP (conf=%d, family=%s)",
+                    signal_name, confidence, family,
+                )
+                self._log_blocked(signal_name, family, direction, "trend_filter",
+                                  confidence, "ALL SHORTs blocked in TREND_UP (P1-10@4h-top excepted)")
+                return
 
         if (
             direction == "long"
@@ -1239,7 +1262,73 @@ class ExecutionEngine:
             due_text,
             pending.entry_fee_type,
         )
+        # 建仓成功后立刻在交易所挂止损单（防宕机灾难保护）
+        # 失败只记录 warning，不影响仓位建立
+        self._place_exchange_stop_order(pos_key, avg_price, pending.direction, executed_qty)
         self._save_positions_state()
+
+    def _place_exchange_stop_order(
+        self,
+        pos_key: str,
+        entry_price: float,
+        direction: str,
+        qty: float,
+    ) -> None:
+        """建仓后在交易所挂 STOP_MARKET 止损单（宕机防灾保护）。
+
+        价格设为配置止损的 2 倍，作为极端宕机场景的最后防线：
+        - 正常运行时，系统的内存止损会先触发
+        - 宕机时，交易所端止损单在价格穿越 2x 止损时强制平仓
+        失败只记录 warning，不影响仓位。
+        """
+        if self.order_manager is None:
+            return
+
+        with self._lock:
+            pos = self._open_positions.get(pos_key)
+            if pos is None:
+                return
+
+        try:
+            exit_params = self._resolve_position_exit_params(pos)
+            stop_pct = float(exit_params.stop_pct)
+            # 2 倍止损作为宕机保护线（单边 %，除以 100 转换）
+            stop_multiplier = 2.0
+            if direction == "long":
+                stop_price = entry_price * (1.0 - stop_pct * stop_multiplier / 100.0)
+            else:
+                stop_price = entry_price * (1.0 + stop_pct * stop_multiplier / 100.0)
+
+            result = self.order_manager.place_stop_market(
+                direction=direction,
+                qty=qty,
+                stop_price=stop_price,
+            )
+
+            if result.get("status") == "placed":
+                stop_order_id = str(result.get("order_id", ""))
+                with self._lock:
+                    pos = self._open_positions.get(pos_key)
+                    if pos is not None:
+                        pos.exchange_stop_order_id = stop_order_id
+                logger.info(
+                    "[EXEC] Exchange stop order placed %s stop_price=%.2f stop_id=%s",
+                    pos_key,
+                    stop_price,
+                    stop_order_id,
+                )
+            else:
+                logger.warning(
+                    "[EXEC] Exchange stop order placement failed %s: %s",
+                    pos_key,
+                    result,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[EXEC] _place_exchange_stop_order error %s: %s",
+                pos_key,
+                exc,
+            )
 
     def _handle_close_failure(
         self,
@@ -1304,6 +1393,23 @@ class ExecutionEngine:
             position.runtime_state["close_in_flight"] = False
             self._handle_close_failure(position, exit_reason, str(result))
             return
+
+        # 平仓成功后立刻取消交易所端止损单，防止止损单在仓位已关闭后错误触发
+        if position.exchange_stop_order_id:
+            try:
+                self.order_manager.cancel_order(position.exchange_stop_order_id)
+                logger.info(
+                    "[EXEC] Exchange stop order cancelled %s stop_id=%s",
+                    position.signal_name,
+                    position.exchange_stop_order_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[EXEC] Cancel exchange stop order failed %s stop_id=%s: %s",
+                    position.signal_name,
+                    position.exchange_stop_order_id,
+                    exc,
+                )
 
         # Verify no dust remnant left on exchange after close
         executed_qty = float(result.get("qty", 0.0) or 0.0)
@@ -1925,6 +2031,7 @@ class ExecutionEngine:
                         "entry_regime": pos.entry_regime,
                         "entry_flow_type": pos.entry_flow_type,
                         "mechanism_type": pos.mechanism_type,
+                        "exchange_stop_order_id": pos.exchange_stop_order_id,
                     }
                 for key, data in self._pending_restore_state.items():
                     snapshot.setdefault(key, dict(data))
@@ -2068,6 +2175,7 @@ class ExecutionEngine:
                             get_mechanism_for_family(_fam) if _mt == "generic_alpha" and _fam else _mt
                         ) or get_mechanism_for_family(_fam)
                     )(str(data.get("mechanism_type", "")), str(data.get("family", ""))),
+                    exchange_stop_order_id=str(data.get("exchange_stop_order_id", "")),
                 )
                 with self._lock:
                     self._open_positions[key] = pos
