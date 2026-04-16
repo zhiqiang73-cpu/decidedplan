@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 
 COOLDOWN_BARS = 40
 
+# 价格斜率守卫：连续下降趋势中不开多单
+# 物理依据：funding 超卖 + 价格在下跌 ≠ 超卖反弹；每一个新低都会触发信号但不会反弹
+# 实盘教训（2026-04-15）：BTC 从74274跌至73945期间，C1 连续触发4次多单全部亏损
+_SLOPE_GUARD_LOOKBACK = 60   # 用近60根K线斜率判断是否在下降中（20根太短，多小时下跌中会反复翻正）
+_SLOPE_GUARD_MIN = 0.0       # 斜率 <= 0 = 下降，阻止 C1 触发
+
 # 2 core price-based variants + 2 VWAP-based variants
 # All require negative or zero funding as physical confirmation
 _VARIANTS = (
@@ -96,6 +102,37 @@ class FundingCycleOversoldLong(SignalDetector):
         _, matched = self._union_mask(df)
         if len(matched) < self._MIN_VARIANTS:
             return None
+
+        # 斜率守卫：近60根K线价格斜率 <= 0 = 下降趋势，不开多单
+        # 实盘教训（2026-04-15）：20根太短，多小时下跌中斜率会反复翻正，造成连续亏损
+        if "close" in df.columns and len(df) >= _SLOPE_GUARD_LOOKBACK:
+            try:
+                import numpy as _np
+                closes = df["close"].iloc[-_SLOPE_GUARD_LOOKBACK:].values.astype(float)
+                slope = _np.polyfit(range(_SLOPE_GUARD_LOOKBACK), closes, 1)[0]
+                if slope <= _SLOPE_GUARD_MIN:
+                    logger.info(
+                        "[C1] LONG blocked: price declining slope=%.2f (60-bar)",
+                        slope,
+                    )
+                    return None
+            except Exception:
+                pass
+
+        # 趋势确认（可选）：direction_autocorr < 0.3 表示价格方向持续向下，不开多单
+        # 该特征来自 ORDER_FLOW 维度，不一定总存在；不存在时不阻止
+        latest_for_trend = df.iloc[-1]
+        if "direction_autocorr" in df.columns:
+            try:
+                dac = float(latest_for_trend["direction_autocorr"])
+                if not (dac != dac) and dac < 0.3:  # NaN 检查
+                    logger.info(
+                        "[C1] LONG blocked: direction_autocorr=%.3f < 0.3 (下跌趋势持续)",
+                        dac,
+                    )
+                    return None
+            except Exception:
+                pass
 
         latest = df.iloc[-1]
         latest_ts = int(latest.get("timestamp", 0))
