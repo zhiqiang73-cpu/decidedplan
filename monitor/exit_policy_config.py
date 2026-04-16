@@ -21,8 +21,15 @@ CORE_EXIT_FAMILIES = (
     "P1-9",
     "P1-10",
     "P1-11",
+    "P1-12",
+    "P1-13",
+    "P1-14",
     "C1",
     "OA-1",
+    # T1 系列: Tick 30s 微结构信号
+    "T1-1",
+    "T1-2",
+    "T1-3",
 )
 
 FAMILY_MIN_HOLD_CAPS = {
@@ -33,9 +40,32 @@ FAMILY_MIN_HOLD_CAPS = {
     "P1-9": 24,
     "P1-10": 20,
     "P1-11": 24,
+    "P1-12": 60,   # safety_cap = 60 根 1m K 线（avg hold 22 bar，上限 1 小时）
+    "P1-13": 60,   # safety_cap = 60 根 1m K 线（avg hold 21 bar，上限 1 小时）
+    "P1-14": 60,   # safety_cap = 60 根 1m K 线（avg hold 52 bar，上限 1 小时）
     "C1": 30,
     "OA-1": 3,
+    # T1 系列: 18 根 30s bar = 9分钟最大持仓
+    "T1-1": 18,
+    "T1-2": 18,
+    "T1-3": 18,
 }
+
+# T1 系列出场参数（智能三阶段，紧止损+快速保本）
+# 验证最优: SL=0.05%, 保本触发=0.04%, 追踪激活=0.08%, 追踪回撤=0.04%
+_T1_EXIT_PARAMS_BASE = dict(
+    stop_pct=0.05,           # 硬止损 0.05%
+    protect_start_pct=0.04,  # 浮盈0.04%时移SL到入场价 (覆盖手续费0.036%)
+    protect_gap_ratio=0.50,
+    protect_floor_pct=0.01,
+    min_hold_bars=1,         # tick信号无最小持仓限制
+    max_hold_factor=6,       # base_horizon=3, 6x=18 bar max
+    exit_confirm_bars=1,
+    mfe_ratchet_threshold=0.08,  # 追踪激活: 浮盈达0.08%
+    mfe_ratchet_ratio=0.50,      # 追踪: 锁住峰值50%利润
+    decay_exit_threshold=0.95,   # 机制衰竭门槛高 (tick信号衰竭快)
+    decay_tighten_threshold=0.7,
+)
 
 BEST_PARAMS_PATH = Path("monitor/output/exit_policy_best_params.json")
 
@@ -159,16 +189,100 @@ DEFAULT_EXIT_PARAMS: Dict[str, ExitParams] = {
     family: ExitParams() for family in CORE_EXIT_FAMILIES
 }
 
+# 覆盖 T1 系列的默认参数（紧止损+快速保本）
+_t1_params = ExitParams(**_T1_EXIT_PARAMS_BASE)
+for _t1_fam in ("T1-1", "T1-2", "T1-3"):
+    DEFAULT_EXIT_PARAMS[_t1_fam] = _t1_params
+
+# C1 专属出场参数（资金周期超卖做多策略）
+# 默认参数 stop_pct=0.70% 过松，safety_cap=120根K线过长
+# 物理依据：C1 的均值回归窗口短（30根K线），不应容忍长时间逆势浮亏
+DEFAULT_EXIT_PARAMS["C1"] = ExitParams(
+    stop_pct=0.35,              # 硬止损从 0.70% 收紧到 0.35%
+    protect_start_pct=0.08,     # 浮盈 0.08% 即启动保本线（原 0.12%）
+    protect_gap_ratio=0.50,
+    protect_floor_pct=0.02,
+    min_hold_bars=3,
+    max_hold_factor=2,          # safety_cap = 30×2 = 60根K线（从 120 降到 60）
+    exit_confirm_bars=2,
+    mfe_ratchet_threshold=0.08, # 追踪止损激活点从 0.15% 降到 0.08%
+    mfe_ratchet_ratio=0.50,     # 锁住峰值 50% 利润（原 40%）
+)
+
+
+# P1-12 专属出场参数（趋势下跌区间顶部做空）
+# 物理依据: 力完成出场（r4h 下降 0.15），数据推导止损 0.30%
+# 验证结论: 力完成出场 WR=78.3%, PF=3.52; 加止损0.30% WR=73.5%, PF=2.37
+DEFAULT_EXIT_PARAMS["P1-12"] = ExitParams(
+    stop_pct=0.35,               # 数据推导止损 0.30-0.50%，取中值 0.35%
+    protect_start_pct=0.10,      # 浮盈 0.10% 启动保本（> 手续费 0.036%）
+    protect_gap_ratio=0.50,
+    protect_floor_pct=0.03,
+    min_hold_bars=3,
+    max_hold_factor=2,            # base=30 bar * 2 = 60 bar safety_cap
+    exit_confirm_bars=2,
+    mfe_ratchet_threshold=0.15,  # 追踪激活: 浮盈 0.15%
+    mfe_ratchet_ratio=0.50,      # 锁住峰值 50% 利润
+)
+
+
+# P1-13 专属出场参数（趋势下跌 + VWAP 双确认做空）
+# 物理依据: 力完成出场（r4h 下降 0.15），数据推导止损 0.30%
+# 验证结论: OOS P(MFE>MAE)=88.9%, 力完成出场 WR=90.0%, PF=12.64
+# 止损: MAE p90=0.22%，设 0.30% 保住 96% 的交易
+DEFAULT_EXIT_PARAMS["P1-13"] = ExitParams(
+    stop_pct=0.30,               # 数据推导止损 0.30%（MAE p90=0.22%）
+    protect_start_pct=0.08,      # 浮盈 0.08% 启动保本（> 手续费 0.036%）
+    protect_gap_ratio=0.50,
+    protect_floor_pct=0.02,
+    min_hold_bars=3,
+    max_hold_factor=2,            # base=30 bar * 2 = 60 bar safety_cap
+    exit_confirm_bars=2,
+    mfe_ratchet_threshold=0.12,  # 追踪激活: 浮盈 0.12%（信号强，更快锁利）
+    mfe_ratchet_ratio=0.50,      # 锁住峰值 50% 利润
+)
+
+
+# P1-14 专属出场参数（趋势下跌 + 日内支撑确认反弹做多）
+# 物理依据: 力完成出场（dist_low 从入场值再增加 0.02），数据推导止损 1.50%
+# 验证结论: OOS P(MFE>MAE)=77.8%, n=99, 力完成出场 WR=78.8%, PF=9.28
+# 止损: MAE p90=1.36%，设 1.50% 保住约 80% 的交易（逆势多仓振幅大）
+# 半仓: 逆势仓位，execution_engine 额外限制为 4%（_COUNTER_TREND_PCT）
+DEFAULT_EXIT_PARAMS["P1-14"] = ExitParams(
+    stop_pct=1.50,               # 数据推导止损 1.50%（MAE p90=1.36%，逆势振幅大）
+    protect_start_pct=0.20,      # 浮盈 0.20% 启动保本（MFE 巨大，稍晚启动）
+    protect_gap_ratio=0.50,
+    protect_floor_pct=0.05,
+    min_hold_bars=5,
+    max_hold_factor=2,            # base=30 bar * 2 = 60 bar safety_cap
+    exit_confirm_bars=2,
+    mfe_ratchet_threshold=0.50,  # 追踪激活: 浮盈 0.50%（MFE 平均 1.55%，等大幅盈利后锁利）
+    mfe_ratchet_ratio=0.50,      # 锁住峰值 50% 利润
+)
+
+
+# P1-8 SHORT 专属出场参数（VWAP 偏离+量能枯竭做空方向）
+# 实盘问题（2026-04-16）：live WR ~50%，-$31.89；赢均+0.172% vs 亏均-0.321%，盈亏不对称
+# 根因：默认 stop_pct=0.70% 过松，导致单笔亏损远大于单笔盈利
+# 修复：收紧止损到 0.50%，移除固定 TP（靠 vs_entry 力消失出场）
+DEFAULT_EXIT_PARAMS["P1-8|short"] = ExitParams(
+    take_profit_pct=0.0,          # 移除固定 TP，靠 vs_entry 智能出场
+    stop_pct=0.50,                 # 从默认 0.70% 收紧到 0.50%（亏均-0.321%，对应 0.50% 止损合理）
+    protect_start_pct=0.10,        # 浮盈 0.10% 即启动保本线
+    protect_gap_ratio=0.50,
+    protect_floor_pct=0.02,
+    min_hold_bars=3,
+    max_hold_factor=3,             # safety_cap = 24×3 = 72根K线
+    exit_confirm_bars=2,
+    mfe_ratchet_threshold=0.12,    # 追踪激活: 浮盈 0.12%
+    mfe_ratchet_ratio=0.50,        # 锁住峰值 50% 利润
+)
+
 
 def resolve_safety_cap_bars(family: str, base_horizon: int, params: ExitParams) -> int:
     family_cap = FAMILY_MIN_HOLD_CAPS.get(family, max(6, base_horizon * 2))
     scaled_cap = max(base_horizon * params.max_hold_factor, params.min_hold_bars + 1)
     return max(family_cap, scaled_cap)
-
-
-def resolve_max_hold_bars(family: str, base_horizon: int, params: ExitParams) -> int:
-    """Backward-compatible alias for older call sites."""
-    return resolve_safety_cap_bars(family, base_horizon, params)
 
 
 def _load_raw_params() -> dict:
