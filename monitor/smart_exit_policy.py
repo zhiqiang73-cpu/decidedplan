@@ -313,6 +313,9 @@ def normalize_family(rule_name: str) -> str:
         ("P1-9_", "P1-9"),
         ("P1-10_", "P1-10"),
         ("P1-11_", "P1-11"),
+        ("P1-12_", "P1-12"),
+        ("P1-13_", "P1-13"),
+        ("P1-14_", "P1-14"),
         ("P1-RT_", "RT-1"),
         ("RT-1_", "RT-1"),
         ("OA-1_", "OA-1"),
@@ -345,6 +348,12 @@ def evaluate_exit_state(
         return _eval_p1_8(position, features, snapshot, current_return)
     if family == "P1-11":
         return _eval_p1_11(position, features, snapshot, current_return)
+    if family == "P1-12":
+        return _eval_p1_12(position, features, snapshot, current_return)
+    if family == "P1-13":
+        return _eval_p1_13(position, features, snapshot, current_return)
+    if family == "P1-14":
+        return _eval_p1_14(position, features, snapshot, current_return)
     if family == "P1-6":
         return _eval_p1_6(position, features, snapshot, current_return)
     if family == "P0-2":
@@ -537,6 +546,96 @@ def _eval_p1_11(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> D
     # 入场假设否定 (回测验证: thesis_inv=0.003, OOS +41%, PF=1.10)
     vwap_vs_entry = _vs_entry_val(row, snapshot, "vwap_deviation")
     if vwap_vs_entry is not None and vwap_vs_entry > 0.003:
+        return {"action": "exit", "reason": "thesis_invalidated", "health": -1.0}
+
+    return {"action": "hold", "reason": "hold", "health": 0.0}
+
+
+def _eval_p1_12(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Dict[str, object]:
+    """P1-12 力完成出场: TREND_DOWN + 4h 区间顶部反弹做空.
+
+    出场逻辑来源: run_trend_short_exit_v2.py 数据推导 (2026-04-13)
+    最优出场: B_force_drop_0.15 — position_in_range_4h 从入场值下降 0.15
+              WR=78.3%, PF=3.52, avg_hold=22 bars
+
+    力消失 (logic_complete):
+      position_in_range_4h_vs_entry < -0.15
+      含义: 入场时 r4h ~0.94, 现在已降到 ~0.79 以下, 做空力量充分释放
+
+    入场假设否定 (thesis_invalidated):
+      position_in_range_4h_vs_entry > +0.05
+      含义: r4h 继续升高超过入场值 5%, 反弹显著加速, 做空时机错误
+      回测优化 (2026-04-17): 原阈值 +0.02 太敏感, 43/78 交易被误判
+      放宽到 +0.05 后 WR 从 43.6% 到 73.1%, PnL 从 +1.31% 到 +5.96%
+    """
+    r4h_vs_entry = _vs_entry_val(row, snapshot, "position_in_range_4h")
+
+    # 力完成: range4h 从 >0.94 回落超过 0.15
+    if r4h_vs_entry is not None and r4h_vs_entry < -0.15:
+        return {"action": "exit", "reason": "logic_complete", "health": 1.0}
+
+    # 假设否定: range4h 继续上升 (反弹显著加速, 做空时机错误)
+    # 回测优化: 0.02 -> 0.05 (原值太敏感)
+    if r4h_vs_entry is not None and r4h_vs_entry > 0.05:
+        return {"action": "exit", "reason": "thesis_invalidated", "health": -1.0}
+
+    return {"action": "hold", "reason": "hold", "health": 0.0}
+
+
+def _eval_p1_13(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Dict[str, object]:
+    """P1-13 力完成出场: TREND_DOWN + 4h 区间顶部 + VWAP 偏低做空.
+
+    出场逻辑来源: run_p113_exit_backtest.py 数据推导 (2026-04-13)
+    最优出场: B_r4h_drop_0.15 — position_in_range_4h 从入场值下降 0.15
+              WR=90.0%, PF=12.64, avg_hold=21 bars
+
+    力消失 (logic_complete):
+      position_in_range_4h_vs_entry < -0.15
+      含义: 入场时 r4h ~0.92, 现在已降到 ~0.77 以下, 双重做空力量充分释放
+
+    入场假设否定 (thesis_invalidated):
+      position_in_range_4h_vs_entry > +0.05
+      含义: r4h 继续升高超过入场值 5%, 反弹显著加速, 做空时机错误
+      回测优化 (2026-04-17): 原阈值 +0.02 太敏感, 45% 交易被误判失效
+      放宽到 +0.05 后 logic_complete 从 20 笔增加到 32 笔, PnL 从 -0.15% 到 +1.43%
+    """
+    r4h_vs_entry = _vs_entry_val(row, snapshot, "position_in_range_4h")
+
+    # 力完成: range4h 从 >0.92 回落超过 0.15
+    if r4h_vs_entry is not None and r4h_vs_entry < -0.15:
+        return {"action": "exit", "reason": "logic_complete", "health": 1.0}
+
+    # 假设否定: range4h 继续上升 (反弹显著加速, 做空时机错误)
+    # 回测优化: 0.02 -> 0.05 (原值太敏感, BTC 1-2根K线就能波动2%)
+    if r4h_vs_entry is not None and r4h_vs_entry > 0.05:
+        return {"action": "exit", "reason": "thesis_invalidated", "health": -1.0}
+
+    return {"action": "hold", "reason": "hold", "health": 0.0}
+
+
+def _eval_p1_14(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Dict[str, object]:
+    """P1-14 力完成出场: TREND_DOWN + 日内支撑确认反弹做多.
+
+    出场逻辑来源: run_trend_low_long_exit_test.py 数据推导 (2026-04-14)
+    最优出场: B_dl_gain_0.02 — dist_to_24h_low 从入场值增加 0.02
+              WR=78.8%, PF=9.28, 总净PnL=+78.95%, avg_hold=52 bars
+
+    力消失 (logic_complete):
+      dist_to_24h_low_vs_entry >= +0.02
+      含义: 入场时 dist_low ~0.07, 现在已达 ~0.09+, 反弹惯性充分释放
+
+    入场假设否定 (thesis_invalidated):
+      dist_to_24h_low_vs_entry <= -0.015
+      含义: 价格回落 1.5% 向日内低点, 支撑论题失效（与 1.5% 硬止损配合）
+    """
+    dl_vs_entry = _vs_entry_val(row, snapshot, "dist_to_24h_low")
+
+    # 力完成: dist_low 从入场值再增加 0.02（反弹又走了 2%）
+    if dl_vs_entry is not None and dl_vs_entry >= 0.02:
+        return {"action": "exit", "reason": "logic_complete", "health": 1.0}
+
+    # 假设否定: 价格回落向日内低点（支撑失效，与硬止损配合）
+    if dl_vs_entry is not None and dl_vs_entry <= -0.015:
         return {"action": "exit", "reason": "thesis_invalidated", "health": -1.0}
 
     return {"action": "hold", "reason": "hold", "health": 0.0}
@@ -758,8 +857,35 @@ def _eval_c1(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Dict
 
 
 def _eval_rt_1(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Dict[str, object]:
-    """RT-1 keeps the existing generic live exit scorer behind an explicit family hook."""
-    return _eval_generic(position, row, snapshot, ret)
+    """RT-1 制度转换做多：检测 QUIET_TREND 制度是否仍然有效。
+
+    入场时捕捉 RANGE_BOUND -> QUIET_TREND 制度转换（成交量确认 + 价格突破上轨）。
+    出场逻辑与入场力直接因果关联：
+    - thesis_invalidated: 振幅/价差/价格表明制度已离开 QUIET_TREND
+    - logic_complete: 趋势力已充分释放（区间位置大幅上移且有盈利）
+    """
+    amp = _safe_get(row, "amplitude_ma20")
+    spread = _safe_get(row, "spread_vs_ma20")
+    rpos = _safe_get(row, "position_in_range_24h")
+
+    # 制度恶化：振幅超过 QUIET_TREND 上界（0.0025 = VOLATILE_TREND 起点）
+    if amp is not None and amp > 0.0025:
+        return {"action": "exit", "reason": "thesis_invalidated", "health": -1.0}
+
+    # 流动性恶化：价差异常扩大
+    if spread is not None and spread > 2.5:
+        return {"action": "exit", "reason": "thesis_invalidated", "health": -1.0}
+
+    # 价格退回区间中部：趋势突破失败
+    if rpos is not None and rpos < 0.40:
+        return {"action": "exit", "reason": "thesis_invalidated", "health": -0.8}
+
+    # 趋势力已充分释放：区间位置相对入场时大幅上移且有合理盈利
+    rpos_vs_entry = _vs_entry_val(row, snapshot, "position_in_range_24h")
+    if rpos_vs_entry is not None and rpos_vs_entry > 0.15 and ret > 0.10:
+        return {"action": "exit", "reason": "logic_complete", "health": 1.0}
+
+    return {"action": "hold", "reason": "hold", "health": 0.0}
 
 
 def _eval_oa_1(position: Dict, row: pd.Series, snapshot: Dict, ret: float) -> Dict[str, object]:
@@ -938,33 +1064,31 @@ def evaluate_exit_action(
     runtime_state: Dict[str, object],
     params: ExitParams,
 ) -> Dict[str, object]:
+    """简化后的 4 层出场瀑布 (2026-04-17 实盘验证后从 8 层精简)
+
+    Layer 1: hard_stop       — 数据推导止损 (resolve_effective_stop_pct, floor 0.20%)
+    Layer 2: min_hold 守卫   — 防噪声抖动, 到 min_hold 后才检查 vs_entry
+    Layer 3: vs_entry 出场   — logic_complete + thesis_invalidated (仅盈利时出 logic_complete)
+    Layer 4: safety_cap      — 时间兜底, 最后一根救命稻草
+    (Layer 5: exchange_stop  — 在 order_manager 端, 不在本函数)
+
+    删除的旧层 (实盘验证有害或无效):
+    - take_profit: 所有策略 tp=0 已禁用, 死代码
+    - profit_protection: 7/7 策略禁用后 PnL 提升, 严重截断利润
+    - mechanism_decay + decay_tighten: 几乎不触发, 与 vs_entry 重叠
+    """
     family = str(position.get("family") or normalize_family(str(position.get("rule", ""))))
     bars_held = int(runtime_state.get("bars_held", 0) or 0)
     current_return = _current_return(position, close)
     adverse = _adverse_pct(position, close)
 
-    # --- Adaptive hard stop (direction-aware) ---
-    base_stop = params.stop_pct
-    _confidence = int(runtime_state.get("confidence", 2) or 2)
-    _regime = str(runtime_state.get("entry_regime", "RANGE_BOUND") or "RANGE_BOUND")
-    _mfe = float(runtime_state.get("mfe_pct", 0.0) or 0.0)
-    _direction = str(position.get("direction", "")).lower()
-
-    _conf_mult = params.confidence_stop_multipliers.get(_confidence, 1.0)
-    # SHORT 用独立的 regime 乘数（做空面对的反弹特征不同于做多）
-    if _direction == "short" and hasattr(params, "regime_stop_multipliers_short"):
-        _regime_mult = params.regime_stop_multipliers_short.get(_regime, 1.0)
-    else:
-        _regime_mult = params.regime_stop_multipliers.get(_regime, 1.0)
-    effective_stop = base_stop * _conf_mult * _regime_mult
-
-    # MFE 棘轮：仅在仓位已经有足够浮盈时才收紧止损
-    # 修复：MFE 必须超过阈值才触发，避免新仓位 MFE≈0 时把止损压到接近 0
-    if _mfe > params.mfe_ratchet_threshold:
-        ratcheted_stop = _mfe * params.mfe_ratchet_ratio
-        # 回测验证: floor_ratio=0.0 最优 — 棘轮仅在 MFE 超阈值时生效, 不设额外下限
-        effective_stop = min(effective_stop, ratcheted_stop)
-
+    # ── Layer 1: Hard Stop ────────────────────────────────────────────────
+    # resolve_effective_stop_pct 内部已处理 confidence/regime 乘数 + MFE 棘轮 + 0.20% floor
+    effective_stop = resolve_effective_stop_pct(
+        position=position,
+        runtime_state=runtime_state,
+        params=params,
+    )
     if adverse >= effective_stop:
         return {
             "action": "exit",
@@ -973,32 +1097,7 @@ def evaluate_exit_action(
             "current_return": current_return,
         }
 
-    if params.take_profit_pct > 0 and current_return >= params.take_profit_pct:
-        return {
-            "action": "exit",
-            "reason": "take_profit",
-            "health": float(runtime_state.get("last_health", 0.0) or 0.0),
-            "current_return": current_return,
-        }
-
-
-    _refresh_runtime_protect(runtime_state, params)
-    if runtime_state.get("protect_armed"):
-        protect_floor = float(runtime_state.get("protect_floor_pct", float("-inf")))
-        if current_return <= protect_floor:
-            return {
-                "action": "exit",
-                "reason": "profit_protect",
-                "health": float(runtime_state.get("last_health", 0.0) or 0.0),
-                "current_return": current_return,
-            }
-
-    safety_cap_bars = resolve_safety_cap_bars(
-        family=family,
-        base_horizon=max(1, int(position.get("hold_bars", 1) or 1)),
-        params=params,
-    )
-
+    # ── Layer 2: min_hold 守卫 ────────────────────────────────────────────
     if bars_held < params.min_hold_bars:
         return {
             "action": "hold",
@@ -1007,55 +1106,14 @@ def evaluate_exit_action(
             "current_return": current_return,
         }
 
-    # ── 机制生命周期退出（优先于统计退出）──────────────────────────────────
-    decay_score = float(runtime_state.get("decay_score", 0.0) or 0.0)
-    decay_action = str(runtime_state.get("decay_action", "hold") or "hold")
-    decay_reason = str(runtime_state.get("decay_reason", "") or "")
-
-    if decay_action == "exit" and decay_score >= params.decay_exit_threshold:
-        return {
-            "action": "exit",
-            "reason": decay_reason or "mechanism_decay",
-            "health": -decay_score,
-            "current_return": current_return,
-        }
-
-    if decay_action == "tighten" and decay_score >= params.decay_tighten_threshold:
-        # 机制正在衰竭 → 收紧 trailing stop（缩小 gap ratio）
-        tightened = ExitParams(
-            take_profit_pct=params.take_profit_pct,
-            stop_pct=params.stop_pct,
-            protect_start_pct=max(0.04, params.protect_start_pct * 0.5),
-            protect_gap_ratio=params.tighten_gap_ratio,
-            protect_floor_pct=params.protect_floor_pct,
-            min_hold_bars=params.min_hold_bars,
-            max_hold_factor=params.max_hold_factor,
-            exit_confirm_bars=params.exit_confirm_bars,
-            decay_exit_threshold=params.decay_exit_threshold,
-            decay_tighten_threshold=params.decay_tighten_threshold,
-            tighten_gap_ratio=params.tighten_gap_ratio,
-            confidence_stop_multipliers=params.confidence_stop_multipliers,
-            regime_stop_multipliers=params.regime_stop_multipliers,
-            mfe_ratchet_threshold=params.mfe_ratchet_threshold,
-            mfe_ratchet_ratio=params.mfe_ratchet_ratio,
-        )
-        _refresh_runtime_protect(runtime_state, tightened)
-        if runtime_state.get("protect_armed"):
-            protect_floor = float(runtime_state.get("protect_floor_pct", float("-inf")))
-            if current_return <= protect_floor:
-                return {
-                    "action": "exit",
-                    "reason": f"tightened_protect|{decay_reason}",
-                    "health": -decay_score,
-                    "current_return": current_return,
-                }
-
+    # ── Layer 3: vs_entry 出场 (核心逻辑) ──────────────────────────────────
     decision = evaluate_exit_state(position, close, features)
     runtime_state["last_health"] = float(decision.get("health", 0.0) or 0.0)
 
     action = str(decision.get("action", "hold"))
     reason = str(decision.get("reason", "hold"))
 
+    # logic_complete 必须在盈利状态下才能触发(CLAUDE.md 红线 #6)
     if reason == "logic_complete" and current_return <= LOGIC_COMPLETE_MIN_RETURN_PCT:
         runtime_state["pending_exit_reason"] = ""
         runtime_state["pending_exit_count"] = 0
@@ -1066,19 +1124,9 @@ def evaluate_exit_action(
             "current_return": current_return,
         }
 
-    if action == "protect" and float(runtime_state.get("mfe_pct", 0.0) or 0.0) >= params.protect_start_pct:
-        runtime_state["protect_armed"] = True
-        runtime_state["protect_reason"] = reason
-        _refresh_runtime_protect(runtime_state, params)
-        return {
-            "action": "protect",
-            "reason": reason,
-            "health": runtime_state["last_health"],
-            "current_return": current_return,
-        }
-
+    # vs_entry 出场(含 thesis_invalidated)
     if action == "exit" and reason in _EXIT_REASON_SET:
-        # Guard: dynamic exit only when profitable 鈥?if losing, wait for MFE or stop
+        # 额外守卫: logic_complete 不在亏损时出场
         if reason == "logic_complete" and current_return < 0:
             runtime_state["pending_exit_reason"] = ""
             runtime_state["pending_exit_count"] = 0
@@ -1089,6 +1137,7 @@ def evaluate_exit_action(
                 "current_return": current_return,
             }
 
+        # 出场确认防抖 (exit_confirm_bars)
         prev_reason = str(runtime_state.get("pending_exit_reason", ""))
         if prev_reason == reason:
             runtime_state["pending_exit_count"] = int(runtime_state.get("pending_exit_count", 0) or 0) + 1
@@ -1110,6 +1159,12 @@ def evaluate_exit_action(
             "current_return": current_return,
         }
 
+    # ── Layer 4: safety_cap 时间兜底 ──────────────────────────────────────
+    safety_cap_bars = resolve_safety_cap_bars(
+        family=family,
+        base_horizon=max(1, int(position.get("hold_bars", 1) or 1)),
+        params=params,
+    )
     if bars_held >= safety_cap_bars:
         runtime_state["pending_exit_reason"] = ""
         runtime_state["pending_exit_count"] = 0
@@ -1120,6 +1175,7 @@ def evaluate_exit_action(
             "current_return": current_return,
         }
 
+    # 默认 hold (保留 decision 的 action/reason 便于调试)
     runtime_state["pending_exit_reason"] = ""
     runtime_state["pending_exit_count"] = 0
     return {
@@ -1131,9 +1187,11 @@ def evaluate_exit_action(
 
 
 def build_runtime_state() -> Dict[str, object]:
+    """构建 runtime state. protect_* 字段保留做 backward compat (旧 state 文件可能有)."""
     return {
         "mfe_pct": 0.0,
         "mae_pct": 0.0,
+        # 以下字段已在 4 层瀑布中弃用, 仅为兼容旧状态文件保留
         "protect_armed": False,
         "protect_reason": "",
         "protect_floor_pct": float("-inf"),
@@ -1144,15 +1202,11 @@ def build_runtime_state() -> Dict[str, object]:
     }
 
 
+# NOTE: _refresh_runtime_protect 函数已废弃 (profit_protection 层在 2026-04-17 移除)
+# 保留函数签名为空实现, 防止外部调用报错; 实盘验证 7/7 策略禁用保护后 PnL 提升
 def _refresh_runtime_protect(runtime_state: Dict[str, object], params: ExitParams) -> None:
-    mfe = float(runtime_state.get("mfe_pct", 0.0) or 0.0)
-    if mfe < params.protect_start_pct:
-        return
-
-    gap = max(params.protect_floor_pct, mfe * params.protect_gap_ratio)
-    floor = max(params.protect_floor_pct, mfe - gap)
-    if floor > float(runtime_state.get("protect_floor_pct", float("-inf"))):
-        runtime_state["protect_floor_pct"] = floor
+    """DEPRECATED: profit_protection 层已移除. 此函数保留但不做任何操作."""
+    return
 
 
 def _adverse_pct(position: Dict, close: float) -> float:
@@ -1163,5 +1217,43 @@ def _adverse_pct(position: Dict, close: float) -> float:
     if direction == "short":
         return max(0.0, (close - entry) / entry * 100)
     return max(0.0, (entry - close) / entry * 100)
+
+
+# 止损绝对下限: 无论乘数和棘轮怎么压, 有效止损不能低于此值
+# BTC 1分钟典型振幅 ~0.15%, 低于此值的止损 = 被噪声杀死
+_STOP_FLOOR_PCT = 0.20
+
+
+def resolve_effective_stop_pct(
+    position: Dict,
+    runtime_state: Dict[str, object],
+    params: ExitParams,
+) -> float:
+    """Return the live hard-stop threshold after all adaptive multipliers.
+
+    Guarantees effective_stop >= _STOP_FLOOR_PCT to prevent noise-level stops.
+    """
+    base_stop = float(params.stop_pct)
+    confidence = int(runtime_state.get("confidence", 2) or 2)
+    regime = str(runtime_state.get("entry_regime", "RANGE_BOUND") or "RANGE_BOUND")
+    mfe = float(runtime_state.get("mfe_pct", 0.0) or 0.0)
+    direction = str(position.get("direction", "")).lower()
+
+    conf_mult = params.confidence_stop_multipliers.get(confidence, 1.0)
+    if direction == "short" and hasattr(params, "regime_stop_multipliers_short"):
+        regime_mult = params.regime_stop_multipliers_short.get(regime, 1.0)
+    else:
+        regime_mult = params.regime_stop_multipliers.get(regime, 1.0)
+
+    effective_stop = base_stop * conf_mult * regime_mult
+    if mfe > params.mfe_ratchet_threshold:
+        effective_stop = min(effective_stop, mfe * params.mfe_ratchet_ratio)
+
+    # 绝对下限: 防止乘法效应把止损压到噪声水平
+    # T1 系列(30s bar)有自己的紧止损逻辑, 通过 base_stop < _STOP_FLOOR_PCT 自然豁免
+    if effective_stop < _STOP_FLOOR_PCT and base_stop >= _STOP_FLOOR_PCT:
+        effective_stop = _STOP_FLOOR_PCT
+
+    return float(effective_stop)
 
 # FAT-FIX: 为 RT-1 / OA-1 补齐显式出场分派，保持原 generic 行为不变但通过 live 家族验收。

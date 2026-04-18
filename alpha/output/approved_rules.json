@@ -1,0 +1,2824 @@
+[
+  {
+    "id": "20260411_131937_liquidity_crisis_reversa_c09f4babd361",
+    "group": "liquidity_crisis_reversal_short",
+    "status": "approved",
+    "origin": "kimi_researcher",
+    "entry": {
+      "feature": "kyle_lambda",
+      "operator": ">",
+      "threshold": 1.057934,
+      "direction": "short",
+      "horizon": 15
+    },
+    "combo_conditions": [
+      {
+        "feature": "position_in_range_24h",
+        "op": ">",
+        "threshold": 0.926631
+      }
+    ],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "kyle_lambda_vs_entry",
+              "operator": "<",
+              "threshold": 0.06316,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D1",
+          "description": "kyle_lambda vs_entry < 0.0632 (score=0.12)"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_24h_vs_entry",
+              "operator": "<",
+              "threshold": -0.082325,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D2",
+          "description": "position_in_range_24h vs_entry < -0.0823 (score=0.10)"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "vwap_24h_vs_entry",
+              "operator": "<",
+              "threshold": 79.2125,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D3",
+          "description": "vwap_24h vs_entry < 79.2125 (score=0.23)"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_24h_vs_entry",
+              "operator": ">",
+              "threshold": 0.1451832,
+              "source": "thesis_invalidation",
+              "role": "invalidation",
+              "neutral_value": 0.5
+            }
+          ],
+          "combo_label": "I1",
+          "description": "position_in_range_24h worsened versus entry; thesis broken"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_24h_vs_entry",
+              "operator": ">",
+              "threshold": 0.1451832,
+              "source": "thesis_invalidation",
+              "role": "invalidation",
+              "neutral_value": 0.5
+            },
+            {
+              "feature": "kyle_lambda_vs_entry",
+              "operator": ">",
+              "threshold": 0.0688881,
+              "source": "thesis_invalidation",
+              "role": "invalidation",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "I2",
+          "description": "Primary force and confirm force 1 both worsened versus entry"
+        }
+      ],
+      "exit_method": "data_mined_vs_entry",
+      "snapshot_required": true,
+      "mechanism_type": "compression_release",
+      "force_features": [
+        "position_in_range_24h",
+        "kyle_lambda"
+      ],
+      "earliest_pf": 2.3819,
+      "net_return_with_exit": 0.0482,
+      "improvement": 0.0009,
+      "triggered_exit_pct": 89.39,
+      "n_samples": 66,
+      "exit_reason_counts": {
+        "hard_stop": 0,
+        "take_profit": 0,
+        "thesis_invalidated": 0,
+        "profit_protect": 0,
+        "tightened_protect": 0,
+        "logic_complete": 59,
+        "safety_cap": 7
+      },
+      "avg_bars_held": 8.17,
+      "win_rate": 68.18,
+      "split_idx": 353159,
+      "oos_win_rate": 56.06,
+      "n_oos": 66,
+      "oos_avg_ret": 0.0472,
+      "oos_net_return": 0.0472,
+      "oos_pf": 1.4187,
+      "mfe_coverage": 84.85,
+      "oos_trigger_rate": 0.0379
+    },
+    "stop_pct": 1.0,
+    "exit_params": {
+      "take_profit_pct": 0.0,
+      "stop_pct": 1.0,
+      "protect_start_pct": 0.1,
+      "protect_gap_ratio": 0.35,
+      "protect_floor_pct": 0.05,
+      "min_hold_bars": 2,
+      "max_hold_factor": 3,
+      "exit_confirm_bars": 1,
+      "decay_exit_threshold": 0.85,
+      "decay_tighten_threshold": 0.5,
+      "tighten_gap_ratio": 0.3,
+      "confidence_stop_multipliers": {
+        "1": 0.7,
+        "2": 1.0,
+        "3": 1.3
+      },
+      "regime_stop_multipliers": {
+        "QUIET_TREND": 0.8,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "regime_stop_multipliers_short": {
+        "QUIET_TREND": 0.6,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "mfe_ratchet_threshold": 0.15,
+      "mfe_ratchet_ratio": 0.4
+    },
+    "stop_logic": {
+      "type": "mechanism_hard_stop",
+      "mechanism_type": "liquidity_crisis_reversal",
+      "direction": "short",
+      "stop_pct": 1.0,
+      "reason": "thesis_invalidated_or_force_stalled"
+    },
+    "strategy_blueprint": {
+      "snapshot_required": true,
+      "force_decay_exit": [
+        {
+          "conditions": [
+            {
+              "feature": "kyle_lambda_vs_entry",
+              "operator": "<",
+              "threshold": 0.06316,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D1",
+          "description": "kyle_lambda vs_entry < 0.0632 (score=0.12)"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_24h_vs_entry",
+              "operator": "<",
+              "threshold": -0.082325,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D2",
+          "description": "position_in_range_24h vs_entry < -0.0823 (score=0.10)"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "vwap_24h_vs_entry",
+              "operator": "<",
+              "threshold": 79.2125,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D3",
+          "description": "vwap_24h vs_entry < 79.2125 (score=0.23)"
+        }
+      ],
+      "thesis_invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_24h_vs_entry",
+              "operator": ">",
+              "threshold": 0.1451832,
+              "source": "thesis_invalidation",
+              "role": "invalidation",
+              "neutral_value": 0.5
+            }
+          ],
+          "combo_label": "I1",
+          "description": "position_in_range_24h worsened versus entry; thesis broken"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_24h_vs_entry",
+              "operator": ">",
+              "threshold": 0.1451832,
+              "source": "thesis_invalidation",
+              "role": "invalidation",
+              "neutral_value": 0.5
+            },
+            {
+              "feature": "kyle_lambda_vs_entry",
+              "operator": ">",
+              "threshold": 0.0688881,
+              "source": "thesis_invalidation",
+              "role": "invalidation",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "I2",
+          "description": "Primary force and confirm force 1 both worsened versus entry"
+        }
+      ]
+    },
+    "stats": {
+      "oos_win_rate": 68.18,
+      "n_oos": 66,
+      "oos_pf": 2.382,
+      "oos_avg_ret": 0.0482,
+      "oos_net_return": 0.0482,
+      "exit_reason_dist": {
+        "hard_stop": 0,
+        "take_profit": 0,
+        "thesis_invalidated": 0,
+        "profit_protect": 0,
+        "tightened_protect": 0,
+        "logic_complete": 59,
+        "safety_cap": 7
+      },
+      "avg_bars_held": 8.2,
+      "baseline_wr": 56.06,
+      "baseline_pf": 1.419,
+      "baseline_avg_ret": 0.0472,
+      "wr_improvement": 12.12,
+      "seed_oos_wr": 56.06,
+      "degradation": 1.0,
+      "mfe_coverage": 84.85
+    },
+    "explanation": "假设: liquidity_crisis_reversal_short\n失衡力: Kyle Lambda极端高企同时价格处于24h高位，流动性枯竭下的价格虚高，做市商无法对冲导致报价扭曲\n为什么暂时: 流动性恢复后价格冲击系数下降，高位缺乏真实买单支撑，价格快速回落\n持续性要求: \n入场触发: 197 次, 触发率=0.0374%\nOOS胜率=56.1% n=66 MFE覆盖=84.8%\nKimi最终置信度=0.82",
+    "rule_str": "kyle_lambda > 1.058 AND position_in_range_24h > 0.9266 -> short 15bars",
+    "discovered_at": "2026-04-11T13:19:37.094515+00:00",
+    "mechanism_type": "liquidity_crisis_reversal",
+    "kimi_session_id": "kimi_research_20260411_131722_2fa93133",
+    "kimi_hypothesis": {
+      "mechanism_name": "liquidity_crisis_reversal_short",
+      "force_description": "Kyle Lambda极端高企同时价格处于24h高位，流动性枯竭下的价格虚高，做市商无法对冲导致报价扭曲",
+      "why_temporary": "流动性恢复后价格冲击系数下降，高位缺乏真实买单支撑，价格快速回落",
+      "direction": "short",
+      "entry_features": [
+        "kyle_lambda",
+        "position_in_range_24h"
+      ],
+      "persistence_requirement": "",
+      "predicted_trigger_rate": 1.2,
+      "predicted_win_rate": 70.0,
+      "horizon": 15
+    },
+    "kimi_confidence": 0.82,
+    "entry_code": "",
+    "exit_code": "",
+    "family": "A5-001",
+    "review": {
+      "reviewed_at": "2026-04-11T13:20:18.957410+00:00",
+      "reviewer": "system",
+      "verdict": "keep_pending",
+      "reason": "保留待复核: 入场和出场能讲成一组，费后赚钱，而且次数够多"
+    },
+    "llm_validated": false,
+    "approved_at": "2026-04-11T13:20:19.607785+00:00",
+    "approved_by": "stats_auto"
+  },
+  {
+    "id": "restored_a2_26_20260416",
+    "group": "dist_to_24h_high > -0.009746 AND oi_change_rate_5m < 0.0000145 -> short 30bars",
+    "status": "approved",
+    "origin": "human_restored",
+    "entry": {
+      "feature": "dist_to_24h_high",
+      "operator": ">",
+      "threshold": -0.009746,
+      "direction": "short",
+      "horizon": 30
+    },
+    "combo_conditions": [
+      {
+        "feature": "oi_change_rate_5m",
+        "op": "<",
+        "threshold": 1.45e-05
+      }
+    ],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": ">",
+              "threshold": 0.0053603,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "C1",
+          "description": "dist_to_24h_high relative to entry has repaired enough"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": ">",
+              "threshold": 0.0053603,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "dist_to_24h_high",
+              "operator": ">",
+              "threshold": -0.0043857,
+              "source": "force_decay",
+              "role": "repair_target",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "C2",
+          "description": "dist_to_24h_high repaired versus entry and absolute state"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": ">",
+              "threshold": 0.0053603,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "oi_change_rate_5m_vs_entry",
+              "operator": "<",
+              "threshold": -0.003,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "C3",
+          "description": "Entry force and confirm force both repaired versus entry"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": "<",
+              "threshold": -0.0029238,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "I1",
+          "description": "dist_to_24h_high worsened versus entry; thesis broken"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": "<",
+              "threshold": -0.0029238,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "oi_change_rate_5m_vs_entry",
+              "operator": ">",
+              "threshold": 0.003,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "I2",
+          "description": "Primary and confirm force both worsened versus entry"
+        }
+      ],
+      "exit_method": "force_decay_vs_entry",
+      "snapshot_required": true,
+      "mechanism_type": "near_high_distribution",
+      "force_features": [
+        "dist_to_24h_high",
+        "oi_change_rate_5m"
+      ]
+    },
+    "stop_pct": 0.7,
+    "exit_params": {
+      "take_profit_pct": 0.0,
+      "stop_pct": 0.7,
+      "protect_start_pct": 0.15,
+      "protect_gap_ratio": 0.4,
+      "protect_floor_pct": 0.05,
+      "min_hold_bars": 3,
+      "max_hold_factor": 4,
+      "exit_confirm_bars": 2,
+      "decay_exit_threshold": 0.85,
+      "decay_tighten_threshold": 0.5,
+      "tighten_gap_ratio": 0.3,
+      "confidence_stop_multipliers": {
+        "1": 0.7,
+        "2": 1.0,
+        "3": 1.3
+      },
+      "regime_stop_multipliers": {
+        "QUIET_TREND": 0.8,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "regime_stop_multipliers_short": {
+        "QUIET_TREND": 0.6,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "mfe_ratchet_threshold": 0.12,
+      "mfe_ratchet_ratio": 0.4
+    },
+    "stop_logic": {
+      "type": "mechanism_hard_stop",
+      "mechanism_type": "near_high_distribution",
+      "direction": "short",
+      "stop_pct": 0.7,
+      "reason": "thesis_invalidated_or_force_stalled"
+    },
+    "stats": {
+      "oos_win_rate": 75.0,
+      "n_oos": 0,
+      "oos_pf": 0.0,
+      "oos_avg_ret": 0.0,
+      "oos_net_return": 0.0,
+      "baseline_wr": 75.0,
+      "seed_oos_wr": 75.0,
+      "degradation": 1.0
+    },
+    "explanation": "高位+OI停止增长做空: 价格非常接近24h高点但持仓量停止增长，无新买方入场，虚高必然回落",
+    "rule_str": "dist_to_24h_high > -0.009746 AND oi_change_rate_5m < 0.0000145 -> short 30bars",
+    "mechanism_type": "near_high_distribution",
+    "family": "A2-26",
+    "llm_validated": false,
+    "approved_at": "2026-04-16T13:09:11.495558+00:00",
+    "approved_by": "human_manual",
+    "review": {
+      "reviewed_at": "2026-04-16T13:09:11.495558+00:00",
+      "reviewer": "human_manual",
+      "verdict": "restored",
+      "reason": "卡片在 approved_rules.json 被意外覆盖后手动恢复，入场条件来自 mechanism_tracker + product_policy 签名表"
+    }
+  },
+  {
+    "id": "restored_a2_29_20260416",
+    "group": "dist_to_24h_high > -0.009746 AND spread_vs_ma20 > 1.688 -> short 30bars",
+    "status": "approved",
+    "origin": "human_restored",
+    "entry": {
+      "feature": "dist_to_24h_high",
+      "operator": ">",
+      "threshold": -0.009746,
+      "direction": "short",
+      "horizon": 30
+    },
+    "combo_conditions": [
+      {
+        "feature": "spread_vs_ma20",
+        "op": ">",
+        "threshold": 1.688
+      }
+    ],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": ">",
+              "threshold": 0.0053603,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "C1",
+          "description": "dist_to_24h_high relative to entry has repaired enough"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": ">",
+              "threshold": 0.0053603,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "dist_to_24h_high",
+              "operator": ">",
+              "threshold": -0.0043857,
+              "source": "force_decay",
+              "role": "repair_target",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "C2",
+          "description": "dist_to_24h_high repaired versus entry and absolute state"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": ">",
+              "threshold": 0.0053603,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "spread_vs_ma20_vs_entry",
+              "operator": "<",
+              "threshold": -0.3784,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 1.0
+            }
+          ],
+          "combo_label": "C3",
+          "description": "Entry force and confirm force both repaired versus entry"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": "<",
+              "threshold": -0.0029238,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "I1",
+          "description": "dist_to_24h_high worsened versus entry; thesis broken"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": "<",
+              "threshold": -0.0029238,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "spread_vs_ma20_vs_entry",
+              "operator": ">",
+              "threshold": 0.2532,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 1.0
+            }
+          ],
+          "combo_label": "I2",
+          "description": "Primary and confirm force both worsened versus entry"
+        }
+      ],
+      "exit_method": "force_decay_vs_entry",
+      "snapshot_required": true,
+      "mechanism_type": "near_high_distribution",
+      "force_features": [
+        "dist_to_24h_high",
+        "spread_vs_ma20"
+      ]
+    },
+    "stop_pct": 0.7,
+    "exit_params": {
+      "take_profit_pct": 0.0,
+      "stop_pct": 0.7,
+      "protect_start_pct": 0.15,
+      "protect_gap_ratio": 0.4,
+      "protect_floor_pct": 0.05,
+      "min_hold_bars": 3,
+      "max_hold_factor": 4,
+      "exit_confirm_bars": 2,
+      "decay_exit_threshold": 0.85,
+      "decay_tighten_threshold": 0.5,
+      "tighten_gap_ratio": 0.3,
+      "confidence_stop_multipliers": {
+        "1": 0.7,
+        "2": 1.0,
+        "3": 1.3
+      },
+      "regime_stop_multipliers": {
+        "QUIET_TREND": 0.8,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "regime_stop_multipliers_short": {
+        "QUIET_TREND": 0.6,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "mfe_ratchet_threshold": 0.12,
+      "mfe_ratchet_ratio": 0.4
+    },
+    "stop_logic": {
+      "type": "mechanism_hard_stop",
+      "mechanism_type": "near_high_distribution",
+      "direction": "short",
+      "stop_pct": 0.7,
+      "reason": "thesis_invalidated_or_force_stalled"
+    },
+    "stats": {
+      "oos_win_rate": 72.0,
+      "n_oos": 0,
+      "oos_pf": 0.0,
+      "oos_avg_ret": 0.0,
+      "oos_net_return": 0.0,
+      "baseline_wr": 72.0,
+      "seed_oos_wr": 72.0,
+      "degradation": 1.0
+    },
+    "explanation": "高位+点差扩大做空: 价格接近24h高点且做市商点差扩大至均值1.7倍，做市商在退出保护自己，高位无真实支撑",
+    "rule_str": "dist_to_24h_high > -0.009746 AND spread_vs_ma20 > 1.688 -> short 30bars",
+    "mechanism_type": "near_high_distribution",
+    "family": "A2-29",
+    "llm_validated": false,
+    "approved_at": "2026-04-16T13:09:11.496189+00:00",
+    "approved_by": "human_manual",
+    "review": {
+      "reviewed_at": "2026-04-16T13:09:11.496189+00:00",
+      "reviewer": "human_manual",
+      "verdict": "restored",
+      "reason": "卡片在 approved_rules.json 被意外覆盖后手动恢复，入场条件来自 mechanism_tracker + product_policy 签名表"
+    }
+  },
+  {
+    "id": "restored_a3_oi_20260416",
+    "group": "dist_to_24h_high > -0.005 AND oi_change_rate_1h < -0.01 -> short 30bars",
+    "status": "approved",
+    "origin": "human_restored",
+    "entry": {
+      "feature": "dist_to_24h_high",
+      "operator": ">",
+      "threshold": -0.005,
+      "direction": "short",
+      "horizon": 30
+    },
+    "combo_conditions": [
+      {
+        "feature": "oi_change_rate_1h",
+        "op": "<",
+        "threshold": -0.01
+      }
+    ],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": ">",
+              "threshold": 0.00275,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "C1",
+          "description": "dist_to_24h_high relative to entry has repaired enough"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": ">",
+              "threshold": 0.00275,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "dist_to_24h_high",
+              "operator": ">",
+              "threshold": -0.00225,
+              "source": "force_decay",
+              "role": "repair_target",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "C2",
+          "description": "dist_to_24h_high repaired versus entry and absolute state"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": ">",
+              "threshold": 0.00275,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "oi_change_rate_1h_vs_entry",
+              "operator": ">",
+              "threshold": 0.0055,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "C3",
+          "description": "Entry force and confirm force both repaired versus entry"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": "<",
+              "threshold": -0.002,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "I1",
+          "description": "dist_to_24h_high worsened versus entry; thesis broken"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high_vs_entry",
+              "operator": "<",
+              "threshold": -0.002,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "oi_change_rate_1h_vs_entry",
+              "operator": "<",
+              "threshold": -0.003,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "I2",
+          "description": "Primary and confirm force both worsened versus entry"
+        }
+      ],
+      "exit_method": "force_decay_vs_entry",
+      "snapshot_required": true,
+      "mechanism_type": "oi_divergence",
+      "force_features": [
+        "dist_to_24h_high",
+        "oi_change_rate_1h"
+      ]
+    },
+    "stop_pct": 0.7,
+    "exit_params": {
+      "take_profit_pct": 0.0,
+      "stop_pct": 0.7,
+      "protect_start_pct": 0.15,
+      "protect_gap_ratio": 0.4,
+      "protect_floor_pct": 0.05,
+      "min_hold_bars": 3,
+      "max_hold_factor": 4,
+      "exit_confirm_bars": 2,
+      "decay_exit_threshold": 0.85,
+      "decay_tighten_threshold": 0.5,
+      "tighten_gap_ratio": 0.3,
+      "confidence_stop_multipliers": {
+        "1": 0.7,
+        "2": 1.0,
+        "3": 1.3
+      },
+      "regime_stop_multipliers": {
+        "QUIET_TREND": 0.8,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "regime_stop_multipliers_short": {
+        "QUIET_TREND": 0.6,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "mfe_ratchet_threshold": 0.12,
+      "mfe_ratchet_ratio": 0.4
+    },
+    "stop_logic": {
+      "type": "mechanism_hard_stop",
+      "mechanism_type": "oi_divergence",
+      "direction": "short",
+      "stop_pct": 0.7,
+      "reason": "thesis_invalidated_or_force_stalled"
+    },
+    "stats": {
+      "oos_win_rate": 0.0,
+      "n_oos": 0,
+      "oos_pf": 0.0,
+      "oos_avg_ret": 0.0,
+      "oos_net_return": 0.0,
+      "baseline_wr": 0.0,
+      "seed_oos_wr": 0.0,
+      "degradation": 1.0
+    },
+    "explanation": "高位+OI持续流出做空: 价格贴近24h高点但过去1小时OI持续下降超1%，去杠杆背离信号",
+    "rule_str": "dist_to_24h_high > -0.005 AND oi_change_rate_1h < -0.01 -> short 30bars",
+    "mechanism_type": "oi_divergence",
+    "family": "A3-OI",
+    "llm_validated": false,
+    "approved_at": "2026-04-16T13:09:11.496697+00:00",
+    "approved_by": "human_manual",
+    "review": {
+      "reviewed_at": "2026-04-16T13:09:11.496697+00:00",
+      "reviewer": "human_manual",
+      "verdict": "restored",
+      "reason": "卡片在 approved_rules.json 被意外覆盖后手动恢复，入场条件来自 mechanism_tracker + product_policy 签名表"
+    }
+  },
+  {
+    "id": "restored_a4_pir_20260416",
+    "group": "position_in_range_4h > 0.90 AND oi_change_rate_1h < -0.008 -> short 30bars",
+    "status": "approved",
+    "origin": "human_restored",
+    "entry": {
+      "feature": "position_in_range_4h",
+      "operator": ">",
+      "threshold": 0.9,
+      "direction": "short",
+      "horizon": 30
+    },
+    "combo_conditions": [
+      {
+        "feature": "oi_change_rate_1h",
+        "op": "<",
+        "threshold": -0.008
+      }
+    ],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h_vs_entry",
+              "operator": "<",
+              "threshold": -0.15,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.5
+            }
+          ],
+          "combo_label": "C1",
+          "description": "position_in_range_4h relative to entry has repaired enough"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h_vs_entry",
+              "operator": "<",
+              "threshold": -0.15,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.5
+            },
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.68,
+              "source": "force_decay",
+              "role": "repair_target",
+              "neutral_value": 0.5
+            }
+          ],
+          "combo_label": "C2",
+          "description": "position_in_range_4h repaired versus entry and absolute state"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h_vs_entry",
+              "operator": "<",
+              "threshold": -0.15,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.5
+            },
+            {
+              "feature": "oi_change_rate_1h_vs_entry",
+              "operator": ">",
+              "threshold": 0.0044,
+              "source": "force_decay",
+              "role": "decay",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "C3",
+          "description": "Entry force and confirm force both repaired versus entry"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h_vs_entry",
+              "operator": ">",
+              "threshold": 0.05,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 0.5
+            }
+          ],
+          "combo_label": "I1",
+          "description": "position_in_range_4h worsened versus entry; thesis broken"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h_vs_entry",
+              "operator": ">",
+              "threshold": 0.05,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 0.5
+            },
+            {
+              "feature": "oi_change_rate_1h_vs_entry",
+              "operator": "<",
+              "threshold": -0.003,
+              "source": "thesis_invalidation",
+              "role": "thesis_invalidated",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "I2",
+          "description": "Primary and confirm force both worsened versus entry"
+        }
+      ],
+      "exit_method": "force_decay_vs_entry",
+      "snapshot_required": true,
+      "mechanism_type": "oi_divergence",
+      "force_features": [
+        "position_in_range_4h",
+        "oi_change_rate_1h"
+      ]
+    },
+    "stop_pct": 0.5,
+    "exit_params": {
+      "take_profit_pct": 0.0,
+      "stop_pct": 0.5,
+      "protect_start_pct": 0.12,
+      "protect_gap_ratio": 0.5,
+      "protect_floor_pct": 0.03,
+      "min_hold_bars": 3,
+      "max_hold_factor": 4,
+      "exit_confirm_bars": 2,
+      "decay_exit_threshold": 0.85,
+      "decay_tighten_threshold": 0.5,
+      "tighten_gap_ratio": 0.3,
+      "confidence_stop_multipliers": {
+        "1": 0.7,
+        "2": 1.0,
+        "3": 1.3
+      },
+      "regime_stop_multipliers": {
+        "QUIET_TREND": 0.8,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "regime_stop_multipliers_short": {
+        "QUIET_TREND": 0.6,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "mfe_ratchet_threshold": 0.12,
+      "mfe_ratchet_ratio": 0.4
+    },
+    "stop_logic": {
+      "type": "mechanism_hard_stop",
+      "mechanism_type": "oi_divergence",
+      "direction": "short",
+      "stop_pct": 0.35,
+      "reason": "thesis_invalidated_or_force_stalled"
+    },
+    "stats": {
+      "oos_win_rate": 68.75,
+      "n_oos": 0,
+      "oos_pf": 0.0,
+      "oos_avg_ret": 0.0,
+      "oos_net_return": 0.0,
+      "baseline_wr": 68.75,
+      "seed_oos_wr": 68.75,
+      "degradation": 1.0
+    },
+    "explanation": "4h区间高位+OI停滞做空: 价格处于4h区间顶部90%分位，但1小时OI在持续流出，价格无新资金支撑，量价背离",
+    "rule_str": "position_in_range_4h > 0.90 AND oi_change_rate_1h < -0.008 -> short 30bars",
+    "mechanism_type": "oi_divergence",
+    "family": "A4-PIR",
+    "llm_validated": false,
+    "approved_at": "2026-04-16T13:09:11.497103+00:00",
+    "approved_by": "human_manual",
+    "review": {
+      "reviewed_at": "2026-04-16T13:09:11.497103+00:00",
+      "reviewer": "human_manual",
+      "verdict": "restored",
+      "reason": "卡片在 approved_rules.json 被意外覆盖后手动恢复，入场条件来自 mechanism_tracker + product_policy 签名表"
+    }
+  },
+  {
+    "id": "20260417_011216_compression_breakout_lon_7f78af693ba5",
+    "group": "compression_breakout",
+    "status": "approved",
+    "origin": "realtime_seed_miner_multi",
+    "review_profile": "sparse_realtime_multi",
+    "entry": {
+      "feature": "price_compression_blocks_5m",
+      "operator": ">",
+      "threshold": 2.0,
+      "direction": "long",
+      "horizon": 15
+    },
+    "combo_conditions": [
+      {
+        "feature": "spread_vs_ma20",
+        "op": "<",
+        "threshold": 0.6648321151733398
+      },
+      {
+        "feature": "volume_acceleration",
+        "op": ">",
+        "threshold": 36.500749588012695
+      }
+    ],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "spread_vs_ma20_vs_entry",
+              "operator": ">",
+              "threshold": 0.436044,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "price_compression_blocks_5m_vs_entry",
+              "operator": "<",
+              "threshold": 0.0,
+              "source": "causal_bridge",
+              "role": "entry_force_decay",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D1",
+          "description": "spread_vs_ma20 vs_entry > 0.4360 (score=0.25) [causal: price_compression_blocks_5m_vs_entry decay added]"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "close_time_vs_entry",
+              "operator": "<",
+              "threshold": 1404000.0,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D2",
+          "description": "close_time vs_entry < 1404000.0000 (score=0.40)"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "hours_to_options_expiry_vs_entry",
+              "operator": ">",
+              "threshold": -0.390001,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D3",
+          "description": "hours_to_options_expiry vs_entry > -0.3900 (score=0.40)"
+        }
+      ],
+      "invalidation": [],
+      "exit_method": "data_mined_vs_entry",
+      "snapshot_required": true,
+      "mechanism_type": "compression_release",
+      "force_features": [
+        "price_compression_blocks_5m",
+        "spread_vs_ma20",
+        "volume_acceleration"
+      ],
+      "earliest_pf": 2.39,
+      "net_return_with_exit": 0.069,
+      "improvement": 0.0,
+      "triggered_exit_pct": 100.0,
+      "n_samples": 35,
+      "exit_reason_counts": {
+        "logic_complete": 35
+      },
+      "avg_bars_held": 15.0,
+      "win_rate": 65.71,
+      "source": "seed_miner_oos_validated"
+    },
+    "stop_pct": 0.25,
+    "exit_params": {
+      "take_profit_pct": 0.0,
+      "stop_pct": 0.25,
+      "protect_start_pct": 0.04,
+      "protect_gap_ratio": 0.35,
+      "protect_floor_pct": 0.03,
+      "min_hold_bars": 2,
+      "max_hold_factor": 3,
+      "exit_confirm_bars": 1,
+      "decay_exit_threshold": 0.8,
+      "decay_tighten_threshold": 0.5,
+      "tighten_gap_ratio": 0.28,
+      "confidence_stop_multipliers": {
+        "1": 0.7,
+        "2": 1.0,
+        "3": 1.3
+      },
+      "regime_stop_multipliers": {
+        "QUIET_TREND": 0.8,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "regime_stop_multipliers_short": {
+        "QUIET_TREND": 0.6,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "mfe_ratchet_threshold": 0.25,
+      "mfe_ratchet_ratio": 0.4
+    },
+    "stop_logic": {
+      "type": "mechanism_hard_stop",
+      "mechanism_type": "compression_release",
+      "direction": "long",
+      "stop_pct": 0.25,
+      "reason": "thesis_invalidated_or_force_stalled"
+    },
+    "strategy_blueprint": {
+      "snapshot_required": true,
+      "force_decay_exit": [
+        {
+          "conditions": [
+            {
+              "feature": "spread_vs_ma20_vs_entry",
+              "operator": ">",
+              "threshold": 0.436044,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "price_compression_blocks_5m_vs_entry",
+              "operator": "<",
+              "threshold": 0.0,
+              "source": "causal_bridge",
+              "role": "entry_force_decay",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D1",
+          "description": "spread_vs_ma20 vs_entry > 0.4360 (score=0.25) [causal: price_compression_blocks_5m_vs_entry decay added]"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "close_time_vs_entry",
+              "operator": "<",
+              "threshold": 1404000.0,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D2",
+          "description": "close_time vs_entry < 1404000.0000 (score=0.40)"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "hours_to_options_expiry_vs_entry",
+              "operator": ">",
+              "threshold": -0.390001,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D3",
+          "description": "hours_to_options_expiry vs_entry > -0.3900 (score=0.40)"
+        }
+      ],
+      "thesis_invalidation": []
+    },
+    "stats": {
+      "oos_win_rate": 65.71,
+      "n_oos": 35,
+      "oos_pf": 2.39,
+      "oos_avg_ret": 0.069,
+      "oos_net_return": 0.069,
+      "seed_oos_wr": 65.71,
+      "wr_improvement": 0.0,
+      "degradation": 1.0
+    },
+    "explanation": "种子: price_compression_blocks_5m > 2 (LONG 研究窗=15bar)\n上下文: NONE\n联立条件: spread_vs_ma20 < 0.6648 AND volume_acceleration > 36.5\n直通评审: multi-condition 种子已自带物理确认，不再强制叠加额外 confirm\nOOS胜率=65.7% n=35 PF=2.39 avg=0.0690%",
+    "rule_str": "price_compression_blocks_5m > 2 AND spread_vs_ma20 < 0.6648 AND volume_acceleration > 36.5 -> long 15bars",
+    "discovered_at": "2026-04-17T01:12:16.216973+00:00",
+    "mechanism_type": "compression_release",
+    "family": "A5-002",
+    "validation": {
+      "passed": true,
+      "mechanism_type": "compression_release",
+      "issues": [],
+      "warnings": [],
+      "causal_explanation": "入场: price_compression_blocks_5m 高于阈值 → 做多 | 机制: compression_release\n物理逻辑: 未找到方向-机制硬约束，默认通过（建议手动核查）\n机制说明: 区间压缩释放 — 价格在极值位置积累势能，突破时释放定向动量\n物理确认: spread_vs_ma20 < 0.6648 AND volume_acceleration > 36.5",
+      "overfitting_score": 0.0,
+      "causal_score": 1.0
+    },
+    "review": {
+      "reviewed_at": "2026-04-17T01:12:16.277855+00:00",
+      "reviewer": "system",
+      "verdict": "keep_pending",
+      "reason": "保留待复核: 入场和出场能讲成一组，费后赚钱，而且次数够多"
+    },
+    "llm_validated": false,
+    "approved_at": "2026-04-17T01:12:16.530455+00:00",
+    "approved_by": "stats_auto"
+  },
+  {
+    "id": "20260417_095431_compression_breakout_lon_544f141cc56b",
+    "group": "compression_breakout",
+    "status": "approved",
+    "origin": "realtime_seed_miner_multi",
+    "review_profile": "sparse_realtime_multi",
+    "entry": {
+      "feature": "price_compression_blocks_5m",
+      "operator": ">",
+      "threshold": 3.0,
+      "direction": "long",
+      "horizon": 10
+    },
+    "combo_conditions": [
+      {
+        "feature": "spread_vs_ma20",
+        "op": "<",
+        "threshold": 0.654456377029419
+      },
+      {
+        "feature": "volume_acceleration",
+        "op": ">",
+        "threshold": 26.88599967956543
+      }
+    ],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "buy_volume_vs_entry",
+              "operator": ">",
+              "threshold": 103.5506,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "price_compression_blocks_5m_vs_entry",
+              "operator": "<",
+              "threshold": 0.0,
+              "source": "causal_bridge",
+              "role": "entry_force_decay",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D1",
+          "description": "buy_volume vs_entry > 103.5506 (score=0.29) [causal: price_compression_blocks_5m_vs_entry decay added]"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "ls_ratio_change_5m_vs_entry",
+              "operator": ">",
+              "threshold": 0.0003,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D2",
+          "description": "ls_ratio_change_5m vs_entry > 0.0003 (score=0.26)"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_24h_vs_entry",
+              "operator": ">",
+              "threshold": 0.020135,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D3",
+          "description": "position_in_range_24h vs_entry > 0.0201 (score=0.21)"
+        }
+      ],
+      "invalidation": [],
+      "exit_method": "data_mined_vs_entry",
+      "snapshot_required": true,
+      "mechanism_type": "compression_release",
+      "force_features": [
+        "price_compression_blocks_5m",
+        "spread_vs_ma20",
+        "volume_acceleration"
+      ],
+      "earliest_pf": 3.404,
+      "net_return_with_exit": 0.068,
+      "improvement": 0.0,
+      "triggered_exit_pct": 100.0,
+      "n_samples": 44,
+      "exit_reason_counts": {
+        "logic_complete": 44
+      },
+      "avg_bars_held": 10.0,
+      "win_rate": 65.91,
+      "source": "seed_miner_oos_validated"
+    },
+    "stop_pct": 0.25,
+    "exit_params": {
+      "take_profit_pct": 0.0,
+      "stop_pct": 0.25,
+      "protect_start_pct": 0.04,
+      "protect_gap_ratio": 0.35,
+      "protect_floor_pct": 0.03,
+      "min_hold_bars": 2,
+      "max_hold_factor": 3,
+      "exit_confirm_bars": 1,
+      "decay_exit_threshold": 0.8,
+      "decay_tighten_threshold": 0.5,
+      "tighten_gap_ratio": 0.28,
+      "confidence_stop_multipliers": {
+        "1": 0.7,
+        "2": 1.0,
+        "3": 1.3
+      },
+      "regime_stop_multipliers": {
+        "QUIET_TREND": 0.8,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "regime_stop_multipliers_short": {
+        "QUIET_TREND": 0.6,
+        "RANGE_BOUND": 1.0,
+        "VOLATILE_TREND": 1.5,
+        "VOL_EXPANSION": 1.5,
+        "CRISIS": 0.5
+      },
+      "mfe_ratchet_threshold": 0.25,
+      "mfe_ratchet_ratio": 0.4
+    },
+    "stop_logic": {
+      "type": "mechanism_hard_stop",
+      "mechanism_type": "compression_release",
+      "direction": "long",
+      "stop_pct": 0.25,
+      "reason": "thesis_invalidated_or_force_stalled"
+    },
+    "strategy_blueprint": {
+      "snapshot_required": true,
+      "force_decay_exit": [
+        {
+          "conditions": [
+            {
+              "feature": "buy_volume_vs_entry",
+              "operator": ">",
+              "threshold": 103.5506,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            },
+            {
+              "feature": "price_compression_blocks_5m_vs_entry",
+              "operator": "<",
+              "threshold": 0.0,
+              "source": "causal_bridge",
+              "role": "entry_force_decay",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D1",
+          "description": "buy_volume vs_entry > 103.5506 (score=0.29) [causal: price_compression_blocks_5m_vs_entry decay added]"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "ls_ratio_change_5m_vs_entry",
+              "operator": ">",
+              "threshold": 0.0003,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D2",
+          "description": "ls_ratio_change_5m vs_entry > 0.0003 (score=0.26)"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_24h_vs_entry",
+              "operator": ">",
+              "threshold": 0.020135,
+              "source": "data_mined",
+              "role": "force_decay_mined",
+              "neutral_value": 0.0
+            }
+          ],
+          "combo_label": "D3",
+          "description": "position_in_range_24h vs_entry > 0.0201 (score=0.21)"
+        }
+      ],
+      "thesis_invalidation": []
+    },
+    "stats": {
+      "oos_win_rate": 65.91,
+      "n_oos": 44,
+      "oos_pf": 3.404,
+      "oos_avg_ret": 0.068,
+      "oos_net_return": 0.068,
+      "seed_oos_wr": 65.91,
+      "wr_improvement": 0.0,
+      "degradation": 1.0
+    },
+    "explanation": "种子: price_compression_blocks_5m > 3 (LONG 研究窗=10bar)\n上下文: NONE\n联立条件: spread_vs_ma20 < 0.6545 AND volume_acceleration > 26.89\n直通评审: multi-condition 种子已自带物理确认，不再强制叠加额外 confirm\nOOS胜率=65.9% n=44 PF=3.40 avg=0.0680%",
+    "rule_str": "price_compression_blocks_5m > 3 AND spread_vs_ma20 < 0.6545 AND volume_acceleration > 26.89 -> long 10bars",
+    "discovered_at": "2026-04-17T09:54:31.636433+00:00",
+    "mechanism_type": "compression_release",
+    "family": "A5-003",
+    "validation": {
+      "passed": true,
+      "mechanism_type": "compression_release",
+      "issues": [],
+      "warnings": [],
+      "causal_explanation": "入场: price_compression_blocks_5m 高于阈值 → 做多 | 机制: compression_release\n物理逻辑: 未找到方向-机制硬约束，默认通过（建议手动核查）\n机制说明: 区间压缩释放 — 价格在极值位置积累势能，突破时释放定向动量\n物理确认: spread_vs_ma20 < 0.6545 AND volume_acceleration > 26.89",
+      "overfitting_score": 0.0,
+      "causal_score": 1.0
+    },
+    "review": {
+      "reviewed_at": "2026-04-17T09:54:31.848661+00:00",
+      "reviewer": "system",
+      "verdict": "keep_pending",
+      "reason": "保留待复核: 入场和出场能讲成一组，费后赚钱，而且次数够多"
+    },
+    "llm_validated": false,
+    "approved_at": "2026-04-17T09:54:32.104152+00:00",
+    "approved_by": "stats_auto"
+  },
+  {
+    "id": "MID-d55cdbb9",
+    "name": "MID-d55cdbb9",
+    "status": "approved",
+    "approved_at": "2026-04-17T11:05:37.807572+00:00",
+    "approved_by": "v2_stats_auto",
+    "family": "A6-636149",
+    "mechanism_type": "price_range_reversion",
+    "stop_pct": 0.488,
+    "entry": {
+      "feature": "position_in_range_4h",
+      "operator": ">",
+      "threshold": 0.9242945909500122,
+      "direction": "short",
+      "horizon": 10
+    },
+    "feature": "position_in_range_4h",
+    "op": ">",
+    "threshold": 0.9242945909500122,
+    "direction": "short",
+    "horizon": 10,
+    "rule_str": "position_in_range_4h > 0.9243",
+    "combo_conditions": [],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.536317765712738,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "single:position_in_range_4h",
+          "description": "position_in_range_4h < 0.5363"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.536317765712738,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -8.007935684872791e-05,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "pair:2",
+          "description": "position_in_range_4h < 0.5363 AND close_slope_20 < -0.0001"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.536317765712738,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "liq_sell_usd_1m",
+              "operator": ">",
+              "threshold": 8102.213299999999,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -8.007935684872791e-05,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "triple:3",
+          "description": "position_in_range_4h < 0.5363 AND liq_sell_usd_1m > 8102.2133 AND close_slope_20 < -0.0001"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": -0.026815888285636903,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:position_in_range_4h",
+          "description": "position_in_range_4h_vs_entry < -0.0268"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 16.880950000000002,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:sell_volume",
+          "description": "sell_volume_vs_entry > 16.8810"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "liq_sell_usd_1m",
+              "operator": ">",
+              "threshold": 405.110665,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:liq_sell_usd_1m",
+          "description": "liq_sell_usd_1m_vs_entry > 405.1107"
+        }
+      ],
+      "exit_method": "data_mined_vs_entry"
+    },
+    "exit_params": {
+      "stop_pct": 0.488,
+      "min_hold_bars": 3,
+      "max_hold_factor": 2,
+      "exit_confirm_bars": 2,
+      "take_profit_pct": 0.0,
+      "protect_start_pct": 99.0
+    },
+    "stats": {
+      "p_mfe_gt_mae_is": 0.5676513117124561,
+      "n_is": 4841,
+      "p_mfe_gt_mae_oos": 0.5558546433378196,
+      "n_oos": 2229,
+      "degradation_ratio": 0.9792184601158607,
+      "mean_mfe_oos": 0.17364703610861384,
+      "mean_mae_oos": 0.17062179472791722,
+      "exit_backtest": {
+        "n": 7069,
+        "wr": 64.89,
+        "pf": 1.435,
+        "net_avg": 0.0689,
+        "total_net_pnl": 487.04
+      },
+      "derived_stop_pct": 0.488
+    },
+    "force_closure": {
+      "entry_force": "range_top_reversion",
+      "force_category": "price_range_reversion",
+      "exit_force_linked": true,
+      "exit_force_description": "exit detects entry force 'price_range_reversion' decay via ['position_in_range_4h']"
+    },
+    "execution_params": {
+      "position_pct": 0.04,
+      "probation_trades": 10,
+      "cooldown_minutes": 5
+    },
+    "discovered_at": "2026-04-17T11:03:21.650990+00:00",
+    "discovery_mode": "mid_freq_scanner_v2",
+    "time_granularity": "1m"
+  },
+  {
+    "id": "MID-7dbeced1",
+    "name": "MID-7dbeced1",
+    "status": "approved",
+    "approved_at": "2026-04-17T11:05:37.807630+00:00",
+    "approved_by": "v2_stats_auto",
+    "family": "A6-658895",
+    "mechanism_type": "price_range_reversion",
+    "stop_pct": 0.49,
+    "entry": {
+      "feature": "position_in_range_4h",
+      "operator": ">",
+      "threshold": 0.8682376146316528,
+      "direction": "short",
+      "horizon": 30
+    },
+    "feature": "position_in_range_4h",
+    "op": ">",
+    "threshold": 0.8682376146316528,
+    "direction": "short",
+    "horizon": 30,
+    "rule_str": "position_in_range_4h > 0.8682",
+    "combo_conditions": [],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.5276576280593872,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "single:position_in_range_4h",
+          "description": "position_in_range_4h < 0.5277"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.5276576280593872,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -8.133611117955297e-05,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "pair:1",
+          "description": "position_in_range_4h < 0.5277 AND close_slope_20 < -0.0001"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.5276576280593872,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 328.235,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -8.133611117955297e-05,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "triple:0",
+          "description": "position_in_range_4h < 0.5277 AND sell_volume > 328.2350 AND close_slope_20 < -0.0001"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": -0.026382881402969363,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:position_in_range_4h",
+          "description": "position_in_range_4h_vs_entry < -0.0264"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 16.41175,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:sell_volume",
+          "description": "sell_volume_vs_entry > 16.4118"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -4.066805558977649e-06,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:close_slope_20",
+          "description": "close_slope_20_vs_entry < -0.0000"
+        }
+      ],
+      "exit_method": "data_mined_vs_entry"
+    },
+    "exit_params": {
+      "stop_pct": 0.49,
+      "min_hold_bars": 3,
+      "max_hold_factor": 2,
+      "exit_confirm_bars": 2,
+      "take_profit_pct": 0.0,
+      "protect_start_pct": 99.0
+    },
+    "stats": {
+      "p_mfe_gt_mae_is": 0.5586356040499361,
+      "n_is": 10173,
+      "p_mfe_gt_mae_oos": 0.5508260447035958,
+      "n_oos": 5145,
+      "degradation_ratio": 0.9860202978655077,
+      "mean_mfe_oos": 0.29552052711601795,
+      "mean_mae_oos": 0.26822514360055694,
+      "exit_backtest": {
+        "n": 15316,
+        "wr": 63.7,
+        "pf": 1.273,
+        "net_avg": 0.0457,
+        "total_net_pnl": 699.21
+      },
+      "derived_stop_pct": 0.49
+    },
+    "force_closure": {
+      "entry_force": "range_top_reversion",
+      "force_category": "price_range_reversion",
+      "exit_force_linked": true,
+      "exit_force_description": "exit detects entry force 'price_range_reversion' decay via ['position_in_range_4h']"
+    },
+    "execution_params": {
+      "position_pct": 0.04,
+      "probation_trades": 10,
+      "cooldown_minutes": 5
+    },
+    "discovered_at": "2026-04-17T11:05:36.813561+00:00",
+    "discovery_mode": "mid_freq_scanner_v2",
+    "time_granularity": "1m"
+  },
+  {
+    "id": "MID-b18721a2",
+    "name": "MID-b18721a2",
+    "status": "approved",
+    "approved_at": "2026-04-17T12:15:43.137297+00:00",
+    "approved_by": "v2_stats_auto",
+    "family": "A6-426181",
+    "mechanism_type": "price_range_reversion",
+    "stop_pct": 0.831,
+    "entry": {
+      "feature": "vwap_deviation",
+      "operator": ">",
+      "threshold": 0.020056311041116714,
+      "direction": "short",
+      "horizon": 60
+    },
+    "feature": "vwap_deviation",
+    "op": ">",
+    "threshold": 0.020056311041116714,
+    "direction": "short",
+    "horizon": 60,
+    "rule_str": "vwap_deviation > 0.0201",
+    "combo_conditions": [],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "quote_volume",
+              "operator": ">",
+              "threshold": 13345517.4998,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "position_in_range_24h",
+              "operator": "<",
+              "threshold": 0.743641197681427,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "taker_buy_base",
+              "operator": ">",
+              "threshold": 79.076,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "triple:8",
+          "description": "quote_volume > 13345517.4998 AND position_in_range_24h < 0.7436 AND taker_buy_base > 79.0760"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_24h",
+              "operator": "<",
+              "threshold": 0.743641197681427,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "taker_buy_base",
+              "operator": ">",
+              "threshold": 79.076,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "pair:9",
+          "description": "position_in_range_24h < 0.7436 AND taker_buy_base > 79.0760"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 492.599,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "position_in_range_24h",
+              "operator": "<",
+              "threshold": 0.743641197681427,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "taker_buy_base",
+              "operator": ">",
+              "threshold": 79.076,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "triple:5",
+          "description": "sell_volume > 492.5990 AND position_in_range_24h < 0.7436 AND taker_buy_base > 79.0760"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 24.62995,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:sell_volume",
+          "description": "sell_volume_vs_entry > 24.6300"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "quote_volume",
+              "operator": ">",
+              "threshold": 667275.87499,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:quote_volume",
+          "description": "quote_volume_vs_entry > 667275.8750"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -8.322099165525288e-06,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:close_slope_20",
+          "description": "close_slope_20_vs_entry < -0.0000"
+        }
+      ],
+      "exit_method": "data_mined_vs_entry"
+    },
+    "exit_params": {
+      "stop_pct": 0.831,
+      "min_hold_bars": 3,
+      "max_hold_factor": 2,
+      "exit_confirm_bars": 2,
+      "take_profit_pct": 0.0,
+      "protect_start_pct": 99.0
+    },
+    "stats": {
+      "p_mfe_gt_mae_is": 0.5608380338436745,
+      "n_is": 2482,
+      "p_mfe_gt_mae_oos": 0.5707547169811321,
+      "n_oos": 3392,
+      "degradation_ratio": 1.0176819019735415,
+      "mean_mfe_oos": 0.5252586402760239,
+      "mean_mae_oos": 0.45025106114142205,
+      "exit_backtest": {
+        "n": 5874,
+        "wr": 63.72,
+        "pf": 1.351,
+        "net_avg": 0.0948,
+        "total_net_pnl": 556.93
+      },
+      "derived_stop_pct": 0.831
+    },
+    "force_closure": {
+      "entry_force": "vwap_deviation_reversion",
+      "force_category": "price_range_reversion",
+      "exit_force_linked": true,
+      "exit_force_description": "exit detects entry force 'price_range_reversion' decay via ['position_in_range_24h']"
+    },
+    "execution_params": {
+      "position_pct": 0.04,
+      "probation_trades": 10,
+      "cooldown_minutes": 5
+    },
+    "discovered_at": "2026-04-17T12:11:58.021323+00:00",
+    "discovery_mode": "mid_freq_scanner_v2",
+    "time_granularity": "1m"
+  },
+  {
+    "id": "MID-ca7d72ef",
+    "name": "MID-ca7d72ef",
+    "status": "approved",
+    "approved_at": "2026-04-17T14:57:21.133387+00:00",
+    "approved_by": "v2_stats_auto",
+    "family": "A6-222453",
+    "mechanism_type": "price_range_reversion",
+    "stop_pct": 0.851,
+    "entry": {
+      "feature": "position_in_range_24h",
+      "operator": ">",
+      "threshold": 0.8533694744110107,
+      "direction": "short",
+      "horizon": 60
+    },
+    "feature": "position_in_range_24h",
+    "op": ">",
+    "threshold": 0.8533694744110107,
+    "direction": "short",
+    "horizon": 60,
+    "rule_str": "position_in_range_24h > 0.8534",
+    "combo_conditions": [],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "sell_usd_1m",
+              "operator": ">",
+              "threshold": 3806248.833,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.1242799386382103,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "pair:3",
+          "description": "sell_usd_1m > 3806248.8330 AND position_in_range_4h < 0.1243"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 379.656,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "single:sell_volume",
+          "description": "sell_volume > 379.6560"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "sell_usd_1m",
+              "operator": ">",
+              "threshold": 3806248.833,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "single:sell_usd_1m",
+          "description": "sell_usd_1m > 3806248.8330"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "sell_usd_1m",
+              "operator": ">",
+              "threshold": 190312.44165000002,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:sell_usd_1m",
+          "description": "sell_usd_1m_vs_entry > 190312.4417"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -5.068640166427941e-06,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:close_slope_20",
+          "description": "close_slope_20_vs_entry < -0.0000"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_24h",
+              "operator": "<",
+              "threshold": -0.03673089444637299,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:position_in_range_24h",
+          "description": "position_in_range_24h_vs_entry < -0.0367"
+        }
+      ],
+      "exit_method": "data_mined_vs_entry"
+    },
+    "exit_params": {
+      "stop_pct": 0.851,
+      "min_hold_bars": 3,
+      "max_hold_factor": 2,
+      "exit_confirm_bars": 2,
+      "take_profit_pct": 0.0,
+      "protect_start_pct": 99.0
+    },
+    "stats": {
+      "p_mfe_gt_mae_is": 0.5637833114897335,
+      "n_is": 4578,
+      "p_mfe_gt_mae_oos": 0.573449401523395,
+      "n_oos": 2757,
+      "degradation_ratio": 1.0171450446238288,
+      "mean_mfe_oos": 0.35755493786760156,
+      "mean_mae_oos": 0.3812964307841958,
+      "exit_backtest": {
+        "n": 7334,
+        "wr": 50.49,
+        "pf": 1.228,
+        "net_avg": 0.0454,
+        "total_net_pnl": 333.0
+      },
+      "derived_stop_pct": 0.851
+    },
+    "force_closure": {
+      "entry_force": "range_top_reversion",
+      "force_category": "price_range_reversion",
+      "exit_force_linked": true,
+      "exit_force_description": "exit detects entry force 'price_range_reversion' decay via ['position_in_range_4h']"
+    },
+    "execution_params": {
+      "position_pct": 0.04,
+      "probation_trades": 10,
+      "cooldown_minutes": 5
+    },
+    "discovered_at": "2026-04-17T14:38:54.445587+00:00",
+    "discovery_mode": "mid_freq_scanner_v2",
+    "time_granularity": "1m"
+  },
+  {
+    "id": "MID-a2982677",
+    "name": "MID-a2982677",
+    "status": "approved",
+    "approved_at": "2026-04-17T14:57:21.133445+00:00",
+    "approved_by": "v2_stats_auto",
+    "family": "A6-883039",
+    "mechanism_type": "price_range_reversion",
+    "stop_pct": 0.481,
+    "entry": {
+      "feature": "position_in_range_4h",
+      "operator": ">",
+      "threshold": 0.8609248399734497,
+      "direction": "short",
+      "horizon": 30
+    },
+    "feature": "position_in_range_4h",
+    "op": ">",
+    "threshold": 0.8609248399734497,
+    "direction": "short",
+    "horizon": 30,
+    "rule_str": "position_in_range_4h > 0.8609",
+    "combo_conditions": [],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.5241959691047668,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "single:position_in_range_4h",
+          "description": "position_in_range_4h < 0.5242"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.5241959691047668,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "quote_volume",
+              "operator": ">",
+              "threshold": 6427175.632,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "pair:3",
+          "description": "position_in_range_4h < 0.5242 AND quote_volume > 6427175.6320"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.5241959691047668,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -7.877642201492563e-05,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "pair:1",
+          "description": "position_in_range_4h < 0.5242 AND close_slope_20 < -0.0001"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": -0.026209798455238343,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:position_in_range_4h",
+          "description": "position_in_range_4h_vs_entry < -0.0262"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 16.3595,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:sell_volume",
+          "description": "sell_volume_vs_entry > 16.3595"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -3.938821100746282e-06,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:close_slope_20",
+          "description": "close_slope_20_vs_entry < -0.0000"
+        }
+      ],
+      "exit_method": "data_mined_vs_entry"
+    },
+    "exit_params": {
+      "stop_pct": 0.481,
+      "min_hold_bars": 3,
+      "max_hold_factor": 2,
+      "exit_confirm_bars": 2,
+      "take_profit_pct": 0.0,
+      "protect_start_pct": 99.0
+    },
+    "stats": {
+      "p_mfe_gt_mae_is": 0.5526414857573095,
+      "n_is": 7969,
+      "p_mfe_gt_mae_oos": 0.5675510826471485,
+      "n_oos": 3279,
+      "degradation_ratio": 1.0269787869244156,
+      "mean_mfe_oos": 0.2672728740709447,
+      "mean_mae_oos": 0.24168978192189797,
+      "exit_backtest": {
+        "n": 11245,
+        "wr": 63.15,
+        "pf": 1.281,
+        "net_avg": 0.0432,
+        "total_net_pnl": 485.9
+      },
+      "derived_stop_pct": 0.481
+    },
+    "force_closure": {
+      "entry_force": "range_top_reversion",
+      "force_category": "price_range_reversion",
+      "exit_force_linked": true,
+      "exit_force_description": "exit detects entry force 'price_range_reversion' decay via ['position_in_range_4h']"
+    },
+    "execution_params": {
+      "position_pct": 0.04,
+      "probation_trades": 10,
+      "cooldown_minutes": 5
+    },
+    "discovered_at": "2026-04-17T14:43:09.543333+00:00",
+    "discovery_mode": "mid_freq_scanner_v2",
+    "time_granularity": "1m"
+  },
+  {
+    "id": "MID-b05df1e5",
+    "name": "MID-b05df1e5",
+    "status": "approved",
+    "approved_at": "2026-04-17T14:57:21.133495+00:00",
+    "approved_by": "v2_stats_auto",
+    "family": "A6-949748",
+    "mechanism_type": "price_range_reversion",
+    "stop_pct": 0.723,
+    "entry": {
+      "feature": "position_in_range_24h",
+      "operator": ">",
+      "threshold": 0.8096930384635925,
+      "direction": "short",
+      "horizon": 60
+    },
+    "feature": "position_in_range_24h",
+    "op": ">",
+    "threshold": 0.8096930384635925,
+    "direction": "short",
+    "horizon": 60,
+    "rule_str": "position_in_range_24h > 0.8097",
+    "combo_conditions": [],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 382.892,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "quote_volume",
+              "operator": ">",
+              "threshold": 10010539.1412,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "pair:5",
+          "description": "sell_volume > 382.8920 AND quote_volume > 10010539.1412"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 382.892,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "position_in_range_24h",
+              "operator": "<",
+              "threshold": 0.7194491028785706,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "pair:6",
+          "description": "sell_volume > 382.8920 AND position_in_range_24h < 0.7194"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 382.892,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -0.00010079503408633173,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "position_in_range_24h",
+              "operator": "<",
+              "threshold": 0.7194491028785706,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "triple:7",
+          "description": "sell_volume > 382.8920 AND close_slope_20 < -0.0001 AND position_in_range_24h < 0.7194"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "sell_usd_1m",
+              "operator": ">",
+              "threshold": 215133.00319500003,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:sell_usd_1m",
+          "description": "sell_usd_1m_vs_entry > 215133.0032"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 19.1446,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:sell_volume",
+          "description": "sell_volume_vs_entry > 19.1446"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -5.039751704316587e-06,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:close_slope_20",
+          "description": "close_slope_20_vs_entry < -0.0000"
+        }
+      ],
+      "exit_method": "data_mined_vs_entry"
+    },
+    "exit_params": {
+      "stop_pct": 0.723,
+      "min_hold_bars": 3,
+      "max_hold_factor": 2,
+      "exit_confirm_bars": 2,
+      "take_profit_pct": 0.0,
+      "protect_start_pct": 99.0
+    },
+    "stats": {
+      "p_mfe_gt_mae_is": 0.5570861545645576,
+      "n_is": 8566,
+      "p_mfe_gt_mae_oos": 0.5651020408163265,
+      "n_oos": 4900,
+      "degradation_ratio": 1.0143889525634227,
+      "mean_mfe_oos": 0.36901393213077593,
+      "mean_mae_oos": 0.3659575528939511,
+      "exit_backtest": {
+        "n": 13465,
+        "wr": 49.56,
+        "pf": 1.131,
+        "net_avg": 0.028,
+        "total_net_pnl": 377.6
+      },
+      "derived_stop_pct": 0.723
+    },
+    "force_closure": {
+      "entry_force": "range_top_reversion",
+      "force_category": "price_range_reversion",
+      "exit_force_linked": true,
+      "exit_force_description": "exit detects entry force 'price_range_reversion' decay via ['position_in_range_24h']"
+    },
+    "execution_params": {
+      "position_pct": 0.04,
+      "probation_trades": 10,
+      "cooldown_minutes": 5
+    },
+    "discovered_at": "2026-04-17T14:48:12.444907+00:00",
+    "discovery_mode": "mid_freq_scanner_v2",
+    "time_granularity": "1m"
+  },
+  {
+    "id": "MID-3b06f6fb",
+    "name": "MID-3b06f6fb",
+    "status": "approved",
+    "approved_at": "2026-04-17T14:57:21.133584+00:00",
+    "approved_by": "v2_stats_auto",
+    "family": "A6-313178",
+    "mechanism_type": "price_range_reversion",
+    "stop_pct": 1.591,
+    "entry": {
+      "feature": "vwap_deviation",
+      "operator": ">",
+      "threshold": 0.01949778012931347,
+      "direction": "short",
+      "horizon": 60
+    },
+    "feature": "vwap_deviation",
+    "op": ">",
+    "threshold": 0.01949778012931347,
+    "direction": "short",
+    "horizon": 60,
+    "rule_str": "vwap_deviation > 0.0195",
+    "combo_conditions": [],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high",
+              "operator": "<",
+              "threshold": -0.02013440430164337,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "single:dist_to_24h_high",
+          "description": "dist_to_24h_high < -0.0201"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "dist_to_24h_high",
+              "operator": "<",
+              "threshold": -0.02013440430164337,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "taker_buy_base",
+              "operator": ">",
+              "threshold": 89.87,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "pair:9",
+          "description": "dist_to_24h_high < -0.0201 AND taker_buy_base > 89.8700"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "quote_volume",
+              "operator": ">",
+              "threshold": 13210968.6496,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "dist_to_24h_high",
+              "operator": "<",
+              "threshold": -0.02013440430164337,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "pair:5",
+          "description": "quote_volume > 13210968.6496 AND dist_to_24h_high < -0.0201"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 24.158250000000002,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:sell_volume",
+          "description": "sell_volume_vs_entry > 24.1583"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "quote_volume",
+              "operator": ">",
+              "threshold": 660548.43248,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:quote_volume",
+          "description": "quote_volume_vs_entry > 660548.4325"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_24h",
+              "operator": "<",
+              "threshold": -0.03634041249752045,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:position_in_range_24h",
+          "description": "position_in_range_24h_vs_entry < -0.0363"
+        }
+      ],
+      "exit_method": "data_mined_vs_entry"
+    },
+    "exit_params": {
+      "stop_pct": 1.591,
+      "min_hold_bars": 3,
+      "max_hold_factor": 2,
+      "exit_confirm_bars": 2,
+      "take_profit_pct": 0.0,
+      "protect_start_pct": 99.0
+    },
+    "stats": {
+      "p_mfe_gt_mae_is": 0.5978120978120978,
+      "n_is": 1554,
+      "p_mfe_gt_mae_oos": 0.5584166026133743,
+      "n_oos": 2602,
+      "degradation_ratio": 0.9341005387095628,
+      "mean_mfe_oos": 0.4438974766427456,
+      "mean_mae_oos": 0.4042547271072252,
+      "exit_backtest": {
+        "n": 4156,
+        "wr": 64.65,
+        "pf": 1.952,
+        "net_avg": 0.1956,
+        "total_net_pnl": 812.97
+      },
+      "derived_stop_pct": 1.591
+    },
+    "force_closure": {
+      "entry_force": "vwap_deviation_reversion",
+      "force_category": "price_range_reversion",
+      "exit_force_linked": true,
+      "exit_force_description": "exit detects entry force 'price_range_reversion' decay via ['dist_to_24h_high']"
+    },
+    "execution_params": {
+      "position_pct": 0.04,
+      "probation_trades": 10,
+      "cooldown_minutes": 5
+    },
+    "discovered_at": "2026-04-17T14:50:48.316447+00:00",
+    "discovery_mode": "mid_freq_scanner_v2",
+    "time_granularity": "1m"
+  },
+  {
+    "id": "MID-a05bfb8d",
+    "name": "MID-a05bfb8d",
+    "status": "approved",
+    "approved_at": "2026-04-17T14:57:21.133626+00:00",
+    "approved_by": "v2_stats_auto",
+    "family": "A6-385424",
+    "mechanism_type": "price_range_reversion",
+    "stop_pct": 0.481,
+    "entry": {
+      "feature": "position_in_range_4h",
+      "operator": ">",
+      "threshold": 0.9174687266349792,
+      "direction": "short",
+      "horizon": 10
+    },
+    "feature": "position_in_range_4h",
+    "op": ">",
+    "threshold": 0.9174687266349792,
+    "direction": "short",
+    "horizon": 10,
+    "rule_str": "position_in_range_4h > 0.9175",
+    "combo_conditions": [],
+    "exit": {
+      "top3": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.5219837427139282,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "single:position_in_range_4h",
+          "description": "position_in_range_4h < 0.5220"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.5219837427139282,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -7.785293564666063e-05,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "pair:1",
+          "description": "position_in_range_4h < 0.5220 AND close_slope_20 < -0.0001"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": 0.5219837427139282,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -7.785293564666063e-05,
+              "use_vs_entry": false
+            },
+            {
+              "feature": "buy_volume",
+              "operator": ">",
+              "threshold": 260.756,
+              "use_vs_entry": false
+            }
+          ],
+          "label": "triple:4",
+          "description": "position_in_range_4h < 0.5220 AND close_slope_20 < -0.0001 AND buy_volume > 260.7560"
+        }
+      ],
+      "invalidation": [
+        {
+          "conditions": [
+            {
+              "feature": "position_in_range_4h",
+              "operator": "<",
+              "threshold": -0.026099187135696412,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:position_in_range_4h",
+          "description": "position_in_range_4h_vs_entry < -0.0261"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "sell_volume",
+              "operator": ">",
+              "threshold": 16.880950000000002,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:sell_volume",
+          "description": "sell_volume_vs_entry > 16.8810"
+        },
+        {
+          "conditions": [
+            {
+              "feature": "close_slope_20",
+              "operator": "<",
+              "threshold": -3.892646782333032e-06,
+              "use_vs_entry": true
+            }
+          ],
+          "label": "invalidation:close_slope_20",
+          "description": "close_slope_20_vs_entry < -0.0000"
+        }
+      ],
+      "exit_method": "data_mined_vs_entry"
+    },
+    "exit_params": {
+      "stop_pct": 0.481,
+      "min_hold_bars": 3,
+      "max_hold_factor": 2,
+      "exit_confirm_bars": 2,
+      "take_profit_pct": 0.0,
+      "protect_start_pct": 99.0
+    },
+    "stats": {
+      "p_mfe_gt_mae_is": 0.5624502784407319,
+      "n_is": 3771,
+      "p_mfe_gt_mae_oos": 0.554719562243502,
+      "n_oos": 1462,
+      "degradation_ratio": 0.9862552895899321,
+      "mean_mfe_oos": 0.14932071151090343,
+      "mean_mae_oos": 0.14598702544127432,
+      "exit_backtest": {
+        "n": 5232,
+        "wr": 65.6,
+        "pf": 1.579,
+        "net_avg": 0.08,
+        "total_net_pnl": 418.59
+      },
+      "derived_stop_pct": 0.481
+    },
+    "force_closure": {
+      "entry_force": "range_top_reversion",
+      "force_category": "price_range_reversion",
+      "exit_force_linked": true,
+      "exit_force_description": "exit detects entry force 'price_range_reversion' decay via ['position_in_range_4h']"
+    },
+    "execution_params": {
+      "position_pct": 0.04,
+      "probation_trades": 10,
+      "cooldown_minutes": 5
+    },
+    "discovered_at": "2026-04-17T14:54:36.107012+00:00",
+    "discovery_mode": "mid_freq_scanner_v2",
+    "time_granularity": "1m"
+  }
+]

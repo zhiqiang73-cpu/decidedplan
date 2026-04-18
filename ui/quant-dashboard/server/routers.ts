@@ -16,6 +16,229 @@ import { fileURLToPath } from "url";
 let _discoveryProcess: ChildProcess | null = null;
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const SYSTEM_STATE_PATH = path.join(PROJECT_ROOT, "monitor/output/system_state.json");
+const DATA_SYNC_CONTROL_PATH = path.join(PROJECT_ROOT, "monitor/output/data_sync_control.json");
+
+function getDataSyncStatus() {
+  try {
+    const raw = fs.readFileSync(DATA_SYNC_CONTROL_PATH, "utf8");
+    const parsed = JSON.parse(raw) as { enabled?: boolean } | null;
+    const stats = fs.statSync(DATA_SYNC_CONTROL_PATH);
+    const ageMs = Math.max(0, Date.now() - stats.mtimeMs);
+    const requestedEnabled = parsed?.enabled === true;
+    return {
+      enabled: requestedEnabled,
+      requestedEnabled,
+      stalePause: false,
+      updatedAt: new Date(stats.mtimeMs).toISOString(),
+      ageSeconds: Math.floor(ageMs / 1000),
+    };
+  } catch {
+    return {
+      enabled: false,
+      requestedEnabled: false,
+      stalePause: false,
+      updatedAt: null,
+      ageSeconds: null,
+    };
+  }
+}
+
+function writeDataSyncControl(enabled: boolean) {
+  fs.mkdirSync(path.dirname(DATA_SYNC_CONTROL_PATH), { recursive: true });
+  fs.writeFileSync(
+    DATA_SYNC_CONTROL_PATH,
+    JSON.stringify({
+      enabled,
+      updated_at: new Date().toISOString(),
+      source: "ui",
+    }, null, 2),
+  );
+}
+
+type LiveSnapshotPosition = {
+  positionId: string;
+  signalName: string;
+  strategyFamily: string;
+  symbol: string;
+  direction: "LONG" | "SHORT";
+  quantity: number;
+  entryPrice: number;
+  entryAt: Date | null;
+  confidence: number;
+  exitLogic: string | null;
+  source: "system" | "exchange";
+  isExternal: boolean;
+  leverage: number;
+  markPrice: number | null;
+  notional: number;
+  usedMargin: number;
+  unrealizedPnl: number | null;
+  unrealizedPnlPct: number | null;
+};
+
+type LiveSnapshotPendingOrder = {
+  orderId: string;
+  signalName: string;
+  quantity: number;
+  requestedPrice: number;
+  source: "system" | "exchange";
+};
+
+function isExternalSystemPosition(position: bridge.Position): boolean {
+  const family = String(position.family ?? "").toLowerCase();
+  const signalName = String(position.signal_name ?? "").toLowerCase();
+  return family === "external" || signalName === "external_position";
+}
+
+function mapSystemPositions(state: ReturnType<typeof bridge.getSystemState>): LiveSnapshotPosition[] {
+  const markPrice = Number(state?.price ?? 0);
+  return (state?.positions ?? []).map((p, idx) => {
+    const entryPrice = Number(p.entry_price ?? 0);
+    const quantity = Number(p.qty ?? 0);
+    const leverage = 10;
+    const notional = Math.abs(entryPrice * quantity);
+    const usedMargin = leverage > 0 ? notional / leverage : notional;
+    const priceMovePct = Number.isFinite(p.unrealized_pnl_pct) ? Number(p.unrealized_pnl_pct) : null;
+    const unrealizedPnl = priceMovePct !== null ? (priceMovePct / 100) * notional : null;
+    const unrealizedPnlPct = unrealizedPnl !== null && usedMargin > 0
+      ? (unrealizedPnl / usedMargin) * 100
+      : null;
+    const isExternal = isExternalSystemPosition(p);
+
+    return {
+      positionId: `LIVE-${p.signal_name || idx + 1}-${p.entry_time || idx + 1}`,
+      signalName: p.signal_name,
+      strategyFamily: isExternal ? "EXCHANGE" : p.family,
+      symbol: state?.symbol ?? "BTCUSDT",
+      direction: (p.direction ?? "").toUpperCase() === "LONG" ? "LONG" : "SHORT",
+      quantity,
+      entryPrice,
+      entryAt: p.entry_time ? new Date(p.entry_time) : null,
+      confidence: p.confidence ?? 0,
+      exitLogic: p.exit_logic ?? null,
+      source: isExternal ? "exchange" : "system",
+      isExternal,
+      leverage,
+      markPrice: Number.isFinite(markPrice) && markPrice > 0 ? markPrice : null,
+      notional,
+      usedMargin,
+      unrealizedPnl,
+      unrealizedPnlPct,
+    };
+  });
+}
+
+function mapSystemPendingOrders(state: ReturnType<typeof bridge.getSystemState>): LiveSnapshotPendingOrder[] {
+  return (state?.pending_orders ?? []).map((o, idx) => ({
+    orderId: o.order_id || `PENDING-${idx + 1}`,
+    signalName: o.signal_name,
+    quantity: o.qty,
+    requestedPrice: o.requested_price,
+    source: "system",
+  }));
+}
+
+function isSamePosition(
+  left: LiveSnapshotPosition,
+  right: { symbol: string; direction: "LONG" | "SHORT"; quantity: number; entryPrice: number },
+): boolean {
+  const sameSymbol = left.symbol === right.symbol;
+  const sameDirection = left.direction === right.direction;
+  const qtyGap = Math.abs((left.quantity ?? 0) - (right.quantity ?? 0));
+  const entryGap = Math.abs((left.entryPrice ?? 0) - (right.entryPrice ?? 0));
+  return sameSymbol && sameDirection && qtyGap <= 1e-4 && entryGap <= 5;
+}
+
+function mergeExchangePositions(
+  localPositions: LiveSnapshotPosition[],
+  exchangePositions: Array<{
+    symbol: string;
+    direction: "LONG" | "SHORT";
+    quantity: number;
+    entryPrice: number;
+    markPrice: number | null;
+    leverage: number;
+    notional: number;
+    usedMargin: number;
+    unrealizedPnl: number;
+    unrealizedPnlPct: number | null;
+  }>,
+): LiveSnapshotPosition[] {
+  if (!exchangePositions.length) {
+    return localPositions;
+  }
+
+  const merged = [...localPositions];
+  exchangePositions.forEach((position, idx) => {
+    const existingIndex = merged.findIndex((existing) => isSamePosition(existing, position));
+    if (existingIndex >= 0) {
+      const existing = merged[existingIndex];
+      merged[existingIndex] = {
+        ...existing,
+        leverage: position.leverage || existing.leverage,
+        markPrice: position.markPrice ?? existing.markPrice,
+        notional: position.notional || existing.notional,
+        usedMargin: position.usedMargin || existing.usedMargin,
+        unrealizedPnl: position.unrealizedPnl,
+        unrealizedPnlPct: position.unrealizedPnlPct,
+      };
+      return;
+    }
+    merged.push({
+      positionId: `EXCHANGE-${idx + 1}-${position.direction}-${position.entryPrice}`,
+      signalName: "exchange_sync",
+      strategyFamily: "EXCHANGE",
+      symbol: position.symbol,
+      direction: position.direction,
+      quantity: position.quantity,
+      entryPrice: position.entryPrice,
+      entryAt: null,
+      confidence: 0,
+      exitLogic: null,
+      source: "exchange",
+      isExternal: true,
+      leverage: position.leverage,
+      markPrice: position.markPrice,
+      notional: position.notional,
+      usedMargin: position.usedMargin,
+      unrealizedPnl: position.unrealizedPnl,
+      unrealizedPnlPct: position.unrealizedPnlPct,
+    });
+  });
+  return merged;
+}
+
+function mergeExchangePendingOrders(
+  localOrders: LiveSnapshotPendingOrder[],
+  exchangeOrders: Array<{
+    orderId: string;
+    symbol: string;
+    side: string;
+    type: string;
+    price: number;
+    origQty: number;
+  }>,
+): LiveSnapshotPendingOrder[] {
+  if (!exchangeOrders.length) {
+    return localOrders;
+  }
+
+  const existingIds = new Set(localOrders.map((order) => String(order.orderId)));
+  const merged = [...localOrders];
+  exchangeOrders.forEach((order) => {
+    if (existingIds.has(String(order.orderId))) {
+      return;
+    }
+    merged.push({
+      orderId: String(order.orderId),
+      signalName: `${order.side} ${order.type}`,
+      quantity: order.origQty,
+      requestedPrice: order.price,
+      source: "exchange",
+    });
+  });
+  return merged;
+}
 
 function _patchDiscoveryAlive(alive: boolean) {
   try {
@@ -204,6 +427,22 @@ function buildDataStorageOverview(): DataStorageOverview {
 }
 
 // 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷?App Router 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮?
+const P1_KNOWN_HORIZONS: Record<string, number> = {
+  "P0-2": 30, "P1-2": 30, "P1-6": 30, "P1-9": 30,
+  "P1-10": 20, "P1-11": 20, "P1-12": 30, "P1-13": 30, "P1-14": 60,
+  "C1": 30, "OA-1": 30, "RT-1": 30,
+  "T1-1": 3, "T1-2": 5, "T1-3": 10,
+  "A3-OI": 30, "A4-PIR": 30,
+};
+
+const P1_DEFAULT_STOP_PCT: Record<string, number> = {
+  "P0-2": 1.5, "P1-2": 0.3, "P1-6": 0.7, "P1-9": 0.3,
+  "P1-10": 0.7, "P1-11": 1.5, "P1-12": 0.5, "P1-13": 0.3, "P1-14": 1.5,
+  "C1": 0.35, "OA-1": 0.7, "RT-1": 0.4,
+  "T1-1": 0.05, "T1-2": 0.05, "T1-3": 0.05,
+  "A3-OI": 0.7, "A4-PIR": 0.5,
+};
+
 export const appRouter = router({
   system: systemRouter,
 
@@ -251,28 +490,39 @@ export const appRouter = router({
   wallet: router({
     getSnapshot: publicProcedure.query(async () => {
       const state = bridge.getSystemState();
-      if (state) {
-        const usedMargin = state.positions.reduce(
-          (s, p) => s + (p.entry_price * p.qty) / 10, 0  // leverage 10
-        );
-        const totalEquity = state.balance + usedMargin;
-        return {
-          id: 1,
-          snapshotAt: new Date(state.timestamp),
-          totalEquity:      totalEquity.toFixed(4),
-          availableBalance: state.balance.toFixed(4),
-          usedMargin:       usedMargin.toFixed(4),
-          unrealizedPnl:    "0.0000",
-          assets: [
-            { asset: "USDT", balance: state.balance.toFixed(4), unrealizedPnl: "0" },
-          ],
-        };
-      }
-      // Fallback: try Binance API
+
       const cfg = bridge.getEnvConfig();
       if (cfg.hasConfig) {
         const acct = await binance.getAccountBalance(cfg.apiKey, cfg.apiSecret);
-        if (acct) return { id: 1, snapshotAt: new Date(), ...acct };
+        if (acct) {
+          return {
+            id: 1,
+            snapshotAt: new Date(),
+            source: "exchange" as const,
+            sourceLabel: "交易所实时快照",
+            ...acct,
+          };
+        }
+      }
+      if (state) {
+        const positions = mapSystemPositions(state);
+        const usedMargin = positions.reduce((sum, position) => sum + (position.usedMargin ?? 0), 0);
+        const unrealizedPnl = positions.reduce((sum, position) => sum + (position.unrealizedPnl ?? 0), 0);
+        const totalEquity = state.balance + unrealizedPnl;
+        const availableBalance = Math.max(state.balance - usedMargin, 0);
+        return {
+          id: 1,
+          snapshotAt: new Date(state.timestamp),
+          source: "system_state" as const,
+          sourceLabel: "本地 system_state 回退",
+          totalEquity: totalEquity.toFixed(4),
+          availableBalance: availableBalance.toFixed(4),
+          usedMargin: usedMargin.toFixed(4),
+          unrealizedPnl: unrealizedPnl.toFixed(4),
+          assets: [
+            { asset: "USDT", balance: state.balance.toFixed(4), unrealizedPnl: unrealizedPnl.toFixed(4) },
+          ],
+        };
       }
       return null;
     }),
@@ -290,56 +540,17 @@ export const appRouter = router({
         price: state?.price ?? 0,
       };
 
-      let positions = (state?.positions ?? []).map((p, idx) => ({
-        positionId: `LIVE-${p.signal_name || idx + 1}-${p.entry_time || idx + 1}`,
-        signalName: p.signal_name,
-        strategyFamily: p.family,
-        symbol: state?.symbol ?? "BTCUSDT",
-        direction: (p.direction ?? "").toUpperCase() === "LONG" ? "LONG" : "SHORT",
-        quantity: p.qty,
-        entryPrice: p.entry_price,
-        entryAt: p.entry_time ? new Date(p.entry_time) : null,
-        confidence: p.confidence ?? 0,
-        exitLogic: p.exit_logic ?? null,
-      }));
-
-      let pendingOrders = (state?.pending_orders ?? []).map((o, idx) => ({
-        orderId: o.order_id || `PENDING-${idx + 1}`,
-        signalName: o.signal_name,
-        quantity: o.qty,
-        requestedPrice: o.requested_price,
-      }));
+      let positions = mapSystemPositions(state);
+      let pendingOrders = mapSystemPendingOrders(state);
 
       const cfg = bridge.getEnvConfig();
       if (cfg.hasConfig && state?.symbol) {
-        if (positions.length === 0) {
-          const exPositions = await binance.getOpenPositions(cfg.apiKey, cfg.apiSecret, state.symbol);
-          if (exPositions.length > 0) {
-            positions = exPositions.map((p, idx) => ({
-              positionId: `EXCHANGE-${idx + 1}-${p.direction}-${p.entryPrice}`,
-              signalName: "exchange_sync",
-              strategyFamily: "EXCHANGE",
-              symbol: p.symbol,
-              direction: p.direction,
-              quantity: p.quantity,
-              entryPrice: p.entryPrice,
-              entryAt: null,
-              confidence: 0,
-              exitLogic: null,
-            }));
-          }
-        }
-        if (pendingOrders.length === 0) {
-          const exOrders = await binance.getOpenOrders(state.symbol, cfg.apiKey, cfg.apiSecret);
-          if (exOrders.length > 0) {
-            pendingOrders = exOrders.map((o) => ({
-              orderId: o.orderId,
-              signalName: `${o.side} ${o.type}`,
-              quantity: o.origQty,
-              requestedPrice: o.price,
-            }));
-          }
-        }
+        const [exPositions, exOrders] = await Promise.all([
+          binance.getOpenPositions(cfg.apiKey, cfg.apiSecret, state.symbol),
+          binance.getOpenOrders(state.symbol, cfg.apiKey, cfg.apiSecret),
+        ]);
+        positions = mergeExchangePositions(positions, exPositions);
+        pendingOrders = mergeExchangePendingOrders(pendingOrders, exOrders);
       }
 
       return {
@@ -407,6 +618,18 @@ export const appRouter = router({
       search: z.string().optional(),
     }).nullish()).query(({ input }) => {
       const state = bridge.getSystemState();
+      const bestExitParams = bridge.getBestExitParams();
+
+      /** 查找某 family+direction 组合的止损比例，先查 best_params.json，再查默认表 */
+      function resolveStopPct(family: string, direction: string): { pct: number | null; source: "optimized" | "default" | null } {
+        const dirKey = `${family}|${direction.toLowerCase()}`;
+        const fromBest = bestExitParams[dirKey]?.stop_pct ?? bestExitParams[family]?.stop_pct;
+        if (fromBest != null) return { pct: fromBest, source: "optimized" };
+        const fromDefault = P1_DEFAULT_STOP_PCT[family];
+        if (fromDefault != null) return { pct: fromDefault, source: "default" };
+        return { pct: null, source: null };
+      }
+
       const trades = bridge.getTrades({ limit: 2000 });
 
       // Build win rate per signal family from trades
@@ -463,6 +686,9 @@ export const appRouter = router({
           lastBacktestAt: null,
           approvedAt:   null,
           params:       null,
+          stopPct:      resolveStopPct(s.family, s.direction.toLowerCase()).pct,
+          stopSource:   resolveStopPct(s.family, s.direction.toLowerCase()).source,
+          horizon:      P1_KNOWN_HORIZONS[s.family] ?? null,
           updatedAt:    new Date(),
         };
       });
@@ -498,7 +724,7 @@ export const appRouter = router({
           oosAvgReturn: r.stats.oos_avg_ret,
           mechanismType: (r as any).mechanism_type ?? null,
           oosSampleSize: r.stats.n_oos,
-          confidenceScore: r.stats.oos_win_rate / 100,
+          confidenceScore: (r.stats.oos_win_rate ?? 0) / 100,
           overfitScore:  r.stats.wr_improvement ? Math.max(0, 1 - r.stats.wr_improvement / 100) : 0.3,
           featureDiversityScore: 0.7,
           status:       override ?? "active",
@@ -511,6 +737,9 @@ export const appRouter = router({
           lastBacktestAt: null,
           approvedAt:   r.discovered_at ? new Date(r.discovered_at) : null,
           params:       null,
+          stopPct:      (r as any).stop_pct ?? (r as any).exit_params?.stop_pct ?? null,
+          stopSource:   ((r as any).stop_pct != null || (r as any).exit_params?.stop_pct != null) ? "optimized" as const : null,
+          horizon:      (r as any).entry?.horizon ?? null,
           updatedAt:    new Date(),
         };
       });
@@ -584,38 +813,60 @@ export const appRouter = router({
     getCandidates: publicProcedure.input(z.object({
       status: z.enum(["pending", "approved", "rejected", "expired"]).optional(),
     }).nullish()).query(({ input }) => {
-      const rules = bridge.getPendingRules(input?.status);
-      return rules.map(r => ({
-        id:          r.id,
-        candidateId: r.id,
-        symbol:      "BTCUSDT",
-        direction:   r.entry.direction.toUpperCase() as "LONG" | "SHORT",
-        fullExpression: r.rule_str ?? `${r.entry.feature} ${r.entry.operator} ${r.entry.threshold}`,
-        seedCondition: `${r.entry.feature} ${r.entry.operator} ${r.entry.threshold}`,
-        confirmConditions: (r.combo_conditions ?? []).map(c => `${c.feature} ${c.op} ${c.threshold}`),
-        oosWinRate:    r.stats.oos_win_rate,
-        oosAvgReturn:  r.stats.oos_avg_ret,
-        sampleSize:    r.stats.n_oos,
-        icScore:       null as number | null,
-        confidenceScore: Math.min(r.stats.oos_win_rate / 100, 1),
-        overfitScore:  (r as any).validation?.overfitting_score ?? (r.stats.wr_improvement ? Math.max(0, 1 - r.stats.wr_improvement / 100) : 0.3),
-        status:        r.status as "pending" | "approved" | "rejected" | "expired",
-        discoveredAt:  new Date(r.discovered_at),
-        approvedAt:    null,
-        rejectedAt:    null,
-        rejectionReason: r.rejection_reason ?? null,
-        exitConditionTop3: Object.entries(r.exit ?? {}).map(([key, value]) => ({ label: `${key}: ${String(value)}` })),
-        backtestStatus: "idle",
-        backtestResult: null as { equity_curve: number[]; sharpe?: number | null; max_drawdown?: number | null } | null,
-        explanation:   r.explanation ?? null,
-        featureDimensions: [] as string[],
-        estimatedDailyTriggers: null as number | null,
-        mechanismType:   (r as any).mechanism_type ?? null,
-        causalScore:     (r as any).validation?.causal_score ?? null,
-        causalIssues:    ((r as any).validation?.issues ?? []) as string[],
-        causalWarnings:  ((r as any).validation?.warnings ?? []) as string[],
-        causalExplanation: (r as any).validation?.causal_explanation ?? (r.explanation ?? null),
-      }));
+      // 合并 pending_rules.json + approved_rules.json 中 v2 自动发现卡片
+      const rules = bridge.getAllCandidates(input?.status);
+      return rules.map(r => {
+        // v2 卡片用 p_mfe_gt_mae_oos (0-1 fraction)，旧卡片用 oos_win_rate (0-100)
+        const isV2 = !!(r.stats.p_mfe_gt_mae_oos !== undefined);
+        const pMfeMae = isV2
+          ? (r.stats.p_mfe_gt_mae_oos ?? 0)
+          : ((r.stats.oos_win_rate ?? 0) / 100);
+        const oosWinRate = isV2
+          ? (pMfeMae * 100)
+          : (r.stats.oos_win_rate ?? 0);
+        return {
+          id:          r.id,
+          candidateId: r.id,
+          symbol:      "BTCUSDT",
+          direction:   r.entry.direction.toUpperCase() as "LONG" | "SHORT",
+          fullExpression: r.rule_str ?? `${r.entry.feature} ${r.entry.operator} ${r.entry.threshold}`,
+          seedCondition: `${r.entry.feature} ${r.entry.operator} ${r.entry.threshold}`,
+          confirmConditions: (r.combo_conditions ?? []).map(c => `${c.feature} ${c.op} ${c.threshold}`),
+          // 统一字段: 旧卡片用 oos_win_rate, v2 卡片用 p_mfe_gt_mae_oos * 100
+          oosWinRate,
+          oosAvgReturn:  r.stats.oos_avg_ret ?? r.stats.net_avg_pct ?? null,
+          sampleSize:    r.stats.n_oos,
+          icScore:       null as number | null,
+          confidenceScore: pMfeMae,
+          overfitScore:  (r as any).validation?.overfitting_score ?? 0.3,
+          status:        r.status as "pending" | "approved" | "rejected" | "expired",
+          discoveredAt:  new Date(r.discovered_at),
+          approvedAt:    null,
+          rejectedAt:    null,
+          rejectionReason: r.rejection_reason ?? null,
+          exitConditionTop3: Object.entries(r.exit ?? {}).map(([key, value]) => ({ label: `${key}: ${String(value)}` })),
+          backtestStatus: "idle",
+          backtestResult: null as { equity_curve: number[]; sharpe?: number | null; max_drawdown?: number | null } | null,
+          explanation:   r.explanation ?? null,
+          featureDimensions: [] as string[],
+          estimatedDailyTriggers: null as number | null,
+          mechanismType:   r.mechanism_type ?? (r as any).mechanism_type ?? null,
+          causalScore:     (r as any).validation?.causal_score ?? null,
+          causalIssues:    ((r as any).validation?.issues ?? []) as string[],
+          causalWarnings:  ((r as any).validation?.warnings ?? []) as string[],
+          causalExplanation: (r as any).validation?.causal_explanation ?? (r.explanation ?? null),
+          // v2 专属字段
+          isV2,
+          discoveryMode:   r.discovery_mode ?? null,
+          timeGranularity: r.time_granularity ?? "1m",
+          pMfeMae:         isV2 ? pMfeMae : null,
+          netAvgPct:       r.stats.net_avg_pct ?? null,
+          forceClosure:    r.force_closure ?? null,
+          executionParams: r.execution_params ?? null,
+          family:          r.family ?? null,
+          approvedBy:      r.approved_by ?? null,
+        };
+      });
     }),
 
     getCandidate: publicProcedure.input(z.object({ candidateId: z.string() })).query(({ input }) => {
@@ -629,7 +880,7 @@ export const appRouter = router({
         oosWinRate: r.stats.oos_win_rate,
         oosAvgReturn: r.stats.oos_avg_ret,
         sampleSize: r.stats.n_oos,
-        confidenceScore: Math.min(r.stats.oos_win_rate / 100, 1),
+        confidenceScore: Math.min((r.stats.oos_win_rate ?? 0) / 100, 1),
         overfitScore: 0.3, status: r.status,
         discoveredAt: new Date(r.discovered_at),
         explanation: r.explanation ?? null,
@@ -909,6 +1160,16 @@ export const appRouter = router({
     })).mutation(() => {
       return { success: false, message: "Manual close is handled by execution_engine. The UI currently exposes this as a read-only action." };
     }),
+
+    exchangeRaw: publicProcedure.query(() => {
+      return bridge.getExchangeTradesRaw();
+    }),
+
+    hideExchangeOrders: publicProcedure.input(z.object({
+      orderIds: z.array(z.number().int().positive()).min(1),
+    })).mutation(({ input }) => {
+      return { success: true, ...bridge.hideExchangeOrders(input.orderIds) };
+    }),
   }),
 
   // 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷?System Events (from alerts.log) 闂傚倸鍊搁崐鎼佸磹妞嬪海鐭嗗〒姘ｅ亾鐎规洦鍨跺畷绋课旈埀顒勫磼閵婏妇绡€濠电姴鍊绘晶鏇犵棯閹岀吋闁哄瞼鍠栧畷婊嗩槾閻㈩垱鐩弻锝夊箻閸愬弶娈婚梺鍝勬湰缁嬫牜绮诲☉銏犵闁告劏鏁╅敂鐣岀閻庢稒顭囬惌鎺旂磼閻樺磭澧い顐㈢箰鐓ゆい蹇撳椤︺劑姊洪崷顓犲笡閻㈩垱甯楀蹇涘川鐎涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€呴幓鎹ㄦ棃鏁愰崨顓熸闂佹娊鏀遍崹鍧楀蓟濞戙垹绠涙い鎾跺仧缁佺兘鏌ｉ姀鈺佺仜闁告梹鍨垮璇测槈濮橈絽浜鹃柨婵嗛娴滄繄鈧娲栭惌鍌炲蓟閿涘嫪娌柣锝呯潡瑜忛埀顒冾潐濞叉﹢銆冮崱妤婂殫闁告洦鍓涚弧鈧繛杈剧到婢瑰﹤螞濠婂牊鈷掗柛灞捐壘閳ь剟顥撶划鍫熺瑹閳ь剙鐣烽鐐查敜婵°倐鍋撻柛灞诲妽缁绘繃绻濋崒婊冾暫缂佺偓鍎抽…鐑藉蓟閻旂厧绀堢憸蹇曟暜濞戙垺鐓熼柟鎯у暱閺嗭綁鏌＄仦鍓ь灱缂佺姵鐩獮娆撳礃閳诡剨闄勭换娑氣偓娑欘焽閻帞绱掗悩宕囧ⅹ妞ゎ偄绻愮叅妞ゅ繐瀚ˇ銊╂⒑閸︻厾甯涢悽顖涘笚濞煎繘宕ㄧ€涙ǚ鎷虹紓浣割儐椤戞瑩宕曢幇鐗堢厵闁荤喓澧楅崰妯尖偓娈垮枦椤曆囶敇閸忕厧绶炲┑鐘插濡差垰鈹戦悩顔肩伇婵炲鐩弫鍐晲閸℃瑧褰鹃梺鍝勬储閸ㄦ椽鍩涢幒鎳ㄥ綊鏁愰崶鍓佸姼闂佸搫妫濇禍鍫曞蓟濞戞鐔兼嚒閵堝洨鍘滈柣搴ゎ潐濞叉﹢宕归崸妤冨祦婵☆垵鍋愮壕鍏间繆椤栨粌甯堕悽顖涱殜濮婄粯鎷呮笟顖滃姼缂備胶绮崝娆掓濡炪倖鐗楃粙鎾汇€?
@@ -937,6 +1198,20 @@ export const appRouter = router({
   dataStorage: router({
     getOverview: publicProcedure.query(() => buildDataStorageOverview()),
     list: publicProcedure.query(() => buildDataStorageOverview().datasets),
+  }),
+
+  dataSync: router({
+    getStatus: publicProcedure.query(() => {
+      return getDataSyncStatus();
+    }),
+    start: publicProcedure.mutation(() => {
+      writeDataSyncControl(true);
+      return { success: true, ...getDataSyncStatus() };
+    }),
+    stop: publicProcedure.mutation(() => {
+      writeDataSyncControl(false);
+      return { success: true, ...getDataSyncStatus() };
+    }),
   }),
 
   devProgress: router({

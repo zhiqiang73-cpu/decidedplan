@@ -33,6 +33,9 @@ const P = {
   rejectedRules:  path.join(ROOT, "alpha/output/rejected_rules.json"),
   promoterConfig: path.join(ROOT, "alpha/output/promoter_config.json"),
   forceLibraryState: path.join(ROOT, "monitor/output/force_library_state.json"),
+  exchangeTrades:    path.join(ROOT, "execution/logs/exchange_trades.json"),
+  exchangeTradeHidden: path.join(ROOT, "execution/logs/exchange_trades_hidden.json"),
+  exitBestParams: path.join(ROOT, "monitor/output/exit_policy_best_params.json"),
 };
 
 // 闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸?Types 闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕
@@ -63,6 +66,10 @@ export interface Position {
   exit_due?: string;
   dynamic_exit?: boolean;
   exit_logic?: string;
+  unrealized_pnl_pct?: number;
+  bars_held?: number;
+  mfe_pct?: number;
+  mae_pct?: number;
 }
 
 export interface PendingOrder {
@@ -107,9 +114,40 @@ export interface TradeRow {
   exitReason: string | null;
   confidence: number;
   horizonMin: number;
-  mfe: null;
-  mae: null;
-  fee: null;
+  mfe: string | null;
+  mae: string | null;
+  fee: string | null;
+  source?: "system" | "exchange" | "manual";
+}
+
+interface ExchangeTradeFile {
+  last_sync_at: string;
+  last_trade_id: number;
+  trade_count: number;
+  trades: ExchangeFill[];
+}
+
+interface ExchangeFill {
+  exchange_trade_id: number;
+  order_id: number;
+  symbol: string;
+  side: string;       // "BUY" | "SELL"
+  price: string;
+  qty: string;
+  quote_qty: string;
+  commission: string;
+  commission_asset: string;
+  realized_pnl: string;
+  maker: boolean;
+  buyer: boolean;
+  position_side: string;
+  time: number;        // ms timestamp
+}
+
+interface HiddenExchangeTradeFile {
+  updated_at?: string;
+  hidden_trade_ids?: number[];
+  hidden_order_ids?: number[];
 }
 
 export interface PendingRule {
@@ -127,17 +165,43 @@ export interface PendingRule {
   exit?: Record<string, unknown>;
   stop_pct?: number;
   stats: {
-    oos_win_rate: number;
+    // 旧格式字段
+    oos_win_rate?: number;
     n_oos: number;
     oos_pf?: number;
-    oos_avg_ret: number;
+    oos_avg_ret?: number;
     wr_improvement?: number;
     seed_oos_wr?: number;
+    // v2 格式字段 (p_mfe_gt_mae 方法论)
+    p_mfe_gt_mae_oos?: number;
+    p_mfe_gt_mae_is?: number;
+    net_avg_pct?: number;
+    mean_mfe_oos?: number;
+    mean_mae_oos?: number;
+    derived_stop_pct?: number;
+    exit_backtest?: Record<string, unknown>;
   };
+  // v2 新增字段
+  discovery_mode?: string;
+  time_granularity?: string;
+  force_closure?: {
+    entry_force?: string;
+    force_category?: string;
+    exit_force_linked?: boolean;
+    exit_force_description?: string;
+  };
+  execution_params?: {
+    position_pct?: number;
+    probation_trades?: number;
+    cooldown_minutes?: number;
+  };
+  family?: string;
+  mechanism_type?: string;
   explanation?: string;
   rule_str?: string;
   discovered_at: string;
   rejection_reason?: string;
+  approved_by?: string;
 }
 
 export interface AlertEntry {
@@ -177,6 +241,35 @@ function writeJSON(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
 }
 
+function toPositiveInt(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function getHiddenExchangeTradeSets() {
+  const data = readJSON<HiddenExchangeTradeFile>(P.exchangeTradeHidden) ?? {};
+  const hiddenTradeIds = new Set<number>();
+  const hiddenOrderIds = new Set<number>();
+
+  for (const rawTradeId of data.hidden_trade_ids ?? []) {
+    const tradeId = toPositiveInt(rawTradeId);
+    if (tradeId !== null) hiddenTradeIds.add(tradeId);
+  }
+  for (const rawOrderId of data.hidden_order_ids ?? []) {
+    const orderId = toPositiveInt(rawOrderId);
+    if (orderId !== null) hiddenOrderIds.add(orderId);
+  }
+
+  return { hiddenTradeIds, hiddenOrderIds };
+}
+
+function isHiddenExchangeFill(
+  fill: Pick<ExchangeFill, "exchange_trade_id" | "order_id">,
+  hidden = getHiddenExchangeTradeSets(),
+): boolean {
+  return hidden.hiddenTradeIds.has(fill.exchange_trade_id) || hidden.hiddenOrderIds.has(fill.order_id);
+}
+
 // 闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸?System State 闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑?
 export function getSystemState(): SystemState | null {
   return readJSON<SystemState>(P.systemState);
@@ -212,11 +305,21 @@ function parseHorizonMinFromFamily(family: string | undefined): number {
 
 function buildLiveOpenTrades(state: SystemState | null): TradeRow[] {
   if (!state?.positions?.length) return [];
+  const currentPrice = state.price ?? 0;
   return state.positions.map((p, i) => {
     const entryAt = parseTradeTimestamp(p.entry_time) ?? new Date(state.timestamp);
     const direction = (p.direction ?? "").toUpperCase() === "LONG" ? "LONG" : "SHORT";
     const strategyId = p.family || p.signal_name || `LIVE-${i + 1}`;
     const tradeId = `LIVE-${p.signal_name || i + 1}-${entryAt.getTime()}`;
+
+    // Live unrealized PnL from system_state positions
+    const pnlPct = Number.isFinite(p.unrealized_pnl_pct) ? p.unrealized_pnl_pct! : null;
+    const entryPriceN = Number(p.entry_price) || 0;
+    const qtyN = Number(p.qty) || 0;
+    const pnlUsd = pnlPct !== null && entryPriceN > 0 && qtyN > 0
+      ? ((pnlPct / 100) * entryPriceN * qtyN).toFixed(4)
+      : null;
+
     return {
       tradeId,
       strategyId,
@@ -226,21 +329,157 @@ function buildLiveOpenTrades(state: SystemState | null): TradeRow[] {
       entryAt,
       exitAt: null,
       entryPrice: String(p.entry_price ?? 0),
-      exitPrice: null,
+      exitPrice: currentPrice > 0 ? String(currentPrice) : null,
       quantity: String(p.qty ?? 0),
       leverage: 10,
-      pnl: null,
-      pnlPercent: null,
+      pnl: pnlUsd,
+      pnlPercent: pnlPct !== null ? String(pnlPct) : null,
       grossReturn: null,
       exitReason: null,
       confidence: Number.isFinite(p.confidence) ? Number(p.confidence) : 0,
       horizonMin: parseHorizonMinFromFamily(p.family),
-      mfe: null,
-      mae: null,
+      mfe: p.mfe_pct != null ? String(p.mfe_pct) : null,
+      mae: p.mae_pct != null ? String(p.mae_pct) : null,
       fee: null,
     };
   });
 }
+
+// ---- Exchange trade sync helpers ----------------------------------------
+
+export function getExchangeTradesRaw(): ExchangeFill[] {
+  const data = readJSON<ExchangeTradeFile>(P.exchangeTrades);
+  const hidden = getHiddenExchangeTradeSets();
+  return (data?.trades ?? []).filter((fill) => !isHiddenExchangeFill(fill, hidden));
+}
+
+export function hideExchangeOrders(orderIds: number[]): {
+  hiddenOrderIds: number[];
+  removedFills: number;
+  remainingFills: number;
+} {
+  const normalizedOrderIds = Array.from(new Set(
+    orderIds
+      .map((orderId) => toPositiveInt(orderId))
+      .filter((orderId): orderId is number => orderId !== null),
+  ));
+  if (normalizedOrderIds.length === 0) {
+    return { hiddenOrderIds: [], removedFills: 0, remainingFills: getExchangeTradesRaw().length };
+  }
+
+  const hiddenData = readJSON<HiddenExchangeTradeFile>(P.exchangeTradeHidden) ?? {};
+  const hiddenTradeIds = new Set<number>((hiddenData.hidden_trade_ids ?? []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0));
+  const hiddenOrderIds = new Set<number>((hiddenData.hidden_order_ids ?? []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0));
+  normalizedOrderIds.forEach((orderId) => hiddenOrderIds.add(orderId));
+
+  writeJSON(P.exchangeTradeHidden, {
+    updated_at: new Date().toISOString(),
+    hidden_trade_ids: Array.from(hiddenTradeIds).sort((a, b) => a - b),
+    hidden_order_ids: Array.from(hiddenOrderIds).sort((a, b) => a - b),
+  });
+
+  const exchangeData = readJSON<ExchangeTradeFile>(P.exchangeTrades);
+  if (!exchangeData) {
+    return { hiddenOrderIds: normalizedOrderIds, removedFills: 0, remainingFills: 0 };
+  }
+
+  const before = exchangeData.trades.length;
+  exchangeData.trades = exchangeData.trades.filter((fill) => !hiddenOrderIds.has(fill.order_id) && !hiddenTradeIds.has(fill.exchange_trade_id));
+  exchangeData.trade_count = exchangeData.trades.length;
+  writeJSON(P.exchangeTrades, exchangeData);
+
+  return {
+    hiddenOrderIds: normalizedOrderIds,
+    removedFills: before - exchangeData.trades.length,
+    remainingFills: exchangeData.trades.length,
+  };
+}
+
+/**
+ * Return exchange fills NOT already represented in CSV rows.
+ * Groups fills by orderId, deduplicates against CSV by direction+price+time.
+ */
+function getExchangeOnlyTrades(csvRows: TradeRow[]): TradeRow[] {
+  const fills = getExchangeTradesRaw();
+  if (fills.length === 0) return [];
+
+  // Group fills by orderId
+  const byOrder = new Map<number, ExchangeFill[]>();
+  for (const f of fills) {
+    const arr = byOrder.get(f.order_id) ?? [];
+    arr.push(f);
+    byOrder.set(f.order_id, arr);
+  }
+
+  // Build CSV fingerprint set for dedup (direction|price_bucket|time_bucket)
+  const csvFingerprints = new Set<string>();
+  for (const row of csvRows) {
+    if (!row.entryAt) continue;
+    const bucket = Math.floor(row.entryAt.getTime() / 300_000);
+    const priceKey = Math.round(parseFloat(row.entryPrice) * 10);
+    csvFingerprints.add(`${row.direction}|${priceKey}|${bucket}`);
+  }
+
+  const extra: TradeRow[] = [];
+  for (const [orderId, orderFills] of Array.from(byOrder.entries())) {
+    let totalQty = 0;
+    let totalQuoteQty = 0;
+    let totalCommission = 0;
+    let totalRealizedPnl = 0;
+    let latestTime = 0;
+    const firstFill = orderFills[0];
+
+    for (const f of orderFills) {
+      totalQty += parseFloat(f.qty) || 0;
+      totalQuoteQty += parseFloat(f.quote_qty) || 0;
+      totalCommission += parseFloat(f.commission) || 0;
+      totalRealizedPnl += parseFloat(f.realized_pnl) || 0;
+      if (f.time > latestTime) latestTime = f.time;
+    }
+
+    const avgPrice = totalQty > 0 ? totalQuoteQty / totalQty : 0;
+    const direction: "LONG" | "SHORT" = firstFill.side === "BUY" ? "LONG" : "SHORT";
+    const fillDate = new Date(latestTime);
+
+    // 出场单（realized_pnl != 0）已被 CSV 捕获为完整交易记录，跳过避免双重计数
+    // 入场单（realized_pnl == 0）才需要检查是否在 CSV 中有对应记录
+    if (Math.abs(totalRealizedPnl) > 0.001) continue;
+
+    // Check if this order matches any CSV row (price + time proximity)
+    const bucket = Math.floor(latestTime / 300_000);
+    const priceKey = Math.round(avgPrice * 10);
+    const matched = csvFingerprints.has(`${direction}|${priceKey}|${bucket}`)
+      || csvFingerprints.has(`${direction}|${priceKey}|${bucket - 1}`)
+      || csvFingerprints.has(`${direction}|${priceKey}|${bucket + 1}`);
+    if (matched) continue;
+
+    extra.push({
+      tradeId: `EX-${orderId}`,
+      strategyId: "MANUAL",
+      symbol: firstFill.symbol || "BTCUSDT",
+      direction,
+      status: "closed",
+      entryAt: fillDate,
+      exitAt: fillDate,
+      entryPrice: avgPrice.toFixed(2),
+      exitPrice: avgPrice.toFixed(2),
+      quantity: totalQty.toFixed(6),
+      leverage: 10,
+      pnl: totalRealizedPnl.toFixed(4),
+      pnlPercent: null,
+      grossReturn: null,
+      exitReason: "exchange",
+      confidence: 0,
+      horizonMin: 0,
+      mfe: null,
+      mae: null,
+      fee: totalCommission > 0 ? totalCommission.toFixed(6) : null,
+      source: "exchange",
+    });
+  }
+  return extra;
+}
+
 // 闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸?Trades 闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸嬫捇鏌嶉崗澶婁壕闂佸啿鍘滈崑鎾绘煃閸忓浜鹃梺鍐插帨閸?
 export function getTrades(opts: {
   limit?: number;
@@ -306,12 +545,17 @@ export function getTrades(opts: {
     const liveOpenTrades = buildLiveOpenTrades(getSystemState());
     const closedOrCancelled = rows.filter(r => r.status !== "open");
 
+    // Merge exchange fills that are NOT already in CSV
+    const exchangeOnly = getExchangeOnlyTrades(closedOrCancelled);
+
     // Apply filters
     let result = rows;
     if (opts.status === "open") {
       result = liveOpenTrades;
     } else if (!opts.status) {
-      result = [...liveOpenTrades, ...closedOrCancelled];
+      result = [...liveOpenTrades, ...closedOrCancelled, ...exchangeOnly];
+    } else if (opts.status === "closed") {
+      result = [...closedOrCancelled, ...exchangeOnly];
     }
     const symbol = opts.symbol?.toUpperCase();
     const direction = opts.direction?.toUpperCase();
@@ -419,6 +663,29 @@ export function getPendingRules(statusFilter?: string): PendingRule[] {
 
 export function getApprovedRules(): unknown[] {
   return readJSON<unknown[]>(P.approvedRules) ?? [];
+}
+
+/** 读取 exit_policy_best_params.json，返回 family|direction -> {stop_pct} 映射 */
+export function getBestExitParams(): Record<string, { stop_pct?: number }> {
+  return readJSON<Record<string, { stop_pct?: number }>>(P.exitBestParams) ?? {};
+}
+
+/** 返回 approved_rules.json 中所有 v2 引擎自动发现的卡片 (有 discovery_mode 字段的)
+ *  包括 MidFreq (A6), HighFreq (A7), Cascade (H-FLOW/H-VACUUM).
+ *  v2 卡片直接写入 approved_rules.json，不经过 pending_rules.json 流程.
+ */
+export function getApprovedV2Rules(): PendingRule[] {
+  const all = readJSON<PendingRule[]>(P.approvedRules) ?? [];
+  return all.filter(r => r.discovery_mode && r.discovery_mode !== "");
+}
+
+/** 合并 pending_rules.json + approved_rules.json 中 v2 卡片，统一暴露给 getCandidates API */
+export function getAllCandidates(statusFilter?: string): PendingRule[] {
+  const pending = readJSON<PendingRule[]>(P.pendingRules) ?? [];
+  const v2approved = getApprovedV2Rules();
+  const all = [...pending, ...v2approved];
+  if (!statusFilter) return all;
+  return all.filter(r => r.status === statusFilter);
 }
 
 export function approveRule(candidateId: string): boolean {

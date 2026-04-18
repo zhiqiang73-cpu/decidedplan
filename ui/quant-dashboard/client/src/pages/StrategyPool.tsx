@@ -35,6 +35,9 @@ type StrategyRow = {
   oosSampleSize?: number;
   mechanismType?: string | null;
   backtestStatus?: string | null;
+  stopPct?: number | null;
+  stopSource?: "optimized" | "default" | null;
+  horizon?: number | null;
 };
 
 type WinRateItem = {
@@ -311,6 +314,18 @@ export default function StrategyPool() {
                                   <DetailRow label={"未成交"} value={String(strategy.notFilled ?? 0)} />
                                   <DetailRow label={"OOS 样本"} value={String(strategy.oosSampleSize ?? 0)} />
                                   <DetailRow label={"机制标签"} value={strategy.mechanismType || "--"} />
+                                  <DetailRow
+                                    label={"止损"}
+                                    value={
+                                      strategy.stopPct != null
+                                        ? `${strategy.stopPct}%${strategy.stopSource === "optimized" ? " (优化)" : " (默认)"}`
+                                        : "--"
+                                    }
+                                  />
+                                  <DetailRow
+                                    label={"持仓窗口"}
+                                    value={strategy.horizon != null ? `${strategy.horizon} bar` : "--"}
+                                  />
                                 </div>
                               </DetailCard>
                             </div>

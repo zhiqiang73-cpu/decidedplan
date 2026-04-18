@@ -372,12 +372,14 @@ class OrderManager:
         qty: float,
         stop_price: float,
     ) -> dict[str, Any]:
-        """在交易所挂 STOP_MARKET 止损单（防宕机灾难保护）。
+        """在交易所挂止损单（防宕机灾难保护）。
 
         作为进场成功后的次级防护，失败不影响主仓位。
         reduceOnly=true 确保只减仓，不反向开仓。
+
+        两级降级: STOP_MARKET -> STOP(limit)
+        币安 testnet 可能不支持 STOP_MARKET（返回 -4120），自动降级。
         """
-        # 止损方向与仓位方向相反
         side = self._close_side(direction)
         norm_qty = self._quantize_up_to_step(
             Decimal(str(qty)), self.filters.step_size
@@ -385,32 +387,81 @@ class OrderManager:
         if norm_qty < self.filters.min_qty:
             norm_qty = self.filters.min_qty
         norm_stop = self._normalize_price(stop_price)
+        qty_str = self._decimal_to_str(norm_qty)
+        stop_str = self._decimal_to_str(norm_stop)
 
-        params = {
-            "symbol": self.symbol,
-            "side": side,
-            "type": "STOP_MARKET",
-            "quantity": self._decimal_to_str(norm_qty),
-            "stopPrice": self._decimal_to_str(norm_stop),
-            "reduceOnly": "true",
-            "newOrderRespType": "ACK",
-        }
+        # 方案 A: STOP_MARKET + MARK_PRICE
+        approaches = [
+            {
+                "label": "STOP_MARKET",
+                "params": {
+                    "symbol": self.symbol,
+                    "side": side,
+                    "type": "STOP_MARKET",
+                    "quantity": qty_str,
+                    "stopPrice": stop_str,
+                    "reduceOnly": "true",
+                    "workingType": "MARK_PRICE",
+                    "newOrderRespType": "ACK",
+                },
+            },
+            # 方案 B: STOP (limit at stop price)
+            {
+                "label": "STOP_LIMIT",
+                "params": {
+                    "symbol": self.symbol,
+                    "side": side,
+                    "type": "STOP",
+                    "quantity": qty_str,
+                    "price": stop_str,
+                    "stopPrice": stop_str,
+                    "reduceOnly": "true",
+                    "workingType": "MARK_PRICE",
+                    "timeInForce": "GTC",
+                    "newOrderRespType": "ACK",
+                },
+            },
+        ]
 
-        try:
-            data = self._request_json(
-                "POST", "/fapi/v1/order", params=params, signed=True
-            )
-        except OrderManagerError as exc:
-            logger.warning("[EXEC] place_stop_market failed %s: %s", direction, exc)
-            return {"status": "rejected", "reason": str(exc)}
+        for approach in approaches:
+            try:
+                data = self._request_json(
+                    "POST", "/fapi/v1/order",
+                    params=approach["params"], signed=True,
+                )
+                logger.info(
+                    "[EXEC] exchange stop placed via %s: orderId=%s stop=%.2f",
+                    approach["label"],
+                    data.get("orderId", "?"),
+                    float(norm_stop),
+                )
+                return {
+                    "status": "placed",
+                    "order_id": str(data.get("orderId", "")),
+                    "stop_price": float(norm_stop),
+                    "qty": float(norm_qty),
+                    "approach": approach["label"],
+                    "raw": data,
+                }
+            except OrderManagerError as exc:
+                err_str = str(exc)
+                if "-4120" in err_str or "not supported" in err_str.lower():
+                    logger.info(
+                        "[EXEC] %s not supported, trying next approach",
+                        approach["label"],
+                    )
+                    continue
+                logger.warning(
+                    "[EXEC] place_stop_market failed %s via %s: %s",
+                    direction, approach["label"], exc,
+                )
+                continue  # 继续尝试下一个降级方案
 
-        return {
-            "status": "placed",
-            "order_id": str(data.get("orderId", "")),
-            "stop_price": float(norm_stop),
-            "qty": float(norm_qty),
-            "raw": data,
-        }
+        logger.warning(
+            "[EXEC] all stop order approaches failed for %s, no exchange-side protection",
+            direction,
+        )
+        return {"status": "rejected", "reason": "all_stop_approaches_exhausted"}
 
     def get_book_ticker(self) -> dict[str, float]:
         data = self._request_json(
